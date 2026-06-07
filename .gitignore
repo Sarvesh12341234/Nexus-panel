@@ -1,0 +1,13 @@
+node_modules/
+data/
+.env
+backups/
+backupfolder/
+servers/
+tunnels/
+software/
+dist-release/
+*.log
+.claude-agent-shadow/
+smoke-cookies.txt
+ui-cookies.txt

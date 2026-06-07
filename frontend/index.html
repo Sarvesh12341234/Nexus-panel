@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Cache-Control" content="no-store">
+    <title>NexusPanel</title>
+    <link rel="stylesheet" href="/css/main.css">
+  </head>
+  <body>
+    <div class="backplate" aria-hidden="true"></div>
+
+    <section class="login-screen" id="authView" hidden>
+      <form class="auth-card" id="loginForm">
+        <div class="brand compact">
+          <span class="brand-mark">N</span>
+          <div>
+            <p class="eyebrow">NexusPanel</p>
+            <h1>Control Panel Login</h1>
+          </div>
+        </div>
+        <p class="auth-note" id="setupNotice" hidden>Owner setup is done in the terminal before this web panel starts.</p>
+        <label>
+          Email
+          <input name="email" type="email" autocomplete="email" required>
+        </label>
+        <label>
+          Password
+          <input name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button type="submit">Login</button>
+      </form>
+    </section>
+
+    <main class="panel-shell" id="dashboardView" hidden>
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">N</span>
+          <div>
+            <p class="eyebrow">NexusPanel</p>
+            <h1>Panel</h1>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="Panel sections">
+          <button class="nav-item is-active" type="button" data-view="dashboard">Dashboard</button>
+          <button class="nav-item" type="button" data-view="servers">Servers</button>
+          <button class="nav-item" type="button" data-view="console">Console</button>
+          <button class="nav-item" type="button" data-view="files">File Manager</button>
+          <button class="nav-item" type="button" data-view="templates">Templates</button>
+          <button class="nav-item" type="button" data-view="software">Software</button>
+          <button class="nav-item" type="button" data-view="properties">Server Properties</button>
+          <button class="nav-item" type="button" data-view="whitelist">Whitelist</button>
+          <button class="nav-item" type="button" data-view="plugins">Plugins</button>
+          <button class="nav-item" type="button" data-view="backups">Backups</button>
+          <button class="nav-item" type="button" data-view="optimizer">Optimizer</button>
+          <button class="nav-item" type="button" data-view="admins">Admins</button>
+          <button class="nav-item" type="button" data-view="security">Security</button>
+          <button class="nav-item" type="button" data-view="settings">Settings</button>
+          <button class="nav-item" type="button" data-view="terminal" id="terminalNav" hidden>Terminal</button>
+        </nav>
+
+        <div class="server-switcher">
+          <p class="eyebrow">Servers</p>
+          <div class="server-list" id="serverList"></div>
+          <label class="compact-select">
+            Quick switch
+            <select id="activeServerSelect"></select>
+          </label>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="viewEyebrow">Dashboard</p>
+            <h2 id="viewTitle">Servers</h2>
+          </div>
+          <div class="topbar-actions">
+            <label class="theme-picker">Theme <select id="themeSelect"></select></label>
+            <div class="account" id="accountBox"></div>
+          </div>
+        </header>
+
+        <section class="quick-stats" aria-label="Panel status">
+          <article><span>Servers</span><strong id="serverCount">0</strong></article>
+          <article><span>Online</span><strong id="onlineCount">0</strong></article>
+          <article><span>Software</span><strong id="softwareCount">0</strong></article>
+          <article><span>Mode</span><strong id="accessLabel">View</strong></article>
+        </section>
+
+        <section class="view-section" id="view-dashboard">
+          <div class="promise-strip">
+            <article><strong>Direct Processes</strong><span>No Docker layer, built for low RAM hosts.</span></article>
+            <article><strong>Bedrock First</strong><span>Packs, PocketMine, templates, and UDP-friendly options.</span></article>
+            <article><strong>Smart Paths</strong><span>Server files and plugins stay in safe folders.</span></article>
+          </div>
+
+          <form class="server-create surface" id="serverForm">
+            <div class="field-grid">
+              <label>Server name <input name="name" placeholder="Survival Bedrock" required></label>
+              <label>Edition <select name="type"><option value="bedrock">Bedrock</option><option value="java">Java</option></select></label>
+              <label>Software <select name="softwareKey" id="softwareSelect"></select></label>
+              <label>Version <select name="softwareVersion" id="softwareVersionSelect"><option value="latest">Latest</option></select></label>
+              <label>Port <input name="port" type="number" min="1024" max="65535" value="19132"></label>
+              <label>Memory MB <input name="maxMemoryMb" type="number" min="256" max="65536" step="256" value="1024"></label>
+            </div>
+            <div class="option-grid compact-options">
+              <label class="switch"><input name="autoRestart" type="checkbox" checked><span></span>Auto restart</label>
+              <label class="switch"><input name="autoStart" type="checkbox"><span></span>Auto start</label>
+              <label class="switch"><input name="crashBackup" type="checkbox" checked><span></span>Crash backup</label>
+              <label class="switch"><input name="wakeOnJoin" type="checkbox"><span></span>Wake on join</label>
+            </div>
+            <button type="submit">Create server</button>
+          </form>
+
+          <div class="server-grid" id="serverGrid"></div>
+        </section>
+
+        <section class="view-section" id="view-servers" hidden>
+          <div class="surface tool-surface">
+            <div class="section-head"><div><p class="eyebrow">Servers</p><h2>Specific servers</h2></div></div>
+            <div class="server-grid" id="serverRowsGrid"></div>
+          </div>
+        </section>
+
+        <section class="view-section" id="view-templates" hidden>
+          <div class="surface tool-surface">
+            <div class="section-head"><div><p class="eyebrow">Templates</p><h2>One-click server blueprints</h2></div></div>
+            <div class="template-grid" id="templateGrid"></div>
+          </div>
+        </section>
+
+        <section class="view-section" id="view-console" hidden>
+          <div class="surface tool-surface">
+            <div class="console-metrics" id="consoleMetrics"></div>
+            <form class="server-config-form" id="serverConfigForm">
+              <label>Server name <input name="name"></label>
+              <label>RAM MB <input name="maxMemoryMb" type="number" min="256" max="65536" step="256"></label>
+              <label>Port <input name="port" type="number" min="1024" max="65535"></label>
+              <button type="submit">Save Server Settings</button>
+            </form>
+            <div class="server-actions">
+              <button type="button" data-action="start-server">Start</button>
+              <button class="secondary" type="button" data-action="stop-server">Stop</button>
+              <button class="secondary" type="button" data-action="restart-server">Restart</button>
+              <button class="danger" type="button" data-action="kill-server">Kill</button>
+            </div>
+            <div class="console-box" id="consoleBox"></div>
+            <form class="command-row" id="commandForm">
+              <input name="command" placeholder="/op @a or say Hello from NexusPanel">
+              <button type="submit">Send</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="view-section" id="view-files" hidden>
+          <div class="surface tool-surface">
+            <div class="section-head"><div><p class="eyebrow">Files</p><h2>Server file manager</h2></div></div>
+            <div class="file-toolbar">
+              <button class="secondary" type="button" data-action="file-up">Up</button>
+              <button class="secondary" type="button" data-action="file-select-all">Select All</button>
+              <button class="secondary" type="button" data-action="file-clear-selection">Clear</button>
+              <button class="secondary" type="button" data-action="file-upload">Upload</button>
+              <button class="secondary" type="button" data-action="file-download-selected">Download</button>
+              <button class="secondary" type="button" data-action="file-copy-selected">Copy</button>
+              <button class="secondary" type="button" data-action="file-cut-selected">Cut</button>
+              <button class="secondary" type="button" data-action="file-paste">Paste</button>
+              <button class="secondary" type="button" data-action="file-new">New File</button>
+              <button class="secondary" type="button" data-action="folder-new">New Folder</button>
+              <button class="secondary" type="button" data-action="file-scroll-top">Top</button>
+              <button class="secondary" type="button" data-action="file-scroll-bottom">Bottom</button>
+              <button class="secondary" type="button" data-action="file-unzip">Unzip Selected</button>
+              <button class="secondary" type="button" data-action="file-archive">Archive Selected</button>
+              <button class="danger" type="button" data-action="file-delete-selected">Delete Selected</button>
+              <input id="fileUploadInput" type="file" multiple hidden>
+              <code id="filePathLabel">/</code>
+            </div>
+            <div class="upload-panel" id="uploadPanel" hidden>
+              <span id="uploadLabel">Ready</span>
+              <div class="install-track"><span id="uploadProgress" style="width:0%"></span></div>
+              <small>Uploads are chunked. If the page refreshes, reselect the same file and it resumes from the saved partial upload.</small>
+              <div class="upload-actions">
+                <button class="secondary" type="button" data-action="upload-pause">Pause Current</button>
+                <button class="danger" type="button" data-action="upload-cancel-current">Cancel Current</button>
+              </div>
+              <div class="upload-session-list" id="uploadSessionList"></div>
+            </div>
+            <div class="file-list" id="fileList"></div>
+            <form class="file-editor" id="fileEditor" hidden>
+              <label>Editing <input name="path" readonly></label>
+              <textarea name="content" spellcheck="false"></textarea>
+              <div class="server-actions">
+                <button type="submit">Save file</button>
+                <button class="danger" type="button" data-action="file-delete">Delete</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section class="view-section" id="view-software" hidden>
+          <div class="software-grid" id="softwareGrid"></div>
+        </section>
+
+        <section class="view-section" id="view-properties" hidden>
+          <form class="surface property-form" id="propertyForm"></form>
+        </section>
+
+        <section class="view-section" id="view-whitelist" hidden>
+          <form class="surface whitelist-form" id="whitelistForm">
+            <label>Player name <input name="name" placeholder="Steve" required></label>
+            <button type="submit">Add whitelist</button>
+          </form>
+          <div class="plugin-list" id="whitelistList"></div>
+        </section>
+
+        <section class="view-section" id="view-plugins" hidden>
+          <form class="modrinth-form surface" id="modrinthForm">
+            <label>Search Modrinth <input name="query" placeholder="LuckPerms, Geyser, ViaVersion"></label>
+            <button type="submit">Search</button>
+          </form>
+          <div class="modrinth-grid" id="modrinthGrid"></div>
+          <p class="plugin-note" id="pluginAccessNote" hidden>Plugin manager needs file access level 80 or owner access.</p>
+          <div class="plugin-list" id="pluginList"></div>
+        </section>
+
+        <section class="view-section" id="view-backups" hidden>
+          <div class="surface tool-surface" id="backupPanel"></div>
+        </section>
+
+        <section class="view-section" id="view-optimizer" hidden>
+          <div class="optimizer-summary" id="optimizerSummary"></div>
+          <div id="tweakGrid" hidden></div>
+          <div id="techniqueGrid" hidden></div>
+          <pre id="optimizerPlan" hidden></pre>
+        </section>
+
+        <section class="view-section" id="view-admins" hidden>
+          <section class="admin-panel surface" id="adminPanel" hidden>
+            <form class="admin-form" id="adminForm">
+              <input name="name" placeholder="Admin name" required>
+              <input name="email" type="email" placeholder="Admin email" required>
+              <input name="password" type="password" placeholder="Password" minlength="8" required>
+              <label class="range-label">Access <input name="accessLevel" type="range" min="0" max="100" step="20" value="40"><output id="accessOutput">40</output></label>
+              <button type="submit">Create admin</button>
+            </form>
+            <div class="user-list" id="userList"></div>
+          </section>
+        </section>
+
+        <section class="view-section" id="view-security" hidden>
+          <div class="surface tool-surface" id="healthPanel"></div>
+          <div class="surface tool-surface" id="auditPanel"></div>
+        </section>
+
+        <section class="view-section" id="view-settings" hidden>
+          <div class="surface tool-surface" id="settingsPanel"></div>
+        </section>
+
+        <section class="view-section" id="view-terminal" hidden>
+          <div class="surface tool-surface" id="terminalPanel"></div>
+        </section>
+      </section>
+
+      <p class="toast" id="toast" hidden></p>
+    </main>
+
+    <script src="/js/main.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NexusPanel - Login</title>
+    <link rel="stylesheet" href="/css/login.css">
+  </head>
+  <body>
+    <div class="backplate" aria-hidden="true"></div>
+
+    <section class="login-screen">
+      <form class="auth-card" id="loginForm">
+        <div class="brand compact">
+          <span class="brand-mark">N</span>
+          <div>
+            <p class="eyebrow">NexusPanel</p>
+            <h1>Control Panel</h1>
+          </div>
+        </div>
+
+        <p class="auth-note" id="setupNotice" hidden>
+          <strong>First Run:</strong> Owner setup is done in the terminal. Close this panel and run it again.
+        </p>
+
+        <div class="form-group">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" placeholder="admin@example.com" required>
+        </div>
+
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required>
+        </div>
+
+        <button type="submit" class="btn-primary">Login</button>
+
+        <p class="error-message" id="errorMsg" hidden></p>
+      </form>
+    </section>
+
+    <script src="/js/login.js" defer></script>
+  </body>
+</html>
