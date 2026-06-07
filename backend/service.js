@@ -45,6 +45,8 @@ Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
 Environment=NEXUSPANEL_SERVICE=1
+Environment=NEXUSPANEL_X_ACCEL_ROOT=
+Environment=NEXUSPANEL_X_ACCEL_PREFIX=
 ${user === 'root' ? '' : `User=${user}\n`}
 
 [Install]

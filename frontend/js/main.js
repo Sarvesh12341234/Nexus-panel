@@ -85,7 +85,8 @@ let consoleStickToBottom = true;
 let consoleRenderToken = 0;
 const versionCache = new Map();
 let lastCreateSoftwareKey = '';
-const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
+const UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024;
+const UPLOAD_PARALLELISM = 4;
 const themes = [
   { key: 'nexus', name: 'Plain · Nexus Mint', mode: 'plain' },
   { key: 'ember', name: 'Plain · Ember Arena', mode: 'plain' },
@@ -289,10 +290,24 @@ function childPath(name) {
   return [filePath, name].filter(Boolean).join('/');
 }
 
-function uploadChunk(server, chunk, destinationPath, offset, totalSize, onProgress) {
+async function digestHex(blob) {
+  if (!window.crypto?.subtle) return '';
+  const bytes = blob instanceof Blob ? await blob.arrayBuffer() : blob;
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(hash)].map((item) => item.toString(16).padStart(2, '0')).join('');
+}
+
+function uploadChunk(server, chunk, destinationPath, offset, totalSize, fileSha256, chunkSha256, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/servers/${server.id}/files/upload-chunk?path=${encodeURIComponent(destinationPath)}&offset=${offset}&size=${totalSize}`);
+    const params = new URLSearchParams({
+      path: destinationPath,
+      offset: String(offset),
+      size: String(totalSize),
+      fileSha256,
+      chunkSha256,
+    });
+    xhr.open('POST', `/api/servers/${server.id}/files/upload-chunk?${params}`);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(event.loaded);
@@ -309,14 +324,32 @@ function uploadChunk(server, chunk, destinationPath, offset, totalSize, onProgre
 }
 
 async function uploadFile(server, file, destinationPath, onProgress) {
-  const status = await api(`/api/servers/${server.id}/files/upload-status?path=${encodeURIComponent(destinationPath)}&size=${file.size}`);
+  onProgress(0, 'hashing');
+  const fileSha256 = await digestHex(file);
+  const status = await api(`/api/servers/${server.id}/files/upload-status?path=${encodeURIComponent(destinationPath)}&size=${file.size}&sha256=${fileSha256}`);
   if (status.complete) {
     onProgress(100, 'already uploaded');
     return;
   }
-  let offset = Math.min(Number(status.uploadedBytes || 0), file.size);
-  if (offset > 0) onProgress(Math.round((offset / file.size) * 100), 'resuming');
-  while (offset < file.size) {
+  const chunks = [];
+  for (let offset = 0; offset < file.size; offset += UPLOAD_CHUNK_SIZE) {
+    chunks.push({ offset, end: Math.min(offset + UPLOAD_CHUNK_SIZE, file.size), uploaded: false, loaded: 0 });
+  }
+  const uploadedBytes = Math.min(Number(status.uploadedBytes || 0), file.size);
+  for (const chunk of chunks) {
+    if (chunk.end <= uploadedBytes) {
+      chunk.uploaded = true;
+      chunk.loaded = chunk.end - chunk.offset;
+    }
+  }
+  const updateProgress = (phase = 'uploading') => {
+    const loaded = chunks.reduce((sum, chunk) => sum + (chunk.uploaded ? chunk.end - chunk.offset : chunk.loaded), 0);
+    onProgress(Math.min(100, Math.round((loaded / file.size) * 100)), phase);
+  };
+  if (uploadedBytes > 0) updateProgress('resuming');
+
+  let cursor = 0;
+  async function worker() {
     if (currentUpload.canceled) throw new Error('Upload canceled.');
     if (currentUpload.paused) {
       await api(`/api/servers/${server.id}/files/upload-pause`, {
@@ -325,26 +358,44 @@ async function uploadFile(server, file, destinationPath, onProgress) {
       });
       throw new Error('Upload paused. Reselect the same file to resume.');
     }
-    const chunk = file.slice(offset, Math.min(offset + UPLOAD_CHUNK_SIZE, file.size));
-    let lastLoaded = 0;
-    let result;
-    for (let attempt = 1; attempt <= 4; attempt += 1) {
-      try {
-        result = await uploadChunk(server, chunk, destinationPath, offset, file.size, (loaded) => {
-          lastLoaded = loaded;
-          onProgress(Math.round(((offset + loaded) / file.size) * 100), attempt > 1 ? `retry ${attempt}` : 'uploading');
-        });
-        break;
-      } catch (error) {
-        if (attempt === 4) throw error;
-        onProgress(Math.round((offset / file.size) * 100), `retrying ${attempt}`);
-        await new Promise((resolve) => setTimeout(resolve, 700 * attempt));
+    while (cursor < chunks.length) {
+      const index = cursor;
+      cursor += 1;
+      const meta = chunks[index];
+      if (meta.uploaded) continue;
+      const blob = file.slice(meta.offset, meta.end);
+      const chunkSha256 = await digestHex(blob);
+      let result;
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        try {
+          result = await uploadChunk(server, blob, destinationPath, meta.offset, file.size, fileSha256, chunkSha256, (loaded) => {
+            meta.loaded = loaded;
+            updateProgress(attempt > 1 ? `retry ${attempt}` : 'uploading');
+          });
+          break;
+        } catch (error) {
+          meta.loaded = 0;
+          updateProgress(`retrying ${attempt}`);
+          if (attempt === 4) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 700 * attempt));
+        }
       }
+      meta.uploaded = true;
+      meta.loaded = meta.end - meta.offset;
+      if (result?.complete && result.sha256 && result.sha256 !== fileSha256) throw new Error('Final checksum mismatch after upload.');
+      updateProgress(result?.complete ? 'verifying' : 'uploading');
+      await renderUploadSessions();
     }
-    offset = Number(result.uploadedBytes || (offset + lastLoaded || offset + chunk.size));
-    onProgress(Math.round((offset / file.size) * 100), result.complete ? 'complete' : 'uploading');
-    await renderUploadSessions();
   }
+
+  await Promise.all(Array.from({ length: Math.min(UPLOAD_PARALLELISM, chunks.length) }, () => worker()));
+  updateProgress('verifying');
+  const complete = await api(`/api/servers/${server.id}/files/upload-complete`, {
+    method: 'POST',
+    body: JSON.stringify({ path: destinationPath, size: file.size, sha256: fileSha256 }),
+  });
+  if (fileSha256 && complete.sha256 && complete.sha256 !== fileSha256) throw new Error('Final checksum mismatch after upload.');
+  updateProgress('complete');
 }
 
 async function uploadFiles(files) {
@@ -362,7 +413,11 @@ async function uploadFiles(files) {
     elements.uploadProgress.style.width = '0%';
     await uploadFile(server, file, destination, (progress, phase = 'uploading') => {
       elements.uploadProgress.style.width = `${progress}%`;
-      elements.uploadLabel.textContent = `${phase === 'resuming' ? 'Resuming' : 'Uploading'} ${file.name} ${progress}% (${index + 1}/${queue.length})`;
+      const label = phase === 'hashing' ? 'Hashing'
+        : phase === 'resuming' ? 'Resuming'
+          : phase === 'verifying' ? 'Verifying'
+            : 'Uploading';
+      elements.uploadLabel.textContent = `${label} ${file.name} ${progress}% (${index + 1}/${queue.length})`;
     });
   }
   elements.uploadLabel.textContent = `Uploaded ${queue.length} file(s).`;

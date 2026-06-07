@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -36,8 +37,8 @@ const healthPath = path.join(dataRoot, 'panel_health.json');
 
 app.set('trust proxy', true);
 
-app.use('/api/servers/:id/files/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '24mb' }));
-app.use('/api/servers/:id/files/upload', express.raw({ type: 'application/octet-stream', limit: '24mb' }));
+app.use('/api/servers/:id/files/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
+app.use('/api/servers/:id/files/upload', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(authMiddleware);
 app.use((req, res, next) => {
@@ -179,6 +180,20 @@ async function streamDownload(req, res, absolutePath, fileName) {
   const stats = await fs.promises.stat(absolutePath).catch(() => null);
   if (!stats || !stats.isFile()) return res.status(404).json({ error: 'Download file not found.' });
 
+  const accelPrefix = process.env.NEXUSPANEL_X_ACCEL_PREFIX;
+  const accelRoot = process.env.NEXUSPANEL_X_ACCEL_ROOT;
+  if (accelPrefix && accelRoot && !req.headers.range) {
+    const resolvedRoot = path.resolve(accelRoot);
+    const resolvedFile = path.resolve(absolutePath);
+    if (resolvedFile.startsWith(`${resolvedRoot}${path.sep}`) || resolvedFile === resolvedRoot) {
+      const relative = path.relative(resolvedRoot, resolvedFile).split(path.sep).map(encodeURIComponent).join('/');
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', contentDisposition(fileName));
+      res.setHeader('X-Accel-Redirect', `${accelPrefix.replace(/\/+$/, '')}/${relative}`);
+      return res.end();
+    }
+  }
+
   const size = stats.size;
   const rangeHeader = String(req.headers.range || '');
   res.setHeader('Accept-Ranges', 'bytes');
@@ -221,6 +236,21 @@ async function streamDownload(req, res, absolutePath, fileName) {
   res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
   res.setHeader('Content-Length', end - start + 1);
   return fs.createReadStream(absolutePath, { start, end, highWaterMark: 1024 * 1024 }).pipe(res);
+}
+
+function sha256Hex(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+async function fileSha256Hex(filePath) {
+  const hash = crypto.createHash('sha256');
+  await new Promise((resolve, reject) => {
+    fs.createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 })
+      .on('data', (chunk) => hash.update(chunk))
+      .on('error', reject)
+      .on('end', resolve);
+  });
+  return hash.digest('hex');
 }
 
 function serverPayload(server) {
@@ -1841,9 +1871,18 @@ app.get('/api/servers/:id/files/upload-status', requireAccess(permissions.MANAGE
   const partialPath = `${target.absolute}.uploading`;
   const partial = await fs.promises.stat(partialPath).catch(() => null);
   const complete = await fs.promises.stat(target.absolute).catch(() => null);
+  const expectedFileHash = String(req.query.sha256 || '').trim().toLowerCase();
   if (complete && totalSize && complete.size === totalSize) {
+    if (expectedFileHash) {
+      const actual = await fileSha256Hex(target.absolute);
+      if (actual !== expectedFileHash) {
+        await fs.promises.rm(target.absolute, { force: true }).catch(() => {});
+        upsertUploadSession(server.id, target.relative, totalSize, 0, 'failed', 'Checksum mismatch; retry upload');
+        return res.status(409).json({ error: 'Existing upload checksum mismatch. Retry the file.' });
+      }
+    }
     upsertUploadSession(server.id, target.relative, totalSize, complete.size, 'complete', 'Uploaded');
-    return res.json({ uploadedBytes: complete.size, complete: true });
+    return res.json({ uploadedBytes: complete.size, complete: true, sha256: expectedFileHash || '' });
   }
   const uploadedBytes = partial ? partial.size : 0;
   upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, uploadedBytes ? 'paused' : 'waiting', uploadedBytes ? 'Ready to resume' : 'Waiting for upload');
@@ -1857,8 +1896,14 @@ app.post('/api/servers/:id/files/upload-chunk', requireAccess(permissions.MANAGE
   if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Upload chunk body must be binary.' });
   const offset = Number(req.query.offset || 0);
   const totalSize = Number(req.query.size || 0);
+  const expectedChunkHash = String(req.query.chunkSha256 || '').trim().toLowerCase();
+  const expectedFileHash = String(req.query.fileSha256 || '').trim().toLowerCase();
   if (!Number.isSafeInteger(offset) || offset < 0) return res.status(400).json({ error: 'Invalid upload offset.' });
   if (!Number.isSafeInteger(totalSize) || totalSize < req.body.length) return res.status(400).json({ error: 'Invalid upload size.' });
+  if (offset + req.body.length > totalSize) return res.status(400).json({ error: 'Chunk exceeds declared upload size.' });
+  if (expectedChunkHash && sha256Hex(req.body) !== expectedChunkHash) {
+    return res.status(409).json({ error: 'Chunk checksum mismatch. Retrying this chunk is safe.' });
+  }
   await fs.promises.mkdir(path.dirname(target.absolute), { recursive: true });
   const partialPath = `${target.absolute}.uploading`;
   const existing = db.prepare('SELECT status FROM upload_sessions WHERE server_id = ? AND relative_path = ?').get(server.id, target.relative);
@@ -1870,15 +1915,43 @@ app.post('/api/servers/:id/files/upload-chunk', requireAccess(permissions.MANAGE
     await handle.close();
   }
   const uploadedBytes = offset + req.body.length;
-  if (uploadedBytes >= totalSize) {
+  if (uploadedBytes >= totalSize && req.query.finalize === '1') {
     const stats = await fs.promises.stat(partialPath);
     if (stats.size !== totalSize) return res.status(409).json({ error: 'Upload size mismatch. Retry the file.' });
+    const finalHash = await fileSha256Hex(partialPath);
+    if (expectedFileHash && finalHash !== expectedFileHash) {
+      upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'failed', 'Final checksum mismatch; retry upload');
+      return res.status(409).json({ error: 'Final file checksum mismatch. Retry the upload.' });
+    }
     await fs.promises.rename(partialPath, target.absolute);
-    upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'complete', 'Uploaded');
-    return res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true });
+    upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'complete', expectedFileHash ? `Uploaded sha256:${finalHash}` : 'Uploaded');
+    return res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true, sha256: finalHash });
   }
   upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, 'active', 'Uploading');
   res.json({ ok: true, path: target.relative, uploadedBytes, complete: false });
+}));
+
+app.post('/api/servers/:id/files/upload-complete', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const target = safeServerFile(server, req.body.path || '');
+  if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
+  const totalSize = Number(req.body.size || 0);
+  const expectedFileHash = String(req.body.sha256 || '').trim().toLowerCase();
+  const partialPath = `${target.absolute}.uploading`;
+  const stats = await fs.promises.stat(partialPath).catch(() => null);
+  if (!stats || !stats.isFile()) return res.status(404).json({ error: 'Upload session file was not found.' });
+  if (!Number.isSafeInteger(totalSize) || stats.size !== totalSize) {
+    upsertUploadSession(server.id, target.relative, totalSize || stats.size, stats.size, 'failed', 'Upload size mismatch');
+    return res.status(409).json({ error: 'Upload size mismatch. Retry missing chunks.' });
+  }
+  const finalHash = await fileSha256Hex(partialPath);
+  if (expectedFileHash && finalHash !== expectedFileHash) {
+    upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'failed', 'Final checksum mismatch; retry upload');
+    return res.status(409).json({ error: 'Final file checksum mismatch. Retry the upload.' });
+  }
+  await fs.promises.rename(partialPath, target.absolute);
+  upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'complete', expectedFileHash ? `Uploaded sha256:${finalHash}` : 'Uploaded');
+  res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true, sha256: finalHash });
 }));
 
 app.post('/api/servers/:id/files/upload-pause', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {

@@ -14,7 +14,7 @@ Open `http://localhost:3000`.
 Linux/Ubuntu one-command installer:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/v1.0/nexuspanel-v1.0-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/v1.1/nexuspanel-v1.1-linux-installer.sh | sudo bash
 ```
 
 ## VPS Background Service
@@ -63,6 +63,33 @@ bash update/update.sh
 ```
 
 Protected folders: `servers/`, `data/`, `backups/`, `backupfolder/`, `software/`, `node_modules/`.
+
+## v1.1 Transfer Speed
+
+- Upload chunks increased to `32MB`.
+- Uploads use up to `4` parallel chunks per file.
+- Browser calculates SHA-256 for the full file and each chunk.
+- Backend verifies chunk checksum and final file checksum before completing upload.
+- Downloads support HTTP range requests for resume/split download managers.
+- Optional Nginx `X-Accel-Redirect` can offload huge downloads from Node.
+
+Optional Nginx acceleration:
+
+```nginx
+location /protected-files/ {
+  internal;
+  alias /opt/nexuspanel/servers/;
+}
+```
+
+Then set the service environment:
+
+```bash
+NEXUSPANEL_X_ACCEL_ROOT=/opt/nexuspanel/servers
+NEXUSPANEL_X_ACCEL_PREFIX=/protected-files
+```
+
+With this enabled, NexusPanel still checks login/auth first, then Nginx streams the real file at maximum VPS speed.
 
 ## New Panel Upgrades
 
