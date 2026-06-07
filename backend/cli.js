@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
 const readline = require('node:readline/promises');
 const { stdin, stdout } = require('node:process');
 const path = require('node:path');
@@ -40,11 +41,18 @@ Service: ${serviceName}`);
 
 async function ensureOwnerForCli() {
   if (getUserCount() > 0) return;
-  if (!stdin.isTTY) {
+  let input = stdin;
+  let output = stdout;
+  let ttyHandle = null;
+  if (!stdin.isTTY && process.platform !== 'win32' && fs.existsSync('/dev/tty')) {
+    ttyHandle = fs.createReadStream('/dev/tty');
+    input = ttyHandle;
+  }
+  if (!input.isTTY) {
     throw new Error('No owner account exists. Run nexuspanel start in an interactive terminal or set NEXUSPANEL_OWNER_EMAIL and NEXUSPANEL_OWNER_PASSWORD.');
   }
   console.log('\nNexusPanel first run: create the owner account before the service starts.');
-  const rl = readline.createInterface({ input: stdin, output: stdout });
+  const rl = readline.createInterface({ input, output });
   try {
     const name = (await rl.question('Owner account name [Owner]: ')).trim() || 'Owner';
     const email = (await rl.question('Owner email: ')).trim();
@@ -53,6 +61,7 @@ async function ensureOwnerForCli() {
     console.log('Owner account created. Starting NexusPanel...');
   } finally {
     rl.close();
+    if (ttyHandle) ttyHandle.destroy();
   }
 }
 

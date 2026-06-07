@@ -51,7 +51,9 @@ install_panel() {
 
   cd "$INSTALL_DIR"
   npm install --omit=optional
-  NEXUSPANEL_SERVICE_USER="$SERVICE_USER" node backend/cli.js install
+  printf '#!/usr/bin/env sh\nexec "%s" "%s" "$@"\n' "$(command -v node)" "$INSTALL_DIR/backend/cli.js" > /usr/local/bin/nexuspanel
+  chmod 755 /usr/local/bin/nexuspanel
+  NEXUSPANEL_SERVICE_USER="$SERVICE_USER" nexuspanel install
 }
 
 need_root
