@@ -3,15 +3,6 @@
 ## ❌ Login Issues
 
 ### Problem: "Invalid email or password" even with correct credentials
-
-**Possible causes:**
-
-1. **Account not created** - Owner setup wasn't completed on first run
-2. **Wrong email format** - Email must include @
-3. **Password too short** - Must be 8+ characters
-4. **Database issue** - Database corrupted or not initialized
-5. **Cookie not saving** - Browser blocking cookies
-
 ---
 
 ## ✅ Step-by-Step Troubleshooting

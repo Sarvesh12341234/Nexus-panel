@@ -2,7 +2,7 @@
 
 ## 🐛 The Problem
 
-You were getting "Invalid email or password" errors even with the correct credentials. There were **multiple issues** in the authentication system:
+we were getting "Invalid email or password" errors even with the correct credentials. There were **multiple issues** in the authentication system:
 
 ---
 
@@ -201,4 +201,3 @@ Browser                          Server
 
 ---
 
-**Happy logging in!** 🚀
