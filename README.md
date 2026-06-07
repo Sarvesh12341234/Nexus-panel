@@ -14,7 +14,7 @@ Open `http://localhost:3000`.
 Linux/Ubuntu one-command installer:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/v1.0/nexuspanel-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/v1.0/nexuspanel-v1.0-linux-installer.sh | sudo bash
 ```
 
 ## VPS Background Service
