@@ -31,6 +31,7 @@ const elements = {
   serverGrid: document.querySelector('#serverGrid'),
   serverRowsGrid: document.querySelector('#serverRowsGrid'),
   templateGrid: document.querySelector('#templateGrid'),
+  nexuImportInput: document.querySelector('#nexuImportInput'),
   serverList: document.querySelector('#serverList'),
   activeServerSelect: document.querySelector('#activeServerSelect'),
   softwareGrid: document.querySelector('#softwareGrid'),
@@ -83,6 +84,7 @@ let fileClipboard = { mode: '', paths: [] };
 let currentUpload = { path: '', size: 0, paused: false, canceled: false };
 let consoleStickToBottom = true;
 let consoleRenderToken = 0;
+let terminalSession = { id: '', cursor: 0, timer: 0 };
 const versionCache = new Map();
 let lastCreateSoftwareKey = '';
 const UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024;
@@ -192,6 +194,8 @@ function fillServerConfigForm(server, force = false) {
   if (!force && isEditing) return;
   form.name.value = server.name;
   form.maxMemoryMb.value = server.maxMemoryMb;
+  form.maxMemoryMb.disabled = state.user?.role !== 'owner';
+  form.maxMemoryMb.title = state.user?.role === 'owner' ? 'Owner can change RAM allocation.' : 'Only the owner can change RAM allocation.';
   form.port.value = server.port;
   form.dataset.serverId = String(server.id);
   form.dataset.dirty = '0';
@@ -564,6 +568,7 @@ function renderTemplates() {
       <div class="field-grid mini">
         <label>Name <input data-template-name="${escapeHtml(template.key)}" value="${escapeHtml(template.name)}"></label>
         <label>RAM MB <input data-template-ram="${escapeHtml(template.key)}" type="number" min="256" max="${state.settings?.maxAllocatableMemoryMb || 65536}" step="256" value="${template.memoryMb}"></label>
+        <label>CPU cores <input data-template-cpu="${escapeHtml(template.key)}" type="number" min="1" max="${navigator.hardwareConcurrency || 64}" step="1" value="${template.cpuCores || 1}"></label>
         <label>Port <input data-template-port="${escapeHtml(template.key)}" type="number" min="1" max="65535" value="${template.port}"></label>
       </div>
       <button type="button" data-action="create-template-server" data-template-key="${escapeHtml(template.key)}">${template.edition === 'custom' ? 'Create Nexu Placeholder' : 'Create + Auto Setup'}</button>
@@ -592,7 +597,19 @@ function renderSoftware() {
       <p>Checks Paper, Purpur, Java, Bedrock, and PocketMine sources for new versions.</p>
       <button type="button" data-action="check-software-updates">Check Updates</button>
     </article>
-  ` + state.softwareCatalog.map((software) => {
+  ` + (server.templateKey && server.type === 'custom' ? `
+    <article class="software-card is-selected">
+      <div class="status-row">
+        <strong>${escapeHtml(server.softwareName || 'Nexu Template')}</strong>
+        <span class="pill is-on">nexu</span>
+      </div>
+      <p>Installs from the template's own Nexu runtime commands, including SteamCMD app IDs where provided.</p>
+      <div class="stat-row"><span class="muted">Executable</span><code>${escapeHtml(server.executablePath || 'resolved after install')}</code></div>
+      <div class="install-track"><span style="width:${server.installProgress || 0}%"></span></div>
+      <div class="stat-row"><span class="muted">${escapeHtml(server.installMessage || server.installStatus || 'Ready')}</span><strong>${server.installProgress || 0}%</strong></div>
+      <button type="button" data-action="install-software" data-software-key="${escapeHtml(server.softwareKey || '')}">${server.installStatus === 'installed' ? 'Reinstall Nexu' : 'Install Nexu'}</button>
+    </article>
+  ` : '') + state.softwareCatalog.map((software) => {
     const compatible = software.edition === server.type;
     const selected = software.key === server.softwareKey;
     return `
@@ -852,7 +869,7 @@ function renderSettings() {
     <div class="public-help-grid">
       <article><strong>Nexus-Mark</strong><span>Original lightweight control profile: safe paths, RAM caps, CPU plan metadata, and future cgroup/systemd slicing on Linux.</span></article>
       <article><strong>Nexu Imports</strong><span>Egg-like templates without the Pterodactyl name. Custom game blueprints stay isolated per server.</span></article>
-      <article><strong>Updater</strong><span>Pulls panel code while protecting <code>servers/</code>, <code>data/</code>, <code>backupfolder/</code>, and <code>software/</code>.</span></article>
+      <article><strong>Updater</strong><span>Pulls panel code while protecting server data and the external backup store.</span></article>
     </div>
     <details class="nexu-details">
       <summary>Example .nexu JSON</summary>
@@ -868,14 +885,54 @@ function renderTerminal() {
     return;
   }
   elements.terminalPanel.innerHTML = `
-    <div class="section-head"><div><p class="eyebrow">Owner Terminal</p><h2>VPS command runner</h2></div></div>
-    <form class="terminal-form" id="terminalForm">
+    <div class="section-head"><div><p class="eyebrow">Owner Terminal</p><h2>Persistent VPS shell</h2></div><button class="danger" type="button" data-action="terminal-close">Close Session</button></div>
+    <form class="terminal-form" id="terminalUnlockForm" ${terminalSession.id ? 'hidden' : ''}>
       <label>Owner password <input name="password" type="password" autocomplete="current-password" required></label>
-      <label>Command <input name="command" placeholder="systemctl status nexuspanel --no-pager" required></label>
-      <button type="submit">Run</button>
+      <button type="submit">Unlock Terminal</button>
     </form>
-    <pre class="terminal-output" id="terminalOutput">Terminal is disabled unless this page is open and owner password is provided.</pre>
+    <pre class="terminal-output" id="terminalOutput">${terminalSession.id ? 'Connected. Waiting for shell output...' : 'Terminal locked. Owner password required.'}</pre>
+    <form class="terminal-form" id="terminalInputForm" ${terminalSession.id ? '' : 'hidden'}>
+      <label>Input <input name="input" placeholder="systemctl status nexuspanel --no-pager" autocomplete="off"></label>
+      <button type="submit">Send</button>
+    </form>
   `;
+  if (terminalSession.id) startTerminalPolling();
+}
+
+function appendTerminalOutput(text) {
+  const output = document.querySelector('#terminalOutput');
+  if (!output || !text) return;
+  output.textContent = `${output.textContent}${text}`.slice(-80000);
+  output.scrollTop = output.scrollHeight;
+}
+
+function startTerminalPolling() {
+  if (!terminalSession.id || terminalSession.timer) return;
+  terminalSession.timer = window.setInterval(async () => {
+    if (!terminalSession.id || state.activeView !== 'terminal') return;
+    try {
+      const data = await api(`/api/terminal/session/${encodeURIComponent(terminalSession.id)}/output?cursor=${terminalSession.cursor}`);
+      terminalSession.cursor = data.cursor;
+      appendTerminalOutput(data.output || '');
+      if (!data.active) {
+        window.clearInterval(terminalSession.timer);
+        terminalSession = { id: '', cursor: 0, timer: 0 };
+      }
+    } catch (error) {
+      appendTerminalOutput(`\n[NexusPanel] ${error.message}\n`);
+      window.clearInterval(terminalSession.timer);
+      terminalSession = { id: '', cursor: 0, timer: 0 };
+    }
+  }, 650);
+}
+
+async function closeTerminalSession() {
+  if (!terminalSession.id) return;
+  const id = terminalSession.id;
+  if (terminalSession.timer) window.clearInterval(terminalSession.timer);
+  terminalSession = { id: '', cursor: 0, timer: 0 };
+  await api(`/api/terminal/session/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+  renderTerminal();
 }
 
 function renderBackups() {
@@ -893,7 +950,7 @@ function renderBackups() {
         <label>Keep latest <input name="backupRetention" type="number" min="1" max="50" value="${server.backupRetention || 4}"></label>
         <button type="submit">Save backup settings</button>
       </form>
-      <p class="muted">Stored outside the server folder in <code>backupfolder/${server.id}/</code>. Server-folder <code>backups/</code>, <code>archives/</code>, and top-level ZIPs are skipped to prevent huge recursive backups.</p>
+      <p class="muted">Stored outside the panel install by default: <code>/var/lib/nexuspanel/backups/${server.id}/</code> on Linux. Server-folder <code>backups/</code>, <code>archives/</code>, and top-level ZIPs are skipped to prevent recursive giant backups.</p>
       <div class="plugin-list">${data.backups.map((backup) => `<div class="plugin-row"><div><strong>${escapeHtml(backup.name)}</strong><div class="muted">${Math.round(backup.size / 1024)} KB</div></div><div class="row-actions"><button class="secondary" type="button" data-action="restore-backup" data-backup-path="${escapeHtml(backup.path)}">Restore</button><a class="button-link" href="/api/servers/${server.id}/backups/download?name=${encodeURIComponent(backup.name)}">Download</a><button class="danger" type="button" data-action="delete-backup" data-backup-path="${escapeHtml(backup.path)}">Delete</button></div></div>`).join('') || '<p class="empty-state">No backups yet.</p>'}</div>
     `;
   }).catch((error) => showToast(error.message));
@@ -1200,6 +1257,23 @@ elements.fileUploadInput.addEventListener('change', async () => {
   }
 });
 
+if (elements.nexuImportInput) {
+  elements.nexuImportInput.addEventListener('change', async () => {
+    const file = elements.nexuImportInput.files?.[0];
+    elements.nexuImportInput.value = '';
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      const result = await api('/api/templates/import', { method: 'POST', body: JSON.stringify(payload) });
+      showToast(`Imported template: ${result.template.name}`);
+      await refresh();
+      setView('templates');
+    } catch (error) {
+      showToast(`Template import failed: ${error.message}`);
+    }
+  });
+}
+
 elements.fileList.addEventListener('dragover', (event) => {
   event.preventDefault();
   elements.fileList.classList.add('is-dropping');
@@ -1290,12 +1364,12 @@ if (elements.serverConfigForm) {
     const payload = {
       ...server,
       ...formData(elements.serverConfigForm),
-      maxMemoryMb: Number(elements.serverConfigForm.maxMemoryMb.value),
       port: Number(elements.serverConfigForm.port.value),
       type: server.type,
       softwareKey: server.softwareKey,
       softwareVersion: server.softwareVersion,
     };
+    if (state.user?.role === 'owner') payload.maxMemoryMb = Number(elements.serverConfigForm.maxMemoryMb.value);
     try {
       await api(`/api/servers/${server.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
       showToast('Server settings saved. Restart to apply RAM changes.');
@@ -1367,15 +1441,32 @@ document.addEventListener('submit', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
-  if (event.target.id !== 'terminalForm') return;
+  if (event.target.id !== 'terminalUnlockForm') return;
   event.preventDefault();
   const output = document.querySelector('#terminalOutput');
-  if (output) output.textContent = 'Running...';
+  if (output) output.textContent = 'Opening shell...\n';
   try {
-    const result = await api('/api/terminal/run', { method: 'POST', body: JSON.stringify(formData(event.target)) });
-    if (output) output.textContent = `$ ${event.target.command.value}\n\n${result.output || '(no output)'}\n\nexit=${result.code}`;
+    const result = await api('/api/terminal/session', { method: 'POST', body: JSON.stringify(formData(event.target)) });
+    terminalSession = { id: result.session.id, cursor: 0, timer: 0 };
+    renderTerminal();
+    startTerminalPolling();
   } catch (error) {
     if (output) output.textContent = error.message;
+    showToast(error.message);
+  }
+});
+
+document.addEventListener('submit', async (event) => {
+  if (event.target.id !== 'terminalInputForm') return;
+  event.preventDefault();
+  const input = event.target.input.value;
+  if (!terminalSession.id || !input.trim()) return;
+  event.target.input.value = '';
+  appendTerminalOutput(`\n$ ${input}\n`);
+  try {
+    await api(`/api/terminal/session/${encodeURIComponent(terminalSession.id)}/input`, { method: 'POST', body: JSON.stringify({ input }) });
+  } catch (error) {
+    appendTerminalOutput(`\n[NexusPanel] ${error.message}\n`);
     showToast(error.message);
   }
 });
@@ -1454,11 +1545,12 @@ document.addEventListener('click', async (event) => {
       const key = actionTarget.dataset.templateKey;
       const name = document.querySelector(`[data-template-name="${CSS.escape(key)}"]`)?.value || '';
       const maxMemoryMb = Number(document.querySelector(`[data-template-ram="${CSS.escape(key)}"]`)?.value || 0);
+      const cpuCores = Number(document.querySelector(`[data-template-cpu="${CSS.escape(key)}"]`)?.value || 1);
       const port = Number(document.querySelector(`[data-template-port="${CSS.escape(key)}"]`)?.value || 0);
       actionTarget.disabled = true;
       const result = await api(`/api/templates/${encodeURIComponent(key)}/create`, {
         method: 'POST',
-        body: JSON.stringify({ name, maxMemoryMb, port }),
+        body: JSON.stringify({ name, maxMemoryMb, cpuCores, port }),
       });
       state.activeServerId = result.server.id;
       showToast(result.server.installStatus === 'template' ? 'Nexu placeholder created.' : 'Template server created. Install software next.');
@@ -1466,11 +1558,20 @@ document.addEventListener('click', async (event) => {
       setView(result.server.installStatus === 'template' ? 'console' : 'software');
       return;
     }
+    if (action === 'import-nexu') {
+      elements.nexuImportInput?.click();
+      return;
+    }
     if (action === 'run-panel-update') {
-      if (!confirm('Update NexusPanel from GitHub now? Server files, data, software cache, and backupfolder stay protected.')) return;
+      if (!confirm('Update NexusPanel from GitHub now? Server files, data, software cache, and external backups stay protected.')) return;
       const repo = document.querySelector('#settingsForm input[name="updateRepo"]')?.value || state.settings?.updateRepo || '';
       const result = await api('/api/settings/update', { method: 'POST', body: JSON.stringify({ repo }) });
       showToast(result.message || 'Update started.');
+      return;
+    }
+    if (action === 'terminal-close') {
+      await closeTerminalSession();
+      showToast('Terminal session closed.');
       return;
     }
     if (action === 'install-software') {
@@ -1816,10 +1917,15 @@ document.addEventListener('click', async (event) => {
       const zipFiles = selected.filter((item) => item.toLowerCase().endsWith('.zip'));
       if (!zipFiles.length) return showToast('Select one or more .zip files first.');
       showToast(`Unzipping ${zipFiles.length} file(s)...`);
-      await api(`/api/servers/${server.id}/files/extract`, {
-        method: 'POST',
-        body: JSON.stringify({ paths: zipFiles, destination: filePath }),
-      });
+      const payload = { paths: zipFiles, destination: filePath, mode: 'fail' };
+      try {
+        await api(`/api/servers/${server.id}/files/extract`, { method: 'POST', body: JSON.stringify(payload) });
+      } catch (error) {
+        if (!/replace/i.test(error.message)) throw error;
+        const replace = confirm(`${error.message}\n\nOK = Replace all duplicates\nCancel = Skip existing duplicates`);
+        payload.mode = replace ? 'replace' : 'skip';
+        await api(`/api/servers/${server.id}/files/extract`, { method: 'POST', body: JSON.stringify(payload) });
+      }
       showToast('Unzip complete.');
       await renderFiles();
       return;

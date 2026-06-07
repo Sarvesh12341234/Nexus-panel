@@ -14,7 +14,7 @@ const { clearSoftwareVersionCache, defaultSoftware, findSoftware, pluginKindForF
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { profileForServer, writeProfile } = require('./nexus_mark');
 const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, startServer, stopServer } = require('./runtime');
-const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile } = require('./zip_utils');
+const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions } = require('./zip_utils');
 const {
   SESSION_COOKIE,
   authMiddleware,
@@ -34,6 +34,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const dataRoot = path.join(__dirname, '..', 'data');
 const healthPath = path.join(dataRoot, 'panel_health.json');
+const terminalSessions = new Map();
 
 app.set('trust proxy', true);
 
@@ -167,6 +168,44 @@ function parseJsonObject(value) {
   }
 }
 
+function templateValue(text, server, root) {
+  return String(text || '')
+    .replaceAll('{{root}}', root)
+    .replaceAll('{{port}}', String(server.port || 25565))
+    .replaceAll('{{serverName}}', String(server.name || 'server').replace(/[^A-Za-z0-9_-]+/g, '-'));
+}
+
+function nexuSoftwareForServer(server) {
+  const nexu = parseJsonObject(server.nexu_payload);
+  if (!nexu || !nexu.runtime?.start?.executable) return null;
+  const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  const executable = templateValue(nexu.runtime.start.executable, server, root);
+  const executablePath = path.isAbsolute(executable) ? executable : path.join(root, executable);
+  return {
+    key: nexu.runtime.softwareKey || server.software_key || nexu.key,
+    name: nexu.name || server.software_key || 'Nexu Template',
+    edition: server.type,
+    executable: path.basename(executablePath),
+    startArgs: (nexu.runtime.start.args || []).map((arg) => templateValue(arg, server, root)),
+    stopCommand: nexu.runtime.start.stopCommand || 'stop',
+    pluginKinds: [],
+    nexu,
+  };
+}
+
+function softwareForServer(server) {
+  return findSoftware(server.software_key)
+    || (server.type === 'java' || server.type === 'bedrock' ? defaultSoftware(server.type) : null)
+    || nexuSoftwareForServer(server);
+}
+
+function nexuExecutablePath(server, software) {
+  if (!software?.nexu) return server.executable_path;
+  const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  const executable = templateValue(software.nexu.runtime.start.executable, server, root);
+  return path.isAbsolute(executable) ? executable : path.join(root, executable);
+}
+
 function safeAttachmentName(fileName) {
   return path.basename(String(fileName || 'download.bin')).replace(/[\\/:*?"<>|]+/g, '-');
 }
@@ -253,8 +292,62 @@ async function fileSha256Hex(filePath) {
   return hash.digest('hex');
 }
 
+function runShellCommand(command, cwd, onOutput) {
+  return new Promise((resolve, reject) => {
+    const shell = shellForPlatform(command);
+    const child = spawn(shell.command, shell.args, { cwd, env: process.env, windowsHide: true });
+    let output = '';
+    child.stdout.on('data', (chunk) => {
+      output = `${output}${chunk}`.slice(-4000);
+      if (onOutput) onOutput(String(chunk));
+    });
+    child.stderr.on('data', (chunk) => {
+      output = `${output}${chunk}`.slice(-4000);
+      if (onOutput) onOutput(String(chunk));
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(output);
+      else reject(new Error(output.trim() || `Command failed with exit ${code}`));
+    });
+  });
+}
+
+async function installNexuTemplate(server) {
+  const nexu = parseJsonObject(server.nexu_payload);
+  if (!nexu?.runtime?.install?.commands?.length) throw new Error('This Nexu template has no installer commands.');
+  const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  db.prepare(`
+    UPDATE servers
+    SET install_status = 'installing', install_progress = 8, install_message = ?
+    WHERE id = ?
+  `).run(`Running ${nexu.runtime.install.mode || 'nexu'} installer`, server.id);
+  let progress = 12;
+  for (const rawCommand of nexu.runtime.install.commands) {
+    const command = templateValue(rawCommand, server, root);
+    appendLog(server.id, `[NexusPanel] Nexu install: ${command}`);
+    await runShellCommand(command, root, (chunk) => {
+      progress = Math.min(94, progress + 1);
+      db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?')
+        .run(progress, String(chunk).trim().slice(-180) || 'Installing Nexu template', server.id);
+    });
+  }
+  const software = nexuSoftwareForServer(server);
+  const executablePath = nexuExecutablePath(server, software);
+  if (!fs.existsSync(executablePath)) {
+    throw new Error(`Nexu install finished but executable was not found: ${path.relative(root, executablePath)}`);
+  }
+  if (process.platform !== 'win32') await fs.promises.chmod(executablePath, 0o755).catch(() => {});
+  db.prepare(`
+    UPDATE servers
+    SET executable_path = ?, install_status = 'installed', install_progress = 100, install_message = ?
+    WHERE id = ?
+  `).run(executablePath, `Installed ${nexu.name}`, server.id);
+  appendLog(server.id, `[NexusPanel] Nexu template installed: ${nexu.name}.`);
+}
+
 function serverPayload(server) {
-  const software = findSoftware(server.software_key) || (server.type === 'java' || server.type === 'bedrock' ? defaultSoftware(server.type) : null);
+  const software = softwareForServer(server);
   const status = runtimeStatus(server.id);
   return {
     id: server.id,
@@ -710,6 +803,7 @@ function executableCandidates(server, software) {
 }
 
 function preferredExecutablePath(server, software) {
+  if (software?.nexu) return nexuExecutablePath(server, software);
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   return software.key === 'bedrock-vanilla'
     ? path.join(root, software.executable)
@@ -729,7 +823,7 @@ function resolveInstalledExecutable(server, software) {
     appendLog(server.id, `[NexusPanel] Fixed executable path: ${displayPath(found)}`);
   }
 
-  if (process.platform !== 'win32' && software.key === 'bedrock-vanilla') {
+  if (process.platform !== 'win32' && (software.key === 'bedrock-vanilla' || software.nexu)) {
     fs.chmodSync(found, 0o755);
   }
 
@@ -1158,6 +1252,94 @@ app.post('/api/terminal/run', requireAccess(permissions.MANAGE_ADMINS), asyncRou
   res.json(result);
 }));
 
+function terminalShell() {
+  if (process.platform === 'win32') return { command: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-NoExit'] };
+  return { command: process.env.SHELL || '/bin/bash', args: ['-l'] };
+}
+
+function terminalSessionPayload(session) {
+  return {
+    id: session.id,
+    cursor: session.buffer.length,
+    active: !session.closed,
+    cwd: session.cwd,
+  };
+}
+
+function requireTerminalSession(req, res) {
+  const session = terminalSessions.get(req.params.sessionId);
+  if (!session || session.userId !== req.user.id) {
+    res.status(404).json({ error: 'Terminal session not found.' });
+    return null;
+  }
+  session.lastSeen = Date.now();
+  return session;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of terminalSessions) {
+    if (session.closed || now - session.lastSeen > 15 * 60 * 1000) {
+      session.child.kill();
+      terminalSessions.delete(id);
+    }
+  }
+}, 60 * 1000).unref();
+
+app.post('/api/terminal/session', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
+  if (settingValue('terminal_enabled', '0') !== '1') return res.status(403).json({ error: 'Terminal is disabled in Settings.' });
+  const owner = db.prepare('SELECT * FROM users WHERE id = ? AND role = ?').get(req.user.id, 'owner');
+  if (!owner || !verifyPassword(req.body.password, owner.password_hash)) {
+    return res.status(401).json({ error: 'Owner password is required for terminal access.' });
+  }
+  const existing = [...terminalSessions.values()].find((session) => session.userId === req.user.id && !session.closed);
+  if (existing) return res.json({ session: terminalSessionPayload(existing) });
+
+  const shell = terminalShell();
+  const cwd = path.join(__dirname, '..');
+  const child = spawn(shell.command, shell.args, { cwd, env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const session = { id: crypto.randomUUID(), userId: req.user.id, child, buffer: [], cwd, closed: false, lastSeen: Date.now() };
+  const push = (chunk) => {
+    session.buffer.push(String(chunk).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''));
+    if (session.buffer.length > 2000) session.buffer.splice(0, session.buffer.length - 2000);
+  };
+  child.stdout.on('data', push);
+  child.stderr.on('data', push);
+  child.on('error', (error) => { push(`\n[NexusPanel terminal error] ${error.message}\n`); session.closed = true; });
+  child.on('close', (code) => { push(`\n[NexusPanel terminal closed] exit=${code}\n`); session.closed = true; });
+  terminalSessions.set(session.id, session);
+  res.status(201).json({ session: terminalSessionPayload(session) });
+});
+
+app.get('/api/terminal/session/:sessionId/output', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
+  const session = requireTerminalSession(req, res);
+  if (!session) return;
+  const cursor = clampNumber(req.query.cursor, 0, session.buffer.length, 0);
+  res.json({ output: session.buffer.slice(cursor).join(''), cursor: session.buffer.length, active: !session.closed });
+});
+
+app.post('/api/terminal/session/:sessionId/input', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
+  const session = requireTerminalSession(req, res);
+  if (!session) return;
+  if (session.closed) return res.status(410).json({ error: 'Terminal session is closed.' });
+  const input = String(req.body.input || '');
+  if (input.length > 4000) return res.status(400).json({ error: 'Terminal input is too long.' });
+  session.child.stdin.write(input.endsWith('\n') ? input : `${input}\n`);
+  res.json({ ok: true });
+});
+
+app.delete('/api/terminal/session/:sessionId', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
+  const session = requireTerminalSession(req, res);
+  if (!session) return;
+  session.child.kill();
+  terminalSessions.delete(session.id);
+  res.json({ ok: true });
+});
+
 app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
   const name = String(req.body.name || '').trim();
   if (name.length < 2) return res.status(400).json({ error: 'Server name is required.' });
@@ -1275,6 +1457,9 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
   const executablePath = selectedSoftware && softwareChanged
     ? path.join(root, 'software', selectedSoftware.executable)
     : target.executable_path || (selectedSoftware ? path.join(root, 'software', selectedSoftware.executable) : '');
+  const memoryMb = ownerOnly(req)
+    ? clampMemoryMb(req.body.maxMemoryMb, target.max_memory_mb)
+    : target.max_memory_mb;
 
   db.prepare(`
     UPDATE servers
@@ -1288,7 +1473,7 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
     name,
     type,
     clampNumber(req.body.port, 1024, 65535, target.port),
-    clampMemoryMb(req.body.maxMemoryMb, target.max_memory_mb),
+    memoryMb,
     toBool(req.body.autoStart, Boolean(target.auto_start)),
     toBool(req.body.autoRestart, Boolean(target.auto_restart)),
     toBool(req.body.crashBackup, Boolean(target.crash_backup)),
@@ -1345,6 +1530,18 @@ app.post('/api/servers/:id/software/install', requireAccess(permissions.MANAGE_S
   if (!target) return res.status(404).json({ error: 'Server not found.' });
 
   const selectedSoftware = findSoftware(req.body.softwareKey || target.software_key) || defaultSoftware(target.type);
+  if (!selectedSoftware && target.nexu_payload) {
+    installNexuTemplate(target)
+      .catch((error) => {
+        db.prepare(`
+          UPDATE servers
+          SET install_status = 'failed', install_progress = 0, install_message = ?
+          WHERE id = ?
+        `).run(error.message, id);
+        appendLog(id, `[NexusPanel] Nexu install failed: ${error.message}`);
+      });
+    return res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(id)) });
+  }
   if (!selectedSoftware || selectedSoftware.edition !== target.type) {
     return res.status(400).json({ error: 'Selected software is not compatible with this server.' });
   }
@@ -1654,7 +1851,7 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
 app.post('/api/servers/:id/start', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
-  const software = findSoftware(server.software_key) || (server.type === 'java' || server.type === 'bedrock' ? defaultSoftware(server.type) : null);
+  const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can start.' });
   res.json(startServer(resolveInstalledExecutable(server, software), software));
 });
@@ -1673,7 +1870,7 @@ app.post('/api/servers/:id/stop', requireAccess(permissions.MANAGE_SERVERS), (re
 app.post('/api/servers/:id/restart', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
-  const software = findSoftware(server.software_key) || (server.type === 'java' || server.type === 'bedrock' ? defaultSoftware(server.type) : null);
+  const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can restart.' });
   res.json(restartServer(resolveInstalledExecutable(server, software), software));
 });
@@ -2029,6 +2226,7 @@ app.post('/api/servers/:id/files/extract', requireAccess(permissions.MANAGE_FILE
   const server = getServerOr404(req.params.id);
   const destinationDir = safeServerFile(server, req.body.destination || '');
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
+  const mode = ['replace', 'skip', 'fail'].includes(req.body.mode) ? req.body.mode : 'fail';
   const extracted = [];
   for (const relative of requested) {
     const source = safeServerFile(server, relative);
@@ -2037,7 +2235,19 @@ app.post('/api/servers/:id/files/extract', requireAccess(permissions.MANAGE_FILE
     }
     const stats = await fs.promises.stat(source.absolute).catch(() => null);
     if (!stats || !stats.isFile()) return res.status(404).json({ error: `${source.relative} is not a file.` });
-    extractArchiveInto(source.absolute, destinationDir.absolute);
+    if (!isZipFile(source.absolute)) {
+      return res.status(422).json({ error: `${source.relative} is not a complete valid ZIP. It may be an unfinished upload/download. Re-upload it or use a fresh backup/archive.` });
+    }
+    if (mode === 'fail') {
+      const collisions = zipCollisions(source.absolute, destinationDir.absolute);
+      if (collisions.length) {
+        return res.status(409).json({
+          error: `Extract would replace ${collisions.length} existing file(s). Choose Replace all or Skip existing.`,
+          collisions,
+        });
+      }
+    }
+    extractArchiveInto(source.absolute, destinationDir.absolute, { mode });
     extracted.push(source.relative);
   }
   res.json({ ok: true, paths: extracted, destination: destinationDir.relative });

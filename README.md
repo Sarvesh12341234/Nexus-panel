@@ -14,7 +14,7 @@ Open `http://localhost:3000`.
 Linux/Ubuntu one-command installer:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/v1.1/nexuspanel-v1.1-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/v1.1.1/nexuspanel-v1.1.1-linux-installer.sh | sudo bash
 ```
 
 ## VPS Background Service
@@ -62,9 +62,9 @@ cd /root/summa/panel
 bash update/update.sh
 ```
 
-Protected folders: `servers/`, `data/`, `backups/`, `backupfolder/`, `software/`, `node_modules/`.
+Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the external backup store.
 
-## v1.1 Transfer Speed
+## v1.1.1 Transfer + Safety
 
 - Upload chunks increased to `32MB`.
 - Uploads use up to `4` parallel chunks per file.
@@ -72,6 +72,8 @@ Protected folders: `servers/`, `data/`, `backups/`, `backupfolder/`, `software/`
 - Backend verifies chunk checksum and final file checksum before completing upload.
 - Downloads support HTTP range requests for resume/split download managers.
 - Optional Nginx `X-Accel-Redirect` can offload huge downloads from Node.
+- Backups default to `/var/lib/nexuspanel/backups` on Linux, outside `/opt/nexuspanel`.
+- ZIP extraction validates the file first and asks whether to replace or skip duplicates.
 
 Optional Nginx acceleration:
 
@@ -94,7 +96,7 @@ With this enabled, NexusPanel still checks login/auth first, then Nginx streams 
 ## New Panel Upgrades
 
 - 10 selectable neon themes from the top bar.
-- External backups saved in `backupfolder/<server-id>/`, not inside the server source folder.
+- External backups saved in `/var/lib/nexuspanel/backups/<server-id>/` on Linux, not inside the server or panel source folder.
 - Server delete button with online-server protection.
 - RAM/port/name editor after server creation.
 - Live whitelist reload for running Java/Bedrock servers where supported by the server software.

@@ -468,6 +468,11 @@ code {
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
 }
 
+.server-rows-list {
+  display: grid;
+  gap: 0.9rem;
+}
+
 .server-card,
 .software-card,
 .tweak-card,
@@ -914,8 +919,20 @@ code {
 }
 
 .server-row-card {
-  grid-template-columns: minmax(180px, 1fr) minmax(260px, 1fr) auto;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(280px, 1fr) auto;
   align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: linear-gradient(135deg, rgba(255,255,255,.06), rgba(255,255,255,.025));
+  overflow: hidden;
+}
+
+.server-row-card code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .terminal-output {

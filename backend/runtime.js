@@ -94,7 +94,7 @@ function startServer(server, software) {
     args = [executable, '--no-wizard', '--disable-ansi'];
   } else {
     command = executable;
-    args = [];
+    args = Array.isArray(software.startArgs) ? software.startArgs : [];
   }
 
   appendLog(server.id, `[NexusPanel] Starting ${server.name} with ${software.name}...`);
@@ -111,6 +111,7 @@ function startServer(server, software) {
   }, mark || { cpuCores: 1, memoryMaxMb: server.max_memory_mb || 1024, pathScope: 'server-root-only' }));
 
   processes.set(server.id, child);
+  child.stopCommand = software.stopCommand || 'stop';
   child.stdout.on('data', (chunk) => splitLines(server.id, chunk));
   child.stderr.on('data', (chunk) => splitLines(server.id, chunk));
   child.on('error', (error) => {
@@ -130,7 +131,7 @@ function restartServer(server, software) {
   const child = processes.get(server.id);
   if (!child) return startServer(server, software);
   appendLog(server.id, '[NexusPanel] Restart requested.');
-  child.stdin.write('stop\n');
+  child.stdin.write(`${child.stopCommand || 'stop'}\n`);
   const timer = setInterval(() => {
     if (!processes.has(server.id)) {
       clearInterval(timer);
@@ -156,7 +157,7 @@ function sendCommand(serverId, command) {
 function stopServer(serverId) {
   const child = processes.get(serverId);
   if (!child) return { ok: true, message: 'Server is already offline.' };
-  child.stdin.write('stop\n');
+  child.stdin.write(`${child.stopCommand || 'stop'}\n`);
   appendLog(serverId, '[NexusPanel] Sent graceful stop.');
   return { ok: true, message: 'Stop command sent.' };
 }

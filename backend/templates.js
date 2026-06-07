@@ -74,9 +74,62 @@ const BUILTIN_NEXU = [
     description: 'Purpur performance template for survival/SMP servers.',
     features: ['Purpur latest builds', 'Plugin loader', 'RAM-aware JVM launch'],
   },
+  {
+    nexuVersion: NEXU_SCHEMA_VERSION,
+    key: 'rust-server',
+    name: 'Rust Dedicated',
+    game: { name: 'Rust', family: 'steam', edition: 'linux' },
+    runtime: {
+      softwareKey: 'steamcmd-rust',
+      install: {
+        mode: 'steamcmd',
+        version: 'latest',
+        appId: '258550',
+        commands: ['steamcmd +force_install_dir {{root}} +login anonymous +app_update 258550 validate +quit'],
+      },
+      start: {
+        executable: 'RustDedicated',
+        args: ['-batchmode', '+server.port', '{{port}}', '+server.identity', '{{serverName}}', '+server.maxplayers', '50'],
+        stopCommand: 'quit',
+      },
+    },
+    resources: { ramMb: 6144, cpuCores: 3, diskMb: 12288, ports: [{ name: 'game', port: 28015, protocol: 'udp' }, { name: 'rcon', port: 28016, protocol: 'tcp' }] },
+    requirements: [{ key: 'steamcmd', name: 'SteamCMD', install: 'auto-linux-package', command: 'apt install -y steamcmd || dnf install -y steamcmd' }],
+    paths: { root: '.', worlds: 'server/{{serverName}}', plugins: 'oxide/plugins', packs: 'oxide/data', backups: 'backupfolder' },
+    properties: { mode: 'custom', file: 'server/{{serverName}}/cfg/server.cfg' },
+    security: { nexusMark: { enabled: true, network: 'game-only', writeScope: 'server-root' } },
+    description: 'Real SteamCMD Rust server blueprint using app 258550.',
+    features: ['SteamCMD app 258550', 'RCON port metadata', 'Oxide/uMod-ready paths'],
+  },
+  {
+    nexuVersion: NEXU_SCHEMA_VERSION,
+    key: 'ark-survival',
+    name: 'ARK Survival Ascended',
+    game: { name: 'ARK Survival Ascended', family: 'steam', edition: 'windows' },
+    runtime: {
+      softwareKey: 'steamcmd-ark-asa',
+      install: {
+        mode: 'steamcmd',
+        version: 'latest',
+        appId: '2430930',
+        commands: ['steamcmd +@sSteamCmdForcePlatformType windows +force_install_dir {{root}} +login anonymous +app_update 2430930 validate +quit'],
+      },
+      start: {
+        executable: 'ShooterGame/Binaries/Win64/ArkAscendedServer.exe',
+        args: ['TheIsland_WP?listen?SessionName={{serverName}}?ServerPassword=?ServerAdminPassword=changeme', '-NoBattlEye'],
+        stopCommand: 'DoExit',
+      },
+    },
+    resources: { ramMb: 12288, cpuCores: 4, diskMb: 32768, ports: [{ name: 'game', port: 7777, protocol: 'udp' }, { name: 'query', port: 27015, protocol: 'udp' }, { name: 'rcon', port: 27020, protocol: 'tcp' }] },
+    requirements: [{ key: 'steamcmd', name: 'SteamCMD', install: 'auto-linux-package' }, { key: 'wine', name: 'Wine/Proton for Linux hosts', install: 'manual-or-proton' }],
+    paths: { root: '.', worlds: 'ShooterGame/Saved', plugins: 'ShooterGame/Binaries', packs: 'ShooterGame/Content', backups: 'backupfolder' },
+    properties: { mode: 'custom', file: 'ShooterGame/Saved/Config/WindowsServer/GameUserSettings.ini' },
+    security: { nexusMark: { enabled: true, network: 'game-only', writeScope: 'server-root' } },
+    description: 'Real SteamCMD ARK Ascended blueprint using app 2430930. ASA is Windows-server based, so Linux needs Wine/Proton.',
+    features: ['SteamCMD app 2430930', 'Query/RCON ports', 'Backup-first save path'],
+  },
   ...[
-    ['rust-server', 'Rust Dedicated', 'Rust', 28015, 6144, 3, ['steamcmd'], 'SteamCMD-based Rust template placeholder.'],
-    ['ark-survival', 'ARK Survival Ascended', 'ARK', 7777, 8192, 4, ['steamcmd'], 'Heavy survival template with strict backup-first layout.'],
+    ['ark-evolved', 'ARK Survival Evolved', 'ARK Evolved', 7777, 8192, 4, ['steamcmd'], 'SteamCMD ARK Evolved server using app 376030.'],
     ['hytale-ready', 'Hytale Ready', 'Hytale', 25565, 4096, 2, ['java'], 'Future-proof Hytale template slot.'],
     ['valheim', 'Valheim', 'Valheim', 2456, 2048, 1, ['steamcmd'], 'Small VPS-friendly survival template.'],
     ['terraria', 'Terraria', 'Terraria', 7777, 1024, 1, ['mono'], 'Low-resource Terraria template.'],
@@ -92,7 +145,9 @@ const BUILTIN_NEXU = [
     game: { name: gameName, family: 'custom', edition: 'custom' },
     runtime: {
       softwareKey: `custom-${key.replace(/-server$/, '')}`,
-      install: { mode: 'nexu-script', commands: [] },
+      install: key === 'ark-evolved'
+        ? { mode: 'steamcmd', version: 'latest', appId: '376030', commands: ['steamcmd +force_install_dir {{root}} +login anonymous +app_update 376030 validate +quit'] }
+        : { mode: 'nexu-script', commands: [] },
       start: { executable: '', args: [], stopCommand: 'stop' },
     },
     resources: { ramMb, cpuCores, diskMb: Math.max(2048, ramMb * 2), ports: [{ name: 'game', port, protocol: 'udp/tcp' }] },
@@ -163,6 +218,7 @@ function normalizeNexuTemplate(input) {
       install: {
         mode: cleanString(runtime.install?.mode, runtime.softwareKey || oldSoftwareKey ? 'nexus-software' : 'nexu-script', 40),
         version: cleanString(runtime.install?.version, 'latest', 40),
+        appId: cleanString(runtime.install?.appId, '', 24),
         commands: Array.isArray(runtime.install?.commands) ? runtime.install.commands.slice(0, 20).map((item) => cleanString(item, '', 240)).filter(Boolean) : [],
       },
       start: {

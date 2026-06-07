@@ -120,13 +120,14 @@
         <section class="view-section" id="view-servers" hidden>
           <div class="surface tool-surface">
             <div class="section-head"><div><p class="eyebrow">Servers</p><h2>Specific servers</h2></div></div>
-            <div class="server-grid" id="serverRowsGrid"></div>
+            <div class="server-rows-list" id="serverRowsGrid"></div>
           </div>
         </section>
 
         <section class="view-section" id="view-templates" hidden>
           <div class="surface tool-surface">
-            <div class="section-head"><div><p class="eyebrow">Templates</p><h2>One-click server blueprints</h2></div></div>
+            <div class="section-head"><div><p class="eyebrow">Templates</p><h2>One-click server blueprints</h2></div><button class="secondary" type="button" data-action="import-nexu">Add .nexu Template</button></div>
+            <input id="nexuImportInput" type="file" accept=".json,.nexu,application/json" hidden>
             <div class="template-grid" id="templateGrid"></div>
           </div>
         </section>
