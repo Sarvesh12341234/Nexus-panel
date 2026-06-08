@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { externalDataRoot } = require('./paths');
 
 function cpuLimitPercent(cpuCores = 1) {
   const total = Math.max(1, os.cpus().length || 1);
@@ -47,7 +48,7 @@ function profileForServer(server, nexu = null) {
 
 function writeProfile(server, root, nexu = null) {
   const profile = profileForServer(server, nexu);
-  const dir = path.join(root, 'runtime', 'nexus-mark');
+  const dir = path.join(externalDataRoot, 'nexus-mark', String(server.id));
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify(profile, null, 2), 'utf8');
   return profile;

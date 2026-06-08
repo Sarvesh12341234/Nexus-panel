@@ -63,6 +63,7 @@ db.exec(`
     template_key TEXT NOT NULL DEFAULT '',
     nexu_payload TEXT NOT NULL DEFAULT '',
     nexus_mark_profile TEXT NOT NULL DEFAULT '',
+    owner_user_id INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -98,6 +99,7 @@ db.exec(`
     uploaded_bytes INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     message TEXT NOT NULL DEFAULT '',
+    chunks_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (server_id, relative_path),
@@ -157,12 +159,24 @@ const serverColumns = {
   template_key: "TEXT NOT NULL DEFAULT ''",
   nexu_payload: "TEXT NOT NULL DEFAULT ''",
   nexus_mark_profile: "TEXT NOT NULL DEFAULT ''",
+  owner_user_id: 'INTEGER',
+};
+
+const uploadColumns = {
+  chunks_json: "TEXT NOT NULL DEFAULT '[]'",
 };
 
 const existingServerColumns = new Set(db.prepare('PRAGMA table_info(servers)').all().map((column) => column.name));
 for (const [name, definition] of Object.entries(serverColumns)) {
   if (!existingServerColumns.has(name)) {
     db.exec(`ALTER TABLE servers ADD COLUMN ${name} ${definition}`);
+  }
+}
+
+const existingUploadColumns = new Set(db.prepare('PRAGMA table_info(upload_sessions)').all().map((column) => column.name));
+for (const [name, definition] of Object.entries(uploadColumns)) {
+  if (!existingUploadColumns.has(name)) {
+    db.exec(`ALTER TABLE upload_sessions ADD COLUMN ${name} ${definition}`);
   }
 }
 

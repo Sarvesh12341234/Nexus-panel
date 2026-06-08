@@ -8,6 +8,7 @@ const {
   hasSystemd,
   install,
   logsService,
+  changePort,
   restartService,
   serviceName,
   startService,
@@ -32,6 +33,7 @@ Usage:
   nexuspanel restart
   nexuspanel status
   nexuspanel logs
+  nexuspanel change panelport 8080
   nexuspanel update
   nexuspanel install
   nexuspanel foreground
@@ -80,6 +82,7 @@ async function main() {
   if (command === 'restart') return restartService();
   if (command === 'status') return status();
   if (command === 'logs') return logsService();
+  if (command === 'change' && process.argv[3] === 'panelport') return changePort(process.argv[4]);
   if (command === 'update') return run('bash', [path.join(__dirname, '..', 'update', 'update.sh'), process.argv[3] || ''], { cwd: path.join(__dirname, '..') });
   if (command === 'foreground') {
     await ensureOwnerForCli();

@@ -131,12 +131,12 @@ const BUILTIN_NEXU = [
   ...[
     ['ark-evolved', 'ARK Survival Evolved', 'ARK Evolved', 7777, 8192, 4, ['steamcmd'], 'SteamCMD ARK Evolved server using app 376030.'],
     ['hytale-ready', 'Hytale Ready', 'Hytale', 25565, 4096, 2, ['java'], 'Future-proof Hytale template slot.'],
-    ['valheim', 'Valheim', 'Valheim', 2456, 2048, 1, ['steamcmd'], 'Small VPS-friendly survival template.'],
+    ['valheim', 'Valheim', 'Valheim', 2456, 2048, 1, ['steamcmd'], 'SteamCMD Valheim dedicated server using app 896660.'],
     ['terraria', 'Terraria', 'Terraria', 7777, 1024, 1, ['mono'], 'Low-resource Terraria template.'],
-    ['palworld', 'Palworld', 'Palworld', 8211, 8192, 4, ['steamcmd'], 'High-memory Palworld template.'],
-    ['factorio', 'Factorio', 'Factorio', 34197, 1024, 1, [], 'Efficient automation server template.'],
-    ['satisfactory', 'Satisfactory', 'Satisfactory', 7777, 6144, 3, ['steamcmd'], 'Factory server template for bigger hosts.'],
-    ['project-zomboid', 'Project Zomboid', 'Project Zomboid', 16261, 4096, 2, ['steamcmd'], 'Persistent survival server template.'],
+    ['palworld', 'Palworld', 'Palworld', 8211, 8192, 4, ['steamcmd'], 'SteamCMD Palworld dedicated server using app 2394010.'],
+    ['factorio', 'Factorio', 'Factorio', 34197, 1024, 1, [], 'Official Factorio headless Linux server download.'],
+    ['satisfactory', 'Satisfactory', 'Satisfactory', 7777, 6144, 3, ['steamcmd'], 'SteamCMD Satisfactory dedicated server using app 1690800.'],
+    ['project-zomboid', 'Project Zomboid', 'Project Zomboid', 16261, 4096, 2, ['steamcmd'], 'SteamCMD Project Zomboid dedicated server using app 380870.'],
     ['custom-nexu', 'Custom Nexu Template', 'Any Game', 25565, 1024, 1, [], 'Import your own .nexu JSON template.'],
   ].map(([key, name, gameName, port, ramMb, cpuCores, requirementKeys, description]) => ({
     nexuVersion: NEXU_SCHEMA_VERSION,
@@ -147,8 +147,35 @@ const BUILTIN_NEXU = [
       softwareKey: `custom-${key.replace(/-server$/, '')}`,
       install: key === 'ark-evolved'
         ? { mode: 'steamcmd', version: 'latest', appId: '376030', commands: ['steamcmd +force_install_dir {{root}} +login anonymous +app_update 376030 validate +quit'] }
+        : key === 'valheim'
+          ? { mode: 'steamcmd', version: 'latest', appId: '896660', commands: ['steamcmd +force_install_dir {{root}} +login anonymous +app_update 896660 validate +quit'] }
+          : key === 'palworld'
+            ? { mode: 'steamcmd', version: 'latest', appId: '2394010', commands: ['steamcmd +force_install_dir {{root}} +login anonymous +app_update 2394010 validate +quit'] }
+            : key === 'satisfactory'
+              ? { mode: 'steamcmd', version: 'latest', appId: '1690800', commands: ['steamcmd +force_install_dir {{root}} +login anonymous +app_update 1690800 validate +quit'] }
+              : key === 'project-zomboid'
+                ? { mode: 'steamcmd', version: 'latest', appId: '380870', commands: ['steamcmd +force_install_dir {{root}} +login anonymous +app_update 380870 validate +quit'] }
+                : key === 'factorio'
+                  ? { mode: 'direct-download', version: 'stable', appId: '', commands: ['curl -L https://www.factorio.com/get-download/stable/headless/linux64 -o factorio.tar.xz && tar -xf factorio.tar.xz --strip-components=1'] }
         : { mode: 'nexu-script', commands: [] },
-      start: { executable: '', args: [], stopCommand: 'stop' },
+      start: {
+        executable: ({
+          'ark-evolved': 'ShooterGame/Binaries/Linux/ShooterGameServer',
+          valheim: 'valheim_server.x86_64',
+          palworld: 'PalServer.sh',
+          satisfactory: 'FactoryServer.sh',
+          'project-zomboid': 'start-server.sh',
+          factorio: 'bin/x64/factorio',
+        })[key] || '',
+        args: ({
+          valheim: ['-name', '{{serverName}}', '-port', '{{port}}', '-world', '{{serverName}}', '-password', 'changeme'],
+          palworld: ['-port={{port}}'],
+          satisfactory: ['-Port={{port}}'],
+          'project-zomboid': ['-servername', '{{serverName}}'],
+          factorio: ['--start-server-load-latest', '--port', '{{port}}'],
+        })[key] || [],
+        stopCommand: key === 'factorio' ? '/quit' : 'stop',
+      },
     },
     resources: { ramMb, cpuCores, diskMb: Math.max(2048, ramMb * 2), ports: [{ name: 'game', port, protocol: 'udp/tcp' }] },
     requirements: requirementKeys.map((item) => ({ key: item, name: item, install: 'planned' })),

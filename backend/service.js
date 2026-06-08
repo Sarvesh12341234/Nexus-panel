@@ -45,6 +45,7 @@ Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
 Environment=NEXUSPANEL_SERVICE=1
+Environment=PORT=${Number(process.env.PORT || 3000)}
 Environment=NEXUSPANEL_BACKUP_ROOT=/var/lib/nexuspanel/backups
 Environment=NEXUSPANEL_X_ACCEL_ROOT=
 Environment=NEXUSPANEL_X_ACCEL_PREFIX=
@@ -120,6 +121,21 @@ function restartService() {
   runSystemctl(['restart', serviceName]);
 }
 
+function changePort(nextPort) {
+  requireLinuxSystemd();
+  requireRoot();
+  const port = Number(nextPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Panel port must be between 1 and 65535.');
+  if (!fs.existsSync(servicePath)) install({ start: false });
+  let content = fs.readFileSync(servicePath, 'utf8');
+  if (content.includes('Environment=PORT=')) content = content.replace(/Environment=PORT=\d+/g, `Environment=PORT=${port}`);
+  else content = content.replace('Environment=NEXUSPANEL_SERVICE=1\n', `Environment=NEXUSPANEL_SERVICE=1\nEnvironment=PORT=${port}\n`);
+  fs.writeFileSync(servicePath, content, 'utf8');
+  runSystemctl(['daemon-reload']);
+  runSystemctl(['restart', serviceName]);
+  console.log(`NexusPanel panel port changed to ${port}.`);
+}
+
 function logsService() {
   requireLinuxSystemd();
   run('journalctl', ['-u', serviceName, '-f']);
@@ -134,6 +150,7 @@ function main() {
   if (command === 'stop') return stopService();
   if (command === 'restart') return restartService();
   if (command === 'logs') return logsService();
+  if (command === 'change' && process.argv[3] === 'panelport') return changePort(process.argv[4]);
   throw new Error(`Unknown service command: ${command}`);
 }
 
@@ -154,5 +171,6 @@ module.exports = {
   stopService,
   restartService,
   logsService,
+  changePort,
   status,
 };

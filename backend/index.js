@@ -9,7 +9,7 @@ const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
 const { db, getUserCount } = require('./db');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
-const { assertInside, backupsRoot, displayPath, ensureServerDirs, pluginTarget, serverPath, serversRoot } = require('./paths');
+const { assertInside, backupsRoot, displayPath, ensureServerDirs, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
 const { clearSoftwareVersionCache, defaultSoftware, findSoftware, pluginKindForFile, resolveDownload, softwareCatalog, softwareVersions } = require('./software');
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { profileForServer, writeProfile } = require('./nexus_mark');
@@ -35,6 +35,7 @@ const port = Number(process.env.PORT || 3000);
 const dataRoot = path.join(__dirname, '..', 'data');
 const healthPath = path.join(dataRoot, 'panel_health.json');
 const terminalSessions = new Map();
+const wakeWatchers = new Map();
 
 app.set('trust proxy', true);
 
@@ -113,6 +114,7 @@ function panelSettingsPayload() {
     updateRepo: settingValue('update_repo', 'https://github.com/Sarvesh12341234/Nexus-panel.git'),
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
+    maxCpuCores: os.cpus().length || 1,
     platform: process.platform,
     nexuExample: nexuExample(),
   };
@@ -346,20 +348,36 @@ async function installNexuTemplate(server) {
   appendLog(server.id, `[NexusPanel] Nexu template installed: ${nexu.name}.`);
 }
 
-function serverPayload(server) {
+function requestPublicHost(req) {
+  const forwarded = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+  const hostHeader = forwarded || String(req.headers.host || '').trim();
+  const host = hostHeader.replace(/:\d+$/, '');
+  if (host && !['localhost', '127.0.0.1', '::1'].includes(host)) return host;
+  const nets = os.networkInterfaces();
+  for (const rows of Object.values(nets)) {
+    for (const item of rows || []) {
+      if (item.family === 'IPv4' && !item.internal) return item.address;
+    }
+  }
+  return '127.0.0.1';
+}
+
+function serverPayload(server, req = null) {
   const software = softwareForServer(server);
   const status = runtimeStatus(server.id);
+  const host = server.host && server.host !== '127.0.0.1' ? server.host : (req ? requestPublicHost(req) : server.host);
   return {
     id: server.id,
     name: server.name,
     type: server.type,
-    host: server.host,
+    host,
     port: server.port,
     status,
     maxMemoryMb: server.max_memory_mb,
     cpuCores: server.cpu_cores || 1,
     diskLimitMb: server.disk_limit_mb || 0,
     templateKey: server.template_key || '',
+    ownerUserId: server.owner_user_id || null,
     nexusMarkProfile: server.nexus_mark_profile || '',
     nexusMark: profileForServer(server, parseJsonObject(server.nexu_payload)),
     autoStart: Boolean(server.auto_start),
@@ -478,11 +496,12 @@ async function runHealthCheck(force = false) {
   add('SQLite database', Boolean(db.prepare('SELECT 1 AS ok').get().ok), 'Database responds');
   add('Servers folder', fs.existsSync(serversRoot), displayPath(serversRoot));
   add('Backups folder', fs.existsSync(backupsRoot), displayPath(backupsRoot));
-  add('Software folder', fs.existsSync(path.join(__dirname, '..', 'software')), 'Software cache exists');
+  fs.mkdirSync(softwareRoot, { recursive: true });
+  add('Software cache', fs.existsSync(softwareRoot), displayPath(softwareRoot));
 
   const servers = db.prepare('SELECT * FROM servers ORDER BY id ASC').all();
   for (const server of servers) {
-    const software = findSoftware(server.software_key) || defaultSoftware(server.type);
+    const software = softwareForServer(server);
     const root = server.server_path || serverPath(server.id, server.name);
     add(`Server ${server.name}`, fs.existsSync(root), displayPath(root));
     if (software) {
@@ -526,11 +545,34 @@ async function runHealthCheck(force = false) {
   return payload;
 }
 
-function serverRows() {
-  return db.prepare('SELECT * FROM servers ORDER BY created_at DESC').all().map(serverPayload);
+function serverRows(user, req = null) {
+  const rows = user?.role === 'owner'
+    ? db.prepare('SELECT * FROM servers ORDER BY created_at DESC').all()
+    : db.prepare('SELECT * FROM servers WHERE owner_user_id = ? ORDER BY created_at DESC').all(user?.id || 0);
+  return rows.map((server) => serverPayload(server, req));
+}
+
+function canUseServer(user, server) {
+  if (!user || !server) return false;
+  if (user.role === 'owner') return true;
+  return Number(server.owner_user_id) === Number(user.id);
 }
 
 function pluginRows(serverId = null) {
+  if (Array.isArray(serverId)) {
+    if (!serverId.length) return [];
+    const placeholders = serverId.map(() => '?').join(',');
+    return db.prepare(`SELECT * FROM plugins WHERE server_id IN (${placeholders}) ORDER BY created_at DESC`).all(...serverId).map((plugin) => ({
+      id: plugin.id,
+      serverId: plugin.server_id,
+      name: plugin.name,
+      kind: plugin.kind,
+      fileName: plugin.file_name,
+      relativePath: plugin.relative_path,
+      enabled: Boolean(plugin.enabled),
+      createdAt: plugin.created_at,
+    }));
+  }
   const rows = serverId
     ? db.prepare('SELECT * FROM plugins WHERE server_id = ? ORDER BY created_at DESC').all(serverId)
     : db.prepare('SELECT * FROM plugins ORDER BY created_at DESC').all();
@@ -556,6 +598,7 @@ function getServerOr404(id) {
 function safeServerFile(server, relative = '') {
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const cleaned = String(relative || '').replaceAll('\\', '/').replace(/^\/+/, '');
+  if (cleaned === 'runtime' || cleaned.startsWith('runtime/')) throw new Error('NexusPanel runtime files are protected.');
   return {
     root,
     relative: cleaned,
@@ -564,7 +607,7 @@ function safeServerFile(server, relative = '') {
 }
 
 function uploadRows(serverId) {
-  return db.prepare('SELECT relative_path, file_name, size, uploaded_bytes, status, message, updated_at FROM upload_sessions WHERE server_id = ? ORDER BY updated_at DESC LIMIT 25')
+  return db.prepare('SELECT relative_path, file_name, size, uploaded_bytes, status, message, chunks_json, updated_at FROM upload_sessions WHERE server_id = ? ORDER BY updated_at DESC LIMIT 25')
     .all(serverId)
     .map((row) => ({
       path: row.relative_path,
@@ -574,22 +617,52 @@ function uploadRows(serverId) {
       progress: row.size ? Math.min(100, Math.round((row.uploaded_bytes / row.size) * 100)) : 0,
       status: row.status,
       message: row.message,
+      chunks: parseJsonObject(row.chunks_json) || [],
       updatedAt: row.updated_at,
     }));
 }
 
-function upsertUploadSession(serverId, relativePath, size, uploadedBytes, status = 'active', message = '') {
+function parseChunkRanges(value) {
+  const ranges = Array.isArray(value) ? value : parseJsonObject(value) || [];
+  return ranges
+    .map((range) => ({ start: Number(range.start), end: Number(range.end) }))
+    .filter((range) => Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end) && range.start >= 0 && range.end > range.start)
+    .sort((a, b) => a.start - b.start);
+}
+
+function mergeChunkRanges(ranges, next = null) {
+  const sorted = parseChunkRanges(next ? [...ranges, next] : ranges);
+  const merged = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && range.start <= last.end) last.end = Math.max(last.end, range.end);
+    else merged.push({ ...range });
+  }
+  return merged;
+}
+
+function uploadedRangeBytes(ranges) {
+  return mergeChunkRanges(ranges).reduce((sum, range) => sum + range.end - range.start, 0);
+}
+
+function uploadSession(serverId, relativePath) {
+  return db.prepare('SELECT * FROM upload_sessions WHERE server_id = ? AND relative_path = ?').get(serverId, relativePath);
+}
+
+function upsertUploadSession(serverId, relativePath, size, uploadedBytes, status = 'active', message = '', chunks = null) {
+  const chunksJson = JSON.stringify(mergeChunkRanges(chunks || []));
   db.prepare(`
-    INSERT INTO upload_sessions (server_id, relative_path, file_name, size, uploaded_bytes, status, message)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO upload_sessions (server_id, relative_path, file_name, size, uploaded_bytes, status, message, chunks_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(server_id, relative_path)
     DO UPDATE SET
       size = excluded.size,
       uploaded_bytes = excluded.uploaded_bytes,
       status = excluded.status,
       message = excluded.message,
+      chunks_json = excluded.chunks_json,
       updated_at = CURRENT_TIMESTAMP
-  `).run(serverId, relativePath, path.basename(relativePath), size, uploadedBytes, status, message);
+  `).run(serverId, relativePath, path.basename(relativePath), size, uploadedBytes, status, message, chunksJson);
 }
 
 function hasJavaEula(server) {
@@ -1029,8 +1102,8 @@ app.get('/api/overview', (req, res) => {
     needsSetup: getUserCount() === 0,
     permissions,
     user: req.user ? publicUser(req.user) : null,
-    servers: req.user ? serverRows() : [],
-    plugins: req.user ? pluginRows() : [],
+    servers: req.user ? serverRows(req.user, req) : [],
+    plugins: req.user ? pluginRows(req.user.role === 'owner' ? null : serverRows(req.user, req).map((server) => server.id)) : [],
     softwareCatalog: req.user ? softwareCatalog() : [],
     templates: req.user ? templateRows() : [],
     settings: req.user ? panelSettingsPayload() : null,
@@ -1041,6 +1114,14 @@ app.get('/api/overview', (req, res) => {
   };
 
   res.json(payload);
+});
+
+app.use('/api/servers/:id', (req, res, next) => {
+  if (!req.user) return next();
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.params.id));
+  if (!server) return next();
+  if (!canUseServer(req.user, server)) return res.status(403).json({ error: 'No permission for this server.' });
+  next();
 });
 
 app.get('/api/optimizer/status', requireAccess(permissions.MANAGE_SERVERS), (_req, res) => {
@@ -1254,7 +1335,58 @@ app.post('/api/terminal/run', requireAccess(permissions.MANAGE_ADMINS), asyncRou
 
 function terminalShell() {
   if (process.platform === 'win32') return { command: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-NoExit'] };
-  return { command: process.env.SHELL || '/bin/bash', args: ['-l'] };
+  const shell = process.env.SHELL || (fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh');
+  return { command: shell, args: shell.endsWith('bash') ? ['-l'] : [] };
+}
+
+function closeWakeWatcher(serverId) {
+  const watcher = wakeWatchers.get(serverId);
+  if (!watcher) return;
+  try { watcher.close(); } catch {}
+  wakeWatchers.delete(serverId);
+}
+
+function refreshWakeWatchers() {
+  const servers = db.prepare('SELECT * FROM servers WHERE wake_on_join = 1').all();
+  const wanted = new Set();
+  for (const server of servers) {
+    wanted.add(server.id);
+    if (runtimeStatus(server.id) === 'online') {
+      closeWakeWatcher(server.id);
+      continue;
+    }
+    if (wakeWatchers.has(server.id)) continue;
+    const software = softwareForServer(server);
+    if (!software) continue;
+    const protocol = server.type === 'java' ? 'tcp' : 'udp';
+    const start = () => {
+      closeWakeWatcher(server.id);
+      try {
+        appendLog(server.id, '[NexusPanel] Wake-on-join packet detected. Starting server...');
+        startServer(resolveInstalledExecutable(server, software), software);
+      } catch (error) {
+        appendLog(server.id, `[NexusPanel] Wake-on-join failed: ${error.message}`);
+      }
+    };
+    if (protocol === 'udp') {
+      const socket = require('node:dgram').createSocket('udp4');
+      socket.once('message', start);
+      socket.on('error', (error) => appendLog(server.id, `[NexusPanel] Wake UDP listener failed: ${error.message}`));
+      socket.bind(server.port, '0.0.0.0');
+      wakeWatchers.set(server.id, socket);
+    } else {
+      const listener = require('node:net').createServer((socket) => {
+        socket.destroy();
+        start();
+      });
+      listener.on('error', (error) => appendLog(server.id, `[NexusPanel] Wake TCP listener failed: ${error.message}`));
+      listener.listen(server.port, '0.0.0.0');
+      wakeWatchers.set(server.id, listener);
+    }
+  }
+  for (const id of [...wakeWatchers.keys()]) {
+    if (!wanted.has(id)) closeWakeWatcher(id);
+  }
 }
 
 function terminalSessionPayload(session) {
@@ -1286,7 +1418,7 @@ setInterval(() => {
   }
 }, 60 * 1000).unref();
 
-app.post('/api/terminal/session', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.post('/api/terminal/session', requireAuth, (req, res) => {
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
   if (settingValue('terminal_enabled', '0') !== '1') return res.status(403).json({ error: 'Terminal is disabled in Settings.' });
   const owner = db.prepare('SELECT * FROM users WHERE id = ? AND role = ?').get(req.user.id, 'owner');
@@ -1312,7 +1444,7 @@ app.post('/api/terminal/session', requireAccess(permissions.MANAGE_ADMINS), (req
   res.status(201).json({ session: terminalSessionPayload(session) });
 });
 
-app.get('/api/terminal/session/:sessionId/output', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.get('/api/terminal/session/:sessionId/output', requireAuth, (req, res) => {
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
   const session = requireTerminalSession(req, res);
   if (!session) return;
@@ -1320,7 +1452,7 @@ app.get('/api/terminal/session/:sessionId/output', requireAccess(permissions.MAN
   res.json({ output: session.buffer.slice(cursor).join(''), cursor: session.buffer.length, active: !session.closed });
 });
 
-app.post('/api/terminal/session/:sessionId/input', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.post('/api/terminal/session/:sessionId/input', requireAuth, (req, res) => {
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
   const session = requireTerminalSession(req, res);
   if (!session) return;
@@ -1331,7 +1463,7 @@ app.post('/api/terminal/session/:sessionId/input', requireAccess(permissions.MAN
   res.json({ ok: true });
 });
 
-app.delete('/api/terminal/session/:sessionId', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.delete('/api/terminal/session/:sessionId', requireAuth, (req, res) => {
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
   const session = requireTerminalSession(req, res);
   if (!session) return;
@@ -1353,9 +1485,9 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
     INSERT INTO servers (
       name, type, port, max_memory_mb, auto_start, auto_restart, crash_backup,
       scheduled_backups, backup_retention, wake_on_join, whitelist,
-      tunnel_provider, public_alias, startup_delay_sec, software_key, software_version, cpu_cores, disk_limit_mb
+      tunnel_provider, public_alias, startup_delay_sec, software_key, software_version, cpu_cores, disk_limit_mb, owner_user_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     name,
     type,
@@ -1375,6 +1507,7 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
     String(req.body.softwareVersion || 'latest').trim().slice(0, 32) || 'latest',
     clampNumber(req.body.cpuCores, 1, os.cpus().length || 1, 1),
     0,
+    req.user.role === 'owner' ? (Number(req.body.ownerUserId) || null) : req.user.id,
   );
 
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
@@ -1403,9 +1536,9 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
       name, type, port, max_memory_mb, auto_start, auto_restart, crash_backup,
       scheduled_backups, backup_retention, wake_on_join, whitelist,
       tunnel_provider, public_alias, startup_delay_sec, software_key, software_version, install_status, install_message,
-      cpu_cores, disk_limit_mb, template_key, nexu_payload, nexus_mark_profile
+      cpu_cores, disk_limit_mb, template_key, nexu_payload, nexus_mark_profile, owner_user_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     name,
     type,
@@ -1428,6 +1561,7 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
     nexu.key,
     JSON.stringify(nexu),
     '',
+    req.user.role === 'owner' ? null : req.user.id,
   );
 
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
@@ -2009,7 +2143,8 @@ app.get('/api/servers/:id/files', requireAuth, asyncRoute(async (req, res) => {
   if (!stats) return res.status(404).json({ error: 'Path not found.' });
 
   if (stats.isDirectory()) {
-    const entries = await fs.promises.readdir(target.absolute, { withFileTypes: true });
+    const entries = (await fs.promises.readdir(target.absolute, { withFileTypes: true }))
+      .filter((entry) => !(target.relative === '' && entry.name.toLowerCase() === 'runtime'));
     const payloadEntries = await Promise.all(entries.map(async (entry) => {
       const entryPath = path.join(target.absolute, entry.name);
       const entryStats = await fs.promises.stat(entryPath).catch(() => null);
@@ -2069,6 +2204,8 @@ app.get('/api/servers/:id/files/upload-status', requireAccess(permissions.MANAGE
   const partial = await fs.promises.stat(partialPath).catch(() => null);
   const complete = await fs.promises.stat(target.absolute).catch(() => null);
   const expectedFileHash = String(req.query.sha256 || '').trim().toLowerCase();
+  const session = uploadSession(server.id, target.relative);
+  const chunks = mergeChunkRanges(parseChunkRanges(session?.chunks_json));
   if (complete && totalSize && complete.size === totalSize) {
     if (expectedFileHash) {
       const actual = await fileSha256Hex(target.absolute);
@@ -2078,12 +2215,13 @@ app.get('/api/servers/:id/files/upload-status', requireAccess(permissions.MANAGE
         return res.status(409).json({ error: 'Existing upload checksum mismatch. Retry the file.' });
       }
     }
-    upsertUploadSession(server.id, target.relative, totalSize, complete.size, 'complete', 'Uploaded');
-    return res.json({ uploadedBytes: complete.size, complete: true, sha256: expectedFileHash || '' });
+    const fullChunk = [{ start: 0, end: complete.size }];
+    upsertUploadSession(server.id, target.relative, totalSize, complete.size, 'complete', 'Uploaded', fullChunk);
+    return res.json({ uploadedBytes: complete.size, uploadedChunks: fullChunk, complete: true, sha256: expectedFileHash || '' });
   }
-  const uploadedBytes = partial ? partial.size : 0;
-  upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, uploadedBytes ? 'paused' : 'waiting', uploadedBytes ? 'Ready to resume' : 'Waiting for upload');
-  res.json({ uploadedBytes, complete: false });
+  const uploadedBytes = partial ? uploadedRangeBytes(chunks) : 0;
+  upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, uploadedBytes ? 'paused' : 'waiting', uploadedBytes ? 'Ready to resume exact chunks' : 'Waiting for upload', chunks);
+  res.json({ uploadedBytes, uploadedChunks: chunks, complete: false });
 }));
 
 app.post('/api/servers/:id/files/upload-chunk', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
@@ -2103,28 +2241,31 @@ app.post('/api/servers/:id/files/upload-chunk', requireAccess(permissions.MANAGE
   }
   await fs.promises.mkdir(path.dirname(target.absolute), { recursive: true });
   const partialPath = `${target.absolute}.uploading`;
-  const existing = db.prepare('SELECT status FROM upload_sessions WHERE server_id = ? AND relative_path = ?').get(server.id, target.relative);
+  const existing = uploadSession(server.id, target.relative);
   if (existing && existing.status === 'canceled') return res.status(409).json({ error: 'Upload was canceled.' });
-  const handle = await fs.promises.open(partialPath, 'a+');
+  if (!fs.existsSync(partialPath)) await fs.promises.writeFile(partialPath, Buffer.alloc(0));
+  const handle = await fs.promises.open(partialPath, 'r+');
   try {
     await handle.write(req.body, 0, req.body.length, offset);
   } finally {
     await handle.close();
   }
-  const uploadedBytes = offset + req.body.length;
+  const chunks = mergeChunkRanges(parseChunkRanges(existing?.chunks_json), { start: offset, end: offset + req.body.length });
+  const uploadedBytes = uploadedRangeBytes(chunks);
   if (uploadedBytes >= totalSize && req.query.finalize === '1') {
     const stats = await fs.promises.stat(partialPath);
     if (stats.size !== totalSize) return res.status(409).json({ error: 'Upload size mismatch. Retry the file.' });
     const finalHash = await fileSha256Hex(partialPath);
     if (expectedFileHash && finalHash !== expectedFileHash) {
-      upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'failed', 'Final checksum mismatch; retry upload');
+      await fs.promises.rm(partialPath, { force: true }).catch(() => {});
+      upsertUploadSession(server.id, target.relative, totalSize, 0, 'failed', 'Final checksum mismatch; clean retry required', []);
       return res.status(409).json({ error: 'Final file checksum mismatch. Retry the upload.' });
     }
     await fs.promises.rename(partialPath, target.absolute);
-    upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'complete', expectedFileHash ? `Uploaded sha256:${finalHash}` : 'Uploaded');
+    upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'complete', expectedFileHash ? `Uploaded sha256:${finalHash}` : 'Uploaded', [{ start: 0, end: totalSize }]);
     return res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true, sha256: finalHash });
   }
-  upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, 'active', 'Uploading');
+  upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, 'active', 'Uploading', chunks);
   res.json({ ok: true, path: target.relative, uploadedBytes, complete: false });
 }));
 
@@ -2137,17 +2278,24 @@ app.post('/api/servers/:id/files/upload-complete', requireAccess(permissions.MAN
   const partialPath = `${target.absolute}.uploading`;
   const stats = await fs.promises.stat(partialPath).catch(() => null);
   if (!stats || !stats.isFile()) return res.status(404).json({ error: 'Upload session file was not found.' });
+  const session = uploadSession(server.id, target.relative);
+  const chunks = mergeChunkRanges(parseChunkRanges(session?.chunks_json));
+  if (chunks.length !== 1 || chunks[0].start !== 0 || chunks[0].end !== totalSize) {
+    upsertUploadSession(server.id, target.relative, totalSize || stats.size, uploadedRangeBytes(chunks), 'paused', 'Missing chunks; resume upload', chunks);
+    return res.status(409).json({ error: 'Upload has missing chunks. Reselect the same file to resume.' });
+  }
   if (!Number.isSafeInteger(totalSize) || stats.size !== totalSize) {
-    upsertUploadSession(server.id, target.relative, totalSize || stats.size, stats.size, 'failed', 'Upload size mismatch');
+    upsertUploadSession(server.id, target.relative, totalSize || stats.size, uploadedRangeBytes(chunks), 'failed', 'Upload size mismatch', chunks);
     return res.status(409).json({ error: 'Upload size mismatch. Retry missing chunks.' });
   }
   const finalHash = await fileSha256Hex(partialPath);
   if (expectedFileHash && finalHash !== expectedFileHash) {
-    upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'failed', 'Final checksum mismatch; retry upload');
+    await fs.promises.rm(partialPath, { force: true }).catch(() => {});
+    upsertUploadSession(server.id, target.relative, totalSize, 0, 'failed', 'Final checksum mismatch; clean retry required', []);
     return res.status(409).json({ error: 'Final file checksum mismatch. Retry the upload.' });
   }
   await fs.promises.rename(partialPath, target.absolute);
-  upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'complete', expectedFileHash ? `Uploaded sha256:${finalHash}` : 'Uploaded');
+  upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'complete', expectedFileHash ? `Uploaded sha256:${finalHash}` : 'Uploaded', [{ start: 0, end: totalSize }]);
   res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true, sha256: finalHash });
 }));
 
@@ -2156,7 +2304,9 @@ app.post('/api/servers/:id/files/upload-pause', requireAccess(permissions.MANAGE
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose an upload path.' });
   const partial = await fs.promises.stat(`${target.absolute}.uploading`).catch(() => null);
-  upsertUploadSession(server.id, target.relative, Number(req.body.size || partial?.size || 0), partial ? partial.size : 0, 'paused', 'Paused');
+  const session = uploadSession(server.id, target.relative);
+  const chunks = mergeChunkRanges(parseChunkRanges(session?.chunks_json));
+  upsertUploadSession(server.id, target.relative, Number(req.body.size || partial?.size || 0), uploadedRangeBytes(chunks), 'paused', 'Paused', chunks);
   res.json({ uploads: uploadRows(server.id) });
 }));
 
@@ -2361,6 +2511,8 @@ async function ensureInitialOwner() {
 async function start() {
   await ensureInitialOwner();
   startSchedulers();
+  refreshWakeWatchers();
+  setInterval(refreshWakeWatchers, 5000).unref();
   app.listen(port, () => {
     console.log(`NexusPanel running at http://localhost:${port}`);
   });

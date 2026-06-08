@@ -28,6 +28,8 @@ const elements = {
   serverForm: document.querySelector('#serverForm'),
   softwareSelect: document.querySelector('#softwareSelect'),
   softwareVersionSelect: document.querySelector('#softwareVersionSelect'),
+  ownerAssignLabel: document.querySelector('#ownerAssignLabel'),
+  ownerUserSelect: document.querySelector('#ownerUserSelect'),
   serverGrid: document.querySelector('#serverGrid'),
   serverRowsGrid: document.querySelector('#serverRowsGrid'),
   templateGrid: document.querySelector('#templateGrid'),
@@ -287,7 +289,7 @@ function enableDeveloperModeGuard() {
     if ((widthGap > 170 && widthGap > lastWidth + 80) || (heightGap > 170 && heightGap > lastHeight + 80)) redirect();
     lastWidth = widthGap;
     lastHeight = heightGap;
-  }, 900);
+  }, 3000);
 }
 
 function childPath(name) {
@@ -339,9 +341,10 @@ async function uploadFile(server, file, destinationPath, onProgress) {
   for (let offset = 0; offset < file.size; offset += UPLOAD_CHUNK_SIZE) {
     chunks.push({ offset, end: Math.min(offset + UPLOAD_CHUNK_SIZE, file.size), uploaded: false, loaded: 0 });
   }
-  const uploadedBytes = Math.min(Number(status.uploadedBytes || 0), file.size);
+  const uploadedRanges = Array.isArray(status.uploadedChunks) ? status.uploadedChunks : [];
   for (const chunk of chunks) {
-    if (chunk.end <= uploadedBytes) {
+    const exact = uploadedRanges.some((range) => Number(range.start) <= chunk.offset && Number(range.end) >= chunk.end);
+    if (exact) {
       chunk.uploaded = true;
       chunk.loaded = chunk.end - chunk.offset;
     }
@@ -460,6 +463,16 @@ function renderStats() {
     if (createRam) createRam.max = String(maxMemory);
     if (configRam) configRam.max = String(maxMemory);
   }
+  const maxCores = Math.max(1, Number(state.settings?.maxCpuCores || navigator.hardwareConcurrency || 1));
+  if (elements.serverForm?.cpuCores) elements.serverForm.cpuCores.max = String(maxCores);
+  if (elements.ownerAssignLabel && elements.ownerUserSelect) {
+    const owner = state.user?.role === 'owner';
+    elements.ownerAssignLabel.hidden = !owner;
+    elements.ownerUserSelect.innerHTML = '<option value="">Owner / unassigned</option>' + (state.users || [])
+      .filter((user) => user.role !== 'owner')
+      .map((user) => `<option value="${user.id}">${escapeHtml(user.name)} · ${escapeHtml(user.email)}</option>`)
+      .join('');
+  }
 }
 
 function renderView() {
@@ -561,7 +574,7 @@ function renderTemplates() {
       </div>
       <div class="template-tags">${(template.features || []).slice(0, 5).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>
       <details class="nexu-details">
-        <summary>Nexu JSON structure</summary>
+        <summary>Template JSON structure</summary>
         <pre>${escapeHtml(JSON.stringify(template.nexu || {}, null, 2))}</pre>
       </details>
       <p class="muted">Requirements: ${(template.requirements || []).map((item) => escapeHtml(item.name || item.key || item)).join(', ') || 'none'} · Start args: ${(template.startArgs || []).map(escapeHtml).join(' ') || 'native'}</p>
@@ -571,7 +584,7 @@ function renderTemplates() {
         <label>CPU cores <input data-template-cpu="${escapeHtml(template.key)}" type="number" min="1" max="${navigator.hardwareConcurrency || 64}" step="1" value="${template.cpuCores || 1}"></label>
         <label>Port <input data-template-port="${escapeHtml(template.key)}" type="number" min="1" max="65535" value="${template.port}"></label>
       </div>
-      <button type="button" data-action="create-template-server" data-template-key="${escapeHtml(template.key)}">${template.edition === 'custom' ? 'Create Nexu Placeholder' : 'Create + Auto Setup'}</button>
+      <button type="button" data-action="create-template-server" data-template-key="${escapeHtml(template.key)}">${template.edition === 'custom' ? 'Create Template Server' : 'Create + Auto Setup'}</button>
     </article>
   `).join('') || '<p class="empty-state">No templates available.</p>';
 }
@@ -603,11 +616,11 @@ function renderSoftware() {
         <strong>${escapeHtml(server.softwareName || 'Nexu Template')}</strong>
         <span class="pill is-on">nexu</span>
       </div>
-      <p>Installs from the template's own Nexu runtime commands, including SteamCMD app IDs where provided.</p>
+      <p>Installs from the template's own runtime commands, including SteamCMD app IDs where provided.</p>
       <div class="stat-row"><span class="muted">Executable</span><code>${escapeHtml(server.executablePath || 'resolved after install')}</code></div>
       <div class="install-track"><span style="width:${server.installProgress || 0}%"></span></div>
       <div class="stat-row"><span class="muted">${escapeHtml(server.installMessage || server.installStatus || 'Ready')}</span><strong>${server.installProgress || 0}%</strong></div>
-      <button type="button" data-action="install-software" data-software-key="${escapeHtml(server.softwareKey || '')}">${server.installStatus === 'installed' ? 'Reinstall Nexu' : 'Install Nexu'}</button>
+      <button type="button" data-action="install-software" data-software-key="${escapeHtml(server.softwareKey || '')}">${server.installStatus === 'installed' ? 'Reinstall Template' : 'Install Template'}</button>
     </article>
   ` : '') + state.softwareCatalog.map((software) => {
     const compatible = software.edition === server.type;
@@ -864,15 +877,15 @@ function renderSettings() {
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
       <label>Update repo <input name="updateRepo" value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
-      <button type="submit">Save Settings</button>
+      <button class="save-wide" type="submit">Save Settings</button>
     </form>
     <div class="public-help-grid">
       <article><strong>Nexus-Mark</strong><span>Original lightweight control profile: safe paths, RAM caps, CPU plan metadata, and future cgroup/systemd slicing on Linux.</span></article>
-      <article><strong>Nexu Imports</strong><span>Egg-like templates without the Pterodactyl name. Custom game blueprints stay isolated per server.</span></article>
+      <article><strong>Template Imports</strong><span>JSON game blueprints. Custom game servers stay isolated per server.</span></article>
       <article><strong>Updater</strong><span>Pulls panel code while protecting server data and the external backup store.</span></article>
     </div>
     <details class="nexu-details">
-      <summary>Example .nexu JSON</summary>
+      <summary>Example Template JSON</summary>
       <pre>${escapeHtml(JSON.stringify(settings.nexuExample || {}, null, 2))}</pre>
     </details>
   `;
@@ -885,7 +898,7 @@ function renderTerminal() {
     return;
   }
   elements.terminalPanel.innerHTML = `
-    <div class="section-head"><div><p class="eyebrow">Owner Terminal</p><h2>Persistent VPS shell</h2></div><button class="danger" type="button" data-action="terminal-close">Close Session</button></div>
+    <div class="section-head"><div><p class="eyebrow">Owner Terminal</p><h2>Persistent VPS shell</h2></div><button class="danger" type="button" data-action="terminal-close">Stop Terminal</button></div>
     <form class="terminal-form" id="terminalUnlockForm" ${terminalSession.id ? 'hidden' : ''}>
       <label>Owner password <input name="password" type="password" autocomplete="current-password" required></label>
       <button type="submit">Unlock Terminal</button>
@@ -1173,7 +1186,7 @@ function startRefreshLoop() {
   window.clearInterval(state.refreshTimer);
   state.refreshTimer = window.setInterval(() => {
     if (!state.user) return;
-    const dueStatus = Date.now() - state.statusRefreshAt > 1800;
+    const dueStatus = Date.now() - state.statusRefreshAt > 3500;
     if (state.activeView === 'console') {
       renderConsole().catch(() => {});
       if (!dueStatus) return;
@@ -1183,7 +1196,7 @@ function startRefreshLoop() {
       refreshServerStatusOnly().catch(() => {});
     }
     if (state.activeView === 'files') renderUploadSessions().catch(() => {});
-  }, 900);
+  }, 1500);
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -1203,6 +1216,7 @@ elements.serverForm.addEventListener('submit', async (event) => {
   const payload = formData(elements.serverForm);
   payload.port = Number(payload.port);
   payload.maxMemoryMb = Number(payload.maxMemoryMb);
+  payload.cpuCores = Number(payload.cpuCores || 1);
   try {
     const result = await api('/api/servers', { method: 'POST', body: JSON.stringify(payload) });
     state.activeServerId = result.server.id;
@@ -1211,6 +1225,7 @@ elements.serverForm.addEventListener('submit', async (event) => {
     elements.serverForm.crashBackup.checked = true;
     elements.serverForm.port.value = '19132';
     elements.serverForm.maxMemoryMb.value = '1024';
+    elements.serverForm.cpuCores.value = '1';
     showToast('Server created. Install software from the Software tab.');
     await refresh();
     setView('software');
@@ -1553,7 +1568,7 @@ document.addEventListener('click', async (event) => {
         body: JSON.stringify({ name, maxMemoryMb, cpuCores, port }),
       });
       state.activeServerId = result.server.id;
-      showToast(result.server.installStatus === 'template' ? 'Nexu placeholder created.' : 'Template server created. Install software next.');
+      showToast(result.server.installStatus === 'template' ? 'Template server created.' : 'Template server created. Install software next.');
       await refresh();
       setView(result.server.installStatus === 'template' ? 'console' : 'software');
       return;

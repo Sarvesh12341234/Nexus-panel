@@ -14,7 +14,7 @@ Open `http://localhost:3000`.
 Linux/Ubuntu one-command installer:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/v1.1.1/nexuspanel-v1.1.1-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v1.0/nexuspanel-normal-v1.0-linux-installer.sh | sudo bash
 ```
 
 ## VPS Background Service
@@ -44,6 +44,7 @@ nexuspanel restart
 nexuspanel status
 nexuspanel logs
 nexuspanel update
+nexuspanel change panelport 8080
 ```
 
 On first run, `nexuspanel start` or `nexuspanel install` asks for owner account name, email, and password before starting the panel.
@@ -64,7 +65,12 @@ bash update/update.sh
 
 Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the external backup store.
 
-## v1.1.1 Transfer + Safety
+## v1.0 Editions
+
+- `normal-v1.0`: advanced solo panel with terminal, templates, fast transfer, backups, plugin/file/software managers.
+- `host-v1.0`: hosting edition using the same engine plus owner/all-server visibility and assigned-user server isolation.
+
+## v1.0 Transfer + Safety
 
 - Upload chunks increased to `32MB`.
 - Uploads use up to `4` parallel chunks per file.
@@ -106,10 +112,10 @@ With this enabled, NexusPanel still checks login/auth first, then Nginx streams 
 - Chunked/resumable file uploads with pause/cancel and cross-device progress visibility.
 - File manager actions: upload, copy, cut, paste, archive, unzip, delete, select all.
 - More optimizer capability cards and VPS tuning notes.
-- Template-first setup replaces the old tunnel page: Bedrock, Java crossplay, PocketMine, Purpur performance, and Nexu placeholders for more games.
+- Template-first setup replaces the old tunnel page: Bedrock, Java crossplay, PocketMine, Purpur performance, Rust, ARK, Valheim, Palworld, Factorio, Satisfactory, and Project Zomboid templates.
 - Settings includes a safe GitHub updater for `Sarvesh12341234/Nexus-panel`, owner-only terminal toggle, and Nexus-Mark controls.
-- `.nexu` is a JSON template format with requirements, RAM/CPU/disk, ports, start args, paths, properties, and Nexus-Mark security profile.
-- Nexus-Mark is NexusPanel's original no-Docker control layer: path sandboxing, per-server root, RAM allocation guard, resource profile files, and Linux systemd/cgroup plan metadata.
+- Template JSON supports requirements, RAM/CPU/disk, ports, start args, paths, properties, and Nexus-Mark security profile.
+- Nexus-Mark is NexusPanel's original no-Docker control layer: path sandboxing, per-server root, RAM allocation guard, external resource profile files, and Linux systemd/cgroup plan metadata.
 - The UI includes a DevTools deterrent that redirects to Google for common inspector shortcuts; real protection is still server-side owner auth and permission checks.
 
 ## Accounts
