@@ -34,6 +34,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const dataRoot = path.join(__dirname, '..', 'data');
 const healthPath = path.join(dataRoot, 'panel_health.json');
+const editionPath = path.join(dataRoot, 'edition');
 const terminalSessions = new Map();
 const wakeWatchers = new Map();
 
@@ -100,6 +101,18 @@ function settingValue(key, fallback = '') {
   return row ? row.value : fallback;
 }
 
+function ensureSettingValue(key, factory) {
+  const existing = settingValue(key, '');
+  if (existing) return existing;
+  const value = typeof factory === 'function' ? factory() : factory;
+  setSettingValue(key, value);
+  return value;
+}
+
+function panelEdition() {
+  return (process.env.NEXUSPANEL_EDITION || (fs.existsSync(editionPath) ? fs.readFileSync(editionPath, 'utf8').trim() : '') || 'normal').replace(/[^a-z0-9-]/gi, '').toLowerCase() || 'normal';
+}
+
 function setSettingValue(key, value) {
   db.prepare(`
     INSERT INTO panel_settings (key, value)
@@ -112,12 +125,19 @@ function panelSettingsPayload() {
   return {
     terminalEnabled: settingValue('terminal_enabled', '0') === '1',
     updateRepo: settingValue('update_repo', 'https://github.com/Sarvesh12341234/Nexus-panel.git'),
+    edition: panelEdition(),
+    updateTag: panelEdition() === 'host' ? 'host-v1.0' : 'normal-v1.0',
+    hostApiTokenPreview: `${reqOwnerSafeHostToken().slice(0, 8)}••••${reqOwnerSafeHostToken().slice(-6)}`,
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
     maxCpuCores: os.cpus().length || 1,
     platform: process.platform,
     nexuExample: nexuExample(),
   };
+}
+
+function reqOwnerSafeHostToken() {
+  return ensureSettingValue('host_api_token', () => crypto.randomBytes(32).toString('base64url'));
 }
 
 function templateRows() {
@@ -325,6 +345,10 @@ async function installNexuTemplate(server) {
     WHERE id = ?
   `).run(`Running ${nexu.runtime.install.mode || 'nexu'} installer`, server.id);
   let progress = 12;
+  if (nexu.runtime.install.mode === 'steamcmd' && process.platform === 'linux' && !commandWorks('steamcmd')) {
+    db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, 'SteamCMD missing. Installing requirement...', server.id);
+    installSteamcmdRequirement();
+  }
   for (const rawCommand of nexu.runtime.install.commands) {
     const command = templateValue(rawCommand, server, root);
     appendLog(server.id, `[NexusPanel] Nexu install: ${command}`);
@@ -360,6 +384,26 @@ function requestPublicHost(req) {
     }
   }
   return '127.0.0.1';
+}
+
+async function networkStats() {
+  if (process.platform === 'linux' && fs.existsSync('/proc/net/dev')) {
+    const lines = fs.readFileSync('/proc/net/dev', 'utf8').split('\n').slice(2);
+    const rows = lines.map((line) => {
+      const [nameRaw, dataRaw] = line.split(':');
+      if (!dataRaw) return null;
+      const values = dataRaw.trim().split(/\s+/).map(Number);
+      const name = nameRaw.trim();
+      if (name === 'lo') return null;
+      return { name, rxBytes: values[0] || 0, txBytes: values[8] || 0 };
+    }).filter(Boolean);
+    return {
+      interfaces: rows,
+      inboundBytes: rows.reduce((sum, row) => sum + row.rxBytes, 0),
+      outboundBytes: rows.reduce((sum, row) => sum + row.txBytes, 0),
+    };
+  }
+  return { interfaces: [], inboundBytes: 0, outboundBytes: 0 };
 }
 
 function serverPayload(server, req = null) {
@@ -556,6 +600,14 @@ function canUseServer(user, server) {
   if (!user || !server) return false;
   if (user.role === 'owner') return true;
   return Number(server.owner_user_id) === Number(user.id);
+}
+
+function isHostApiAuthorized(req) {
+  if (ownerOnly(req)) return true;
+  const auth = String(req.headers.authorization || '');
+  const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : String(req.headers['x-nexuspanel-token'] || '').trim();
+  const expected = reqOwnerSafeHostToken();
+  return token && expected && token.length === expected.length && crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
 }
 
 function pluginRows(serverId = null) {
@@ -977,24 +1029,35 @@ async function restoreServerBackup(server, backupName) {
 }
 
 async function downloadToFile(url, filePath, onProgress) {
-  const response = await fetch(url, { headers: { 'User-Agent': 'NexusPanel/1.0' } });
-  if (!response.ok) throw new Error(`Download failed: ${response.status}`);
-
-  const total = Number(response.headers.get('content-length')) || 0;
   const tmpPath = `${filePath}.download`;
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-  const writer = fs.createWriteStream(tmpPath);
-  let received = 0;
-
-  for await (const chunk of response.body) {
-    received += chunk.length;
-    writer.write(chunk);
-    if (total) onProgress(Math.min(98, Math.round((received / total) * 100)));
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+    try {
+      const response = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'NexusPanel/1.0' } });
+      if (response.status === 404) throw new Error(`Download URL returned 404: ${url}`);
+      if (!response.ok) throw new Error(`Download failed: ${response.status}`);
+      const total = Number(response.headers.get('content-length')) || 0;
+      const writer = fs.createWriteStream(tmpPath);
+      let received = 0;
+      for await (const chunk of response.body) {
+        received += chunk.length;
+        if (!writer.write(chunk)) await new Promise((resolve) => writer.once('drain', resolve));
+        if (total) onProgress(Math.min(98, Math.round((received / total) * 100)));
+      }
+      await new Promise((resolve, reject) => writer.end((error) => (error ? reject(error) : resolve())));
+      if (total && received !== total) throw new Error(`Download incomplete: ${received}/${total} bytes`);
+      await fs.promises.rm(filePath, { force: true }).catch(() => {});
+      await fs.promises.rename(tmpPath, filePath);
+      return;
+    } catch (error) {
+      lastError = error;
+      await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 800 * attempt));
+    }
   }
-
-  await new Promise((resolve, reject) => writer.end((error) => (error ? reject(error) : resolve())));
-  await fs.promises.rm(filePath, { force: true }).catch(() => {});
-  await fs.promises.rename(tmpPath, filePath);
+  throw lastError;
 }
 
 async function fetchGithubLatestAsset(repo, matcher) {
@@ -1073,6 +1136,23 @@ function installLinuxPackage(candidates) {
   return false;
 }
 
+function installSteamcmdRequirement() {
+  if (process.platform !== 'linux') throw new Error('SteamCMD auto-install is only supported on Linux.');
+  if (commandWorks('apt-get', ['--version'])) {
+    runRequirementCommand('bash', ['-lc', 'dpkg --add-architecture i386 >/dev/null 2>&1 || true; apt-get update && apt-get install -y steamcmd lib32gcc-s1']);
+    return;
+  }
+  if (commandWorks('dnf', ['--version'])) {
+    runRequirementCommand('dnf', ['install', '-y', 'steamcmd']);
+    return;
+  }
+  if (commandWorks('yum', ['--version'])) {
+    runRequirementCommand('yum', ['install', '-y', 'steamcmd']);
+    return;
+  }
+  throw new Error('SteamCMD is required but no supported package manager was found.');
+}
+
 function ensureSoftwareRequirements(software, serverId, onProgress) {
   if (software.edition === 'java') {
     if (commandWorks('java', ['-version'])) return { ok: true, message: 'Java already installed.' };
@@ -1132,6 +1212,23 @@ app.get('/api/optimizer/plan', requireAccess(permissions.MANAGE_SERVERS), (_req,
   res.json(planCommands());
 });
 
+app.get('/api/network/metrics', requireAuth, asyncRoute(async (_req, res) => {
+  res.json({ network: await networkStats() });
+}));
+
+app.post('/api/network/speed', requireAuth, asyncRoute(async (_req, res) => {
+  const before = await networkStats();
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const after = await networkStats();
+  res.json({
+    network: after,
+    speed: {
+      downloadBytesPerSec: Math.max(0, after.inboundBytes - before.inboundBytes),
+      uploadBytesPerSec: Math.max(0, after.outboundBytes - before.outboundBytes),
+    },
+  });
+}));
+
 app.post('/api/optimizer/apply', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
   const result = applyTweaks();
   if (!result.applied) return res.status(400).json(result);
@@ -1178,8 +1275,70 @@ app.get('/api/audit/logins', requireAccess(permissions.MANAGE_ADMINS), (_req, re
   res.json({ events: loginEventRows(10) });
 });
 
+app.get('/api/host/token', requireAuth, (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only owner can view host API token.' });
+  res.json({ token: reqOwnerSafeHostToken() });
+});
+
+app.post('/api/host/token/regenerate', requireAuth, (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only owner can regenerate host API token.' });
+  setSettingValue('host_api_token', crypto.randomBytes(32).toString('base64url'));
+  res.json({ token: reqOwnerSafeHostToken() });
+});
+
 app.get('/api/health', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
   res.json({ health: await runHealthCheck(req.query.force === '1') });
+}));
+
+app.post('/api/host/provision', asyncRoute(async (req, res) => {
+  if (!isHostApiAuthorized(req)) return res.status(401).json({ error: 'Host API token required.' });
+  const account = req.body.account || {};
+  const serverInput = req.body.server || req.body;
+  const email = account.email || req.body.email;
+  const password = account.password || req.body.password;
+  const name = account.name || email;
+  let user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(email || '').trim().toLowerCase());
+  if (!user) {
+    createUser({ email, name, password, role: 'admin', accessLevel: clampNumber(account.accessLevel ?? 5, 0, 100, 5) });
+    user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(email || '').trim().toLowerCase());
+  }
+  const type = serverInput.type === 'java' ? 'java' : 'bedrock';
+  const selectedSoftware = findSoftware(serverInput.softwareKey) || defaultSoftware(type);
+  const maxCpu = os.cpus().length || 1;
+  const cpuCores = clampNumber(serverInput.cpuCores, 1, maxCpu, 1);
+  const memoryMb = clampMemoryMb(serverInput.ramMb || serverInput.maxMemoryMb, 1024);
+  const result = db.prepare(`
+    INSERT INTO servers (
+      name, type, port, max_memory_mb, auto_start, auto_restart, crash_backup,
+      scheduled_backups, backup_retention, wake_on_join, whitelist,
+      tunnel_provider, public_alias, startup_delay_sec, software_key, software_version, cpu_cores, disk_limit_mb, owner_user_id
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', '', 0, ?, ?, ?, ?, ?)
+  `).run(
+    String(serverInput.name || `${name} Server`).trim().slice(0, 80),
+    type,
+    clampNumber(serverInput.port, 1024, 65535, type === 'java' ? 25565 : 19132),
+    memoryMb,
+    toBool(serverInput.autoStart),
+    toBool(serverInput.autoRestart, true),
+    toBool(serverInput.crashBackup, true),
+    toBool(serverInput.scheduledBackups, true),
+    clampNumber(serverInput.backupRetention, 1, 20, 4),
+    toBool(serverInput.wakeOnJoin),
+    toBool(serverInput.whitelist),
+    selectedSoftware.key,
+    String(serverInput.softwareVersion || 'latest').slice(0, 32),
+    cpuCores,
+    clampNumber(serverInput.diskLimitMb, 0, 1048576, 0),
+    user.id,
+  );
+  const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
+  const root = ensureServerDirs({ ...inserted, server_path: serverPath(inserted.id, inserted.name) });
+  const executablePath = path.join(root, 'software', selectedSoftware.executable);
+  const mark = writeProfile({ ...inserted, server_path: root }, root, null);
+  db.prepare('UPDATE servers SET server_path = ?, executable_path = ?, nexus_mark_profile = ? WHERE id = ?')
+    .run(root, executablePath, JSON.stringify(mark), inserted.id);
+  res.status(201).json({ user: publicUser(user), server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(inserted.id), req) });
 }));
 
 app.post('/api/users', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
@@ -1982,7 +2141,7 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
   });
 });
 
-app.post('/api/servers/:id/start', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.post('/api/servers/:id/start', requireAccess(permissions.POWER_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
@@ -1997,11 +2156,11 @@ app.post('/api/servers/:id/eula', requireAccess(permissions.MANAGE_SERVERS), asy
   res.json({ ok: true, eulaAgreed: true });
 }));
 
-app.post('/api/servers/:id/stop', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.post('/api/servers/:id/stop', requireAccess(permissions.POWER_SERVERS), (req, res) => {
   res.json(stopServer(Number(req.params.id)));
 });
 
-app.post('/api/servers/:id/restart', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.post('/api/servers/:id/restart', requireAccess(permissions.POWER_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
@@ -2009,7 +2168,7 @@ app.post('/api/servers/:id/restart', requireAccess(permissions.MANAGE_SERVERS), 
   res.json(restartServer(resolveInstalledExecutable(server, software), software));
 });
 
-app.post('/api/servers/:id/kill', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.post('/api/servers/:id/kill', requireAccess(permissions.POWER_SERVERS), (req, res) => {
   res.json(killServer(Number(req.params.id)));
 });
 

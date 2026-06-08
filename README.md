@@ -69,6 +69,7 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 
 - `normal-v1.0`: advanced solo panel with terminal, templates, fast transfer, backups, plugin/file/software managers.
 - `host-v1.0`: hosting edition using the same engine plus owner/all-server visibility and assigned-user server isolation.
+- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v1.0` or `host-v1.0`.
 
 ## v1.0 Transfer + Safety
 
@@ -114,6 +115,8 @@ With this enabled, NexusPanel still checks login/auth first, then Nginx streams 
 - More optimizer capability cards and VPS tuning notes.
 - Template-first setup replaces the old tunnel page: Bedrock, Java crossplay, PocketMine, Purpur performance, Rust, ARK, Valheim, Palworld, Factorio, Satisfactory, and Project Zomboid templates.
 - Settings includes a safe GitHub updater for `Sarvesh12341234/Nexus-panel`, owner-only terminal toggle, and Nexus-Mark controls.
+- Network page shows inbound/outbound traffic totals and a one-click current upload/download speed sample.
+- Host API can create an account and assigned server in one request for hosting automation.
 - Template JSON supports requirements, RAM/CPU/disk, ports, start args, paths, properties, and Nexus-Mark security profile.
 - Nexus-Mark is NexusPanel's original no-Docker control layer: path sandboxing, per-server root, RAM allocation guard, external resource profile files, and Linux systemd/cgroup plan metadata.
 - The UI includes a DevTools deterrent that redirects to Google for common inspector shortcuts; real protection is still server-side owner auth and permission checks.
@@ -132,9 +135,19 @@ npm start
 
 The owner can create admin accounts with an email, password, and access level from `0` to `100`.
 
+Host API provisioning example:
+
+```bash
+curl -X POST http://YOUR_PANEL:3000/api/host/provision \
+  -H "Authorization: Bearer YOUR_HOST_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"account":{"email":"player@example.com","password":"StrongPass123","name":"Player","accessLevel":5},"server":{"name":"Player SMP","type":"java","ramMb":4096,"cpuCores":2,"port":25565,"softwareKey":"paper"}}'
+```
+
 | Level | Access |
 | --- | --- |
 | `0` | View only |
+| `5` | Start, stop, restart, kill |
 | `20` | View console |
 | `40` | Send console commands |
 | `60` | Manage servers |

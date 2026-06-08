@@ -79,9 +79,19 @@ function clearSoftwareVersionCache() {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, { headers: { 'User-Agent': 'NexusPanel/1.0' } });
-  if (!response.ok) throw new Error(`Upstream request failed: ${response.status}`);
-  return response.json();
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'NexusPanel/1.0' } });
+      if (response.status === 404) throw new Error(`Upstream file not found: ${url}`);
+      if (!response.ok) throw new Error(`Upstream request failed: ${response.status}`);
+      return response.json();
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 350 * attempt));
+    }
+  }
+  throw lastError;
 }
 
 function softwareCatalog() {

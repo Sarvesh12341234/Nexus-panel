@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_URL="${NEXUSPANEL_REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
 INSTALL_DIR="${NEXUSPANEL_INSTALL_DIR:-/opt/nexuspanel}"
 SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
+EDITION="${NEXUSPANEL_EDITION:-normal}"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -50,6 +51,8 @@ install_panel() {
   fi
 
   cd "$INSTALL_DIR"
+  mkdir -p data
+  printf '%s\n' "$EDITION" > data/edition
   npm install --omit=optional
   printf '#!/usr/bin/env sh\nexec "%s" "%s" "$@"\n' "$(command -v node)" "$INSTALL_DIR/backend/cli.js" > /usr/local/bin/nexuspanel
   chmod 755 /usr/local/bin/nexuspanel

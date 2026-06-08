@@ -54,6 +54,7 @@
           <button class="nav-item" type="button" data-view="plugins">Plugins</button>
           <button class="nav-item" type="button" data-view="backups">Backups</button>
           <button class="nav-item" type="button" data-view="optimizer">Optimizer</button>
+          <button class="nav-item" type="button" data-view="network">Network</button>
           <button class="nav-item" type="button" data-view="admins">Admins</button>
           <button class="nav-item" type="button" data-view="security">Security</button>
           <button class="nav-item" type="button" data-view="settings">Settings</button>
@@ -238,13 +239,17 @@
           <pre id="optimizerPlan" hidden></pre>
         </section>
 
+        <section class="view-section" id="view-network" hidden>
+          <div class="surface tool-surface" id="networkPanel"></div>
+        </section>
+
         <section class="view-section" id="view-admins" hidden>
           <section class="admin-panel surface" id="adminPanel" hidden>
             <form class="admin-form" id="adminForm">
               <input name="name" placeholder="Admin name" required>
               <input name="email" type="email" placeholder="Admin email" required>
               <input name="password" type="password" placeholder="Password" minlength="8" required>
-              <label class="range-label">Access <input name="accessLevel" type="range" min="0" max="100" step="20" value="40"><output id="accessOutput">40</output></label>
+              <label class="range-label">Access <input name="accessLevel" type="range" min="0" max="100" step="5" value="5"><output id="accessOutput">5</output></label>
               <button type="submit">Create admin</button>
             </form>
             <div class="user-list" id="userList"></div>

@@ -20,6 +20,7 @@ const COOKIE_SECRET = loadCookieSecret();
 
 const permissions = {
   VIEW_ONLY: 0,
+  POWER_SERVERS: 5,
   VIEW_CONSOLE: 20,
   SEND_COMMANDS: 40,
   MANAGE_SERVERS: 60,

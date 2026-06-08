@@ -74,6 +74,7 @@ const elements = {
   uploadProgress: document.querySelector('#uploadProgress'),
   uploadSessionList: document.querySelector('#uploadSessionList'),
   settingsPanel: document.querySelector('#settingsPanel'),
+  networkPanel: document.querySelector('#networkPanel'),
   terminalPanel: document.querySelector('#terminalPanel'),
   terminalNav: document.querySelector('#terminalNav'),
   backupPanel: document.querySelector('#backupPanel'),
@@ -126,6 +127,7 @@ const viewTitles = {
   plugins: ['Server', 'Plugins and Packs'],
   backups: ['Safety', 'Backups'],
   optimizer: ['Host', 'Optimizer'],
+  network: ['Host', 'Network'],
   admins: ['Owner', 'Admin Access'],
   security: ['Security', 'Health and Login Audit'],
   settings: ['Panel', 'Settings'],
@@ -659,6 +661,7 @@ async function renderActiveView() {
   }
   if (state.activeView === 'backups') renderBackups();
   if (state.activeView === 'optimizer') await renderOptimizer();
+  if (state.activeView === 'network') await renderNetwork();
   if (state.activeView === 'admins') renderAdmins();
   if (state.activeView === 'security') await renderSecurity();
   if (state.activeView === 'settings') renderSettings();
@@ -877,8 +880,10 @@ function renderSettings() {
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
       <label>Update repo <input name="updateRepo" value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
+      <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
       <button class="save-wide" type="submit">Save Settings</button>
     </form>
+    ${state.user?.role === 'owner' ? `<div class="server-actions"><button class="secondary" type="button" data-action="show-host-token">Show Host API Token</button><button class="danger" type="button" data-action="regen-host-token">Regenerate Host Token</button><code>${escapeHtml(settings.hostApiTokenPreview || '')}</code></div>` : ''}
     <div class="public-help-grid">
       <article><strong>Nexus-Mark</strong><span>Original lightweight control profile: safe paths, RAM caps, CPU plan metadata, and future cgroup/systemd slicing on Linux.</span></article>
       <article><strong>Template Imports</strong><span>JSON game blueprints. Custom game servers stay isolated per server.</span></article>
@@ -993,19 +998,37 @@ async function renderOptimizer() {
   }
 }
 
+async function renderNetwork(speed = null) {
+  if (!elements.networkPanel) return;
+  const data = await api('/api/network/metrics').catch(() => ({ network: { inboundBytes: 0, outboundBytes: 0, interfaces: [] } }));
+  const network = data.network || {};
+  elements.networkPanel.innerHTML = `
+    <div class="section-head"><div><p class="eyebrow">Network</p><h2>VPS traffic monitor</h2></div><button type="button" data-action="network-speed-test">Check Network Speed</button></div>
+    <div class="quick-stats">
+      <article><span>Inbound Used</span><strong>${formatBytes(network.inboundBytes || 0)}</strong></article>
+      <article><span>Outbound Used</span><strong>${formatBytes(network.outboundBytes || 0)}</strong></article>
+      <article><span>Download Speed</span><strong>${speed ? `${formatBytes(speed.downloadBytesPerSec)}/s` : 'Click check'}</strong></article>
+      <article><span>Upload Speed</span><strong>${speed ? `${formatBytes(speed.uploadBytesPerSec)}/s` : 'Click check'}</strong></article>
+    </div>
+    <div class="plugin-list">
+      ${(network.interfaces || []).map((item) => `<div class="plugin-row"><strong>${escapeHtml(item.name)}</strong><div class="row-actions"><span>${formatBytes(item.rxBytes)} in</span><span>${formatBytes(item.txBytes)} out</span></div></div>`).join('') || '<p class="empty-state">No network counters available on this OS.</p>'}
+    </div>
+  `;
+}
+
 function renderAdmins() {
   elements.adminPanel.hidden = !can(state.permissions.MANAGE_ADMINS);
   if (!can(state.permissions.MANAGE_ADMINS)) return;
-  
+
   if (!state.users || state.users.length === 0) {
     elements.userList.innerHTML = '<p class="empty-state">No admin users yet.</p>';
     return;
   }
-  
-  elements.userList.innerHTML = '<p class="muted access-help">Access guide: 0 view, 20 console view, 40 send commands, 60 manage servers, 80 files/config/backups, 100 owner/admin controls.</p>' + state.users.map((user) => `
+
+  elements.userList.innerHTML = '<p class="muted access-help">Access guide: 0 view, 5 start/stop/restart/kill, 20 console view, 40 send commands, 60 manage servers, 80 files/config/backups, 100 owner/admin controls.</p>' + state.users.map((user) => `
     <div class="user-row" data-user-id="${user.id}">
       <div><strong>${escapeHtml(user.name)}</strong><div class="muted">${escapeHtml(user.email)} | ${user.role} | ${accessName(user.accessLevel)}</div></div>
-      <div class="user-actions"><input type="number" min="0" max="100" step="20" value="${user.accessLevel}" ${user.role === 'owner' ? 'disabled' : ''}><button class="secondary" type="button" data-action="update-user" ${user.role === 'owner' ? 'disabled' : ''}>Save</button><button class="danger" type="button" data-action="delete-user" ${user.role === 'owner' ? 'disabled' : ''}>Delete</button></div>
+      <div class="user-actions"><input type="number" min="0" max="100" step="5" value="${user.accessLevel}" ${user.role === 'owner' ? 'disabled' : ''}><button class="secondary" type="button" data-action="update-user" ${user.role === 'owner' ? 'disabled' : ''}>Save</button><button class="danger" type="button" data-action="delete-user" ${user.role === 'owner' ? 'disabled' : ''}>Delete</button></div>
     </div>
   `).join('');
 }
@@ -1162,6 +1185,7 @@ function accessName(level) {
   if (level >= 60) return 'Servers';
   if (level >= 40) return 'Console';
   if (level >= 20) return 'Logs';
+  if (level >= 5) return 'Power';
   return 'View';
 }
 
@@ -1584,6 +1608,20 @@ document.addEventListener('click', async (event) => {
       showToast(result.message || 'Update started.');
       return;
     }
+    if (action === 'show-host-token') {
+      const data = await api('/api/host/token');
+      await navigator.clipboard?.writeText(data.token).catch(() => {});
+      prompt('Host API token copied if browser allowed it:', data.token);
+      return;
+    }
+    if (action === 'regen-host-token') {
+      if (!confirm('Regenerate host API token? Old automation using the token will stop working.')) return;
+      const data = await api('/api/host/token/regenerate', { method: 'POST' });
+      await navigator.clipboard?.writeText(data.token).catch(() => {});
+      prompt('New host API token copied if browser allowed it:', data.token);
+      await refresh();
+      return;
+    }
     if (action === 'terminal-close') {
       await closeTerminalSession();
       showToast('Terminal session closed.');
@@ -1657,6 +1695,14 @@ document.addEventListener('click', async (event) => {
       await api('/api/optimizer/apply', { method: 'POST' });
       showToast('Optimizer applied.');
       await refresh();
+      return;
+    }
+    if (action === 'network-speed-test') {
+      actionTarget.disabled = true;
+      showToast('Checking current network speed...');
+      const data = await api('/api/network/speed', { method: 'POST' });
+      await renderNetwork(data.speed);
+      showToast('Network speed updated.');
       return;
     }
     if (action === 'run-health-check') {
