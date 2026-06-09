@@ -203,6 +203,17 @@ function fillServerConfigForm(server, force = false) {
   form.maxMemoryMb.disabled = state.user?.role !== 'owner';
   form.maxMemoryMb.title = state.user?.role === 'owner' ? 'Owner can change RAM allocation.' : 'Only the owner can change RAM allocation.';
   form.port.value = server.port;
+  const ownerLabel = form.querySelector('#serverOwnerConfigLabel');
+  const ownerSelect = form.querySelector('select[name="ownerUserId"]');
+  if (ownerLabel && ownerSelect) {
+    const isOwner = state.user?.role === 'owner';
+    ownerLabel.hidden = !isOwner;
+    ownerSelect.disabled = !isOwner;
+    ownerSelect.innerHTML = '<option value="">Owner / unassigned</option>' + (state.users || [])
+      .filter((user) => user.role !== 'owner')
+      .map((user) => `<option value="${user.id}" ${Number(server.ownerUserId || 0) === Number(user.id) ? 'selected' : ''}>${escapeHtml(user.name)} - ${escapeHtml(user.email)}</option>`)
+      .join('');
+  }
   form.dataset.serverId = String(server.id);
   form.dataset.dirty = '0';
 }

@@ -125,14 +125,14 @@ function setSettingValue(key, value) {
   `).run(key, String(value ?? ''));
 }
 
-function panelSettingsPayload() {
+function panelSettingsPayload(user = null) {
   const hostToken = reqOwnerSafeHostToken();
   return {
     terminalEnabled: settingValue('terminal_enabled', '0') === '1',
     updateRepo: FIXED_UPDATE_REPO,
     edition: panelEdition(),
     updateTag: panelEdition() === 'host' ? 'host-v1.0' : 'normal-v1.0',
-    hostApiTokenPreview: `${reqOwnerSafeHostToken().slice(0, 8)}••••${reqOwnerSafeHostToken().slice(-6)}`,
+    hostApiTokenPreview: user?.role === 'owner' ? `${hostToken.slice(0, 8)}••••${hostToken.slice(-6)}` : '',
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
     maxCpuCores: hostCpuCount(),
@@ -572,7 +572,7 @@ function deviceFromUserAgent(userAgent) {
           : /Linux/i.test(ua) ? 'Linux'
             : 'Unknown OS';
   const form = /iPad|Tablet/i.test(ua) ? 'Tablet' : /Mobile|Android|iPhone/i.test(ua) ? 'Phone' : 'Desktop';
-  return `${form} · ${osName}`;
+  return `${form} Â· ${osName}`;
 }
 
 function clientIp(req) {
@@ -651,7 +651,7 @@ async function runHealthCheck(force = false) {
           add(`${server.name} executable`, false, `Missing. Auto-repair failed: ${error.message}`);
         }
       } else {
-        add(`${server.name} executable`, false, 'Missing. Run Security → Run check now to auto-repair, or reinstall software.');
+        add(`${server.name} executable`, false, 'Missing. Run Security â†’ Run check now to auto-repair, or reinstall software.');
       }
     }
   }
@@ -690,12 +690,24 @@ function canUseServer(user, server) {
   return Number(server.owner_user_id) === Number(user.id);
 }
 
+function resolveServerOwnerUserId(req, requestedValue, fallback = null) {
+  if (!ownerOnly(req)) return fallback;
+  if (requestedValue === undefined || requestedValue === null || requestedValue === '') return null;
+  const id = Number(requestedValue);
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error('Assigned user is invalid.');
+  const user = db.prepare('SELECT id, role FROM users WHERE id = ?').get(id);
+  if (!user || user.role === 'owner') throw new Error('Assign servers to a valid admin user, or leave unassigned for owner-only.');
+  return id;
+}
+
 function isHostApiAuthorized(req) {
   if (ownerOnly(req)) return true;
   const auth = String(req.headers.authorization || '');
   const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : String(req.headers['x-nexuspanel-token'] || '').trim();
   const expected = reqOwnerSafeHostToken();
-  return token && expected && token.length === expected.length && crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+  const tokenBuffer = Buffer.from(token);
+  const expectedBuffer = Buffer.from(expected);
+  return token && expected && tokenBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(tokenBuffer, expectedBuffer);
 }
 
 function pluginRows(serverId = null) {
@@ -828,7 +840,7 @@ function tunnelRows(serverId) {
     .map((row) => ({
       provider: row.provider,
       hasToken: Boolean(row.token),
-      tokenPreview: row.token ? `${row.token.slice(0, 4)}••••${row.token.slice(-4)}` : '',
+      tokenPreview: row.token ? `${row.token.slice(0, 4)}â€¢â€¢â€¢â€¢${row.token.slice(-4)}` : '',
       remoteHost: row.remote_host,
     }));
 }
@@ -1274,7 +1286,7 @@ app.get('/api/overview', (req, res) => {
     plugins: req.user ? pluginRows(req.user.role === 'owner' ? null : serverRows(req.user, req).map((server) => server.id)) : [],
     softwareCatalog: req.user ? softwareCatalog() : [],
     templates: req.user ? templateRows() : [],
-    settings: req.user ? panelSettingsPayload() : null,
+    settings: req.user ? panelSettingsPayload(req.user) : null,
     users: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? userRows() : [],
     loginEvents: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? loginEventRows(10) : [],
     health: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? (fs.existsSync(healthPath) ? readHealthFile() : null) : null,
@@ -1300,11 +1312,11 @@ app.get('/api/optimizer/plan', requireAccess(permissions.MANAGE_SERVERS), (_req,
   res.json(planCommands());
 });
 
-app.get('/api/network/metrics', requireAuth, asyncRoute(async (_req, res) => {
+app.get('/api/network/metrics', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {
   res.json({ network: await networkStats() });
 }));
 
-app.get('/api/network/download-test', requireAuth, (req, res) => {
+app.get('/api/network/download-test', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
   const size = clampNumber(req.query.size, 1024 * 1024, 64 * 1024 * 1024, 8 * 1024 * 1024);
   const block = Buffer.allocUnsafe(256 * 1024).fill(0x5a);
   let remaining = size;
@@ -1322,7 +1334,7 @@ app.get('/api/network/download-test', requireAuth, (req, res) => {
   writeMore();
 });
 
-app.post('/api/network/upload-test', requireAuth, (req, res) => {
+app.post('/api/network/upload-test', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
   res.json({ bytes: Buffer.isBuffer(req.body) ? req.body.length : 0, receivedAt: Date.now() });
 });
 
@@ -1373,15 +1385,19 @@ app.post('/api/password/forgot', asyncRoute(async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
   if (!email.includes('@')) return res.status(400).json({ error: 'Enter a valid email.' });
-  if (!user) return res.json({ ok: true, message: 'If that email exists, an OTP was sent.' });
-  const code = String(crypto.randomInt(100000, 1000000));
-  db.prepare(`
-    INSERT INTO password_reset_otps (email, code_hash, expires_at, attempts)
-    VALUES (?, ?, ?, 0)
-    ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0, created_at = CURRENT_TIMESTAMP
-  `).run(email, otpHash(email, code), Date.now() + 10 * 60 * 1000);
-  const message = await sendPasswordOtp(email, code);
-  res.json({ ok: true, message });
+  if (user) {
+    const code = String(crypto.randomInt(100000, 1000000));
+    db.prepare(`
+      INSERT INTO password_reset_otps (email, code_hash, expires_at, attempts)
+      VALUES (?, ?, ?, 0)
+      ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0, created_at = CURRENT_TIMESTAMP
+    `).run(email, otpHash(email, code), Date.now() + 10 * 60 * 1000);
+    await sendPasswordOtp(email, code).catch(async (error) => {
+      console.error(`Password reset OTP delivery failed: ${error.message}`);
+      await fs.promises.appendFile(path.join(dataRoot, 'password-reset-otp.log'), `${new Date().toISOString()} ${email} ${code}\n`, { mode: 0o600 }).catch(() => {});
+    });
+  }
+  res.json({ ok: true, message: 'If that email exists, an OTP was sent or logged for the owner.' });
 }));
 
 app.post('/api/password/reset', (req, res) => {
@@ -1535,8 +1551,8 @@ app.delete('/api/users/:id', requireAccess(permissions.MANAGE_ADMINS), (req, res
   res.json({ ok: true });
 });
 
-app.get('/api/servers', requireAuth, (_req, res) => {
-  res.json({ servers: serverRows() });
+app.get('/api/servers', requireAuth, (req, res) => {
+  res.json({ servers: serverRows(req.user, req) });
 });
 
 app.get('/api/software/catalog', requireAuth, (_req, res) => {
@@ -1573,11 +1589,11 @@ app.post('/api/templates/import', requireAccess(permissions.MANAGE_ADMINS), (req
   res.status(201).json({ ok: true, template: normalized });
 });
 
-app.get('/api/settings', requireAuth, (_req, res) => {
-  res.json({ settings: panelSettingsPayload() });
+app.get('/api/settings', requireAuth, (req, res) => {
+  res.json({ settings: panelSettingsPayload(req.user) });
 });
 
-app.get('/api/servers/:id/nexus-mark', requireAuth, (req, res) => {
+app.get('/api/servers/:id/nexus-mark', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   const nexu = parseJsonObject(server.nexu_payload);
   res.json({ profile: profileForServer(server, nexu), nexu });
@@ -1587,7 +1603,7 @@ app.put('/api/settings', requireAccess(permissions.MANAGE_ADMINS), (req, res) =>
   setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
   setSettingValue('update_repo', FIXED_UPDATE_REPO);
-  res.json({ settings: panelSettingsPayload() });
+  res.json({ settings: panelSettingsPayload(req.user) });
 });
 
 app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
@@ -1611,7 +1627,7 @@ app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), async
     fs.promises.writeFile(path.join(dataRoot, 'last_update.log'), output.slice(-12000), 'utf8').catch(() => {});
     if (code !== 0) console.error(`NexusPanel update failed with code ${code}`);
   });
-  res.json({ ok: true, message: `Update started for ${panelSettingsPayload().updateTag}. Protected folders stay untouched.`, repo });
+  res.json({ ok: true, message: `Update started for ${panelSettingsPayload(req.user).updateTag}. Protected folders stay untouched.`, repo });
 }));
 
 app.post('/api/terminal/run', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
@@ -1815,7 +1831,7 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
     String(req.body.softwareVersion || 'latest').trim().slice(0, 32) || 'latest',
     clampNumber(req.body.cpuCores, 1, hostCpuCount(), 1),
     0,
-    req.user.role === 'owner' ? (Number(req.body.ownerUserId) || null) : req.user.id,
+    ownerOnly(req) ? resolveServerOwnerUserId(req, req.body.ownerUserId, null) : req.user.id,
   );
 
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
@@ -1869,7 +1885,7 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
     nexu.key,
     JSON.stringify(nexu),
     '',
-    req.user.role === 'owner' ? null : req.user.id,
+    ownerOnly(req) ? resolveServerOwnerUserId(req, req.body.ownerUserId, null) : req.user.id,
   );
 
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
@@ -1902,6 +1918,9 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
   const memoryMb = ownerOnly(req)
     ? clampMemoryMb(req.body.maxMemoryMb, target.max_memory_mb)
     : target.max_memory_mb;
+  const ownerUserId = ownerOnly(req)
+    ? resolveServerOwnerUserId(req, req.body.ownerUserId, target.owner_user_id)
+    : target.owner_user_id;
 
   db.prepare(`
     UPDATE servers
@@ -1909,7 +1928,8 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
         auto_restart = ?, crash_backup = ?, scheduled_backups = ?,
         backup_retention = ?, wake_on_join = ?, whitelist = ?,
         tunnel_provider = ?, public_alias = ?, startup_delay_sec = ?,
-        server_path = ?, software_key = ?, software_version = ?, executable_path = ?
+        server_path = ?, software_key = ?, software_version = ?, executable_path = ?,
+        owner_user_id = ?
     WHERE id = ?
   `).run(
     name,
@@ -1930,6 +1950,7 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
     selectedSoftware ? selectedSoftware.key : target.software_key,
     String(req.body.softwareVersion ?? target.software_version ?? 'latest').trim().slice(0, 32) || 'latest',
     executablePath,
+    ownerUserId,
     id,
   );
 
@@ -2062,7 +2083,7 @@ app.post('/api/servers/:id/software/install', requireAccess(permissions.MANAGE_S
   res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(id)) });
 }));
 
-app.get('/api/servers/:id/plugins', requireAuth, (req, res) => {
+app.get('/api/servers/:id/plugins', requireAccess(permissions.MANAGE_FILES), (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
@@ -2240,7 +2261,7 @@ app.post('/api/servers/:id/poggit/install', requireAccess(permissions.MANAGE_FIL
   });
 }));
 
-app.get('/api/servers/:id/console', requireAuth, (req, res) => {
+app.get('/api/servers/:id/console', requireAccess(permissions.VIEW_CONSOLE), (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
@@ -2325,7 +2346,7 @@ app.post('/api/servers/:id/command', requireAccess(permissions.SEND_COMMANDS), (
   res.json({ ok: true });
 });
 
-app.get('/api/servers/:id/properties', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/properties', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const values = await readProperties(server);
   const schema = propertySchema.filter((item) => item.editions.includes(server.type));
@@ -2344,7 +2365,7 @@ app.put('/api/servers/:id/properties', requireAccess(permissions.MANAGE_SERVERS)
   res.json({ values: await readProperties(server) });
 }));
 
-app.get('/api/servers/:id/whitelist', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/whitelist', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   res.json({ players: await readWhitelist(server) });
 }));
@@ -2389,7 +2410,7 @@ app.delete('/api/servers/:id/whitelist', requireAccess(permissions.MANAGE_SERVER
   res.json({ players: [] });
 }));
 
-app.get('/api/servers/:id/backups', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   res.json({ backups: await backupRows(server) });
 }));
@@ -2410,7 +2431,7 @@ app.delete('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), 
   res.json({ ok: true, backups: await backupRows(server) });
 }));
 
-app.get('/api/servers/:id/backups/download', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/backups/download', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const name = String(req.query.name || '').replaceAll('\\', '/');
   if (!name.endsWith('.zip') || name.includes('/')) return res.status(400).json({ error: 'Choose a backup file.' });
@@ -2443,7 +2464,7 @@ app.put('/api/servers/:id/tunnels', requireAccess(permissions.MANAGE_SERVERS), (
   res.status(410).json({ error: 'Tunnels were removed. Use Templates or your VPS reverse proxy setup instead.' });
 });
 
-app.get('/api/servers/:id/files', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/files', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   const stats = await fs.promises.stat(target.absolute).catch(() => null);
@@ -2728,7 +2749,7 @@ app.post('/api/servers/:id/files/archive', requireAccess(permissions.MANAGE_FILE
   });
 }));
 
-app.get('/api/servers/:id/files/download', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/files/download', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   await streamDownload(req, res, target.absolute, path.basename(target.absolute));
@@ -2738,6 +2759,8 @@ app.patch('/api/plugins/:id', requireAccess(permissions.MANAGE_FILES), (req, res
   const id = Number(req.params.id);
   const plugin = db.prepare('SELECT * FROM plugins WHERE id = ?').get(id);
   if (!plugin) return res.status(404).json({ error: 'Plugin not found.' });
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(plugin.server_id);
+  if (!canUseServer(req.user, server)) return res.status(403).json({ error: 'No permission for this server.' });
 
   db.prepare('UPDATE plugins SET enabled = ? WHERE id = ?').run(toBool(req.body.enabled, Boolean(plugin.enabled)), id);
   res.json({ plugin: pluginRows(plugin.server_id).find((row) => row.id === id) });
@@ -2747,6 +2770,8 @@ app.delete('/api/plugins/:id', requireAccess(permissions.MANAGE_FILES), (req, re
   const id = Number(req.params.id);
   const plugin = db.prepare('SELECT * FROM plugins WHERE id = ?').get(id);
   if (!plugin) return res.status(404).json({ error: 'Plugin not found.' });
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(plugin.server_id);
+  if (!canUseServer(req.user, server)) return res.status(403).json({ error: 'No permission for this server.' });
 
   db.prepare('DELETE FROM plugins WHERE id = ?').run(id);
   res.json({ ok: true });
@@ -2831,3 +2856,4 @@ start().catch((error) => {
   console.error(error.message);
   process.exit(1);
 });
+

@@ -149,6 +149,7 @@
               <label>Server name <input name="name"></label>
               <label>RAM MB <input name="maxMemoryMb" type="number" min="256" max="65536" step="256"></label>
               <label>Port <input name="port" type="number" min="1024" max="65535"></label>
+              <label id="serverOwnerConfigLabel" hidden>Assigned user <select name="ownerUserId"><option value="">Owner / unassigned</option></select></label>
               <button type="submit">Save Server Settings</button>
             </form>
             <div class="server-actions">
