@@ -8,6 +8,5 @@ tunnels/
 software/
 dist-release/
 *.log
-.claude-agent-shadow/
 smoke-cookies.txt
 ui-cookies.txt
