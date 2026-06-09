@@ -15,6 +15,7 @@ const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = r
 const { profileForServer, writeProfile } = require('./nexus_mark');
 const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, startServer, stopServer } = require('./runtime');
 const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions } = require('./zip_utils');
+const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const {
   SESSION_COOKIE,
   authMiddleware,
@@ -22,6 +23,7 @@ const {
   clearSessionCookie,
   createSession,
   createUser,
+  hashPassword,
   permissions,
   publicUser,
   requireAccess,
@@ -37,11 +39,13 @@ const healthPath = path.join(dataRoot, 'panel_health.json');
 const editionPath = path.join(dataRoot, 'edition');
 const terminalSessions = new Map();
 const wakeWatchers = new Map();
+const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
 
 app.set('trust proxy', true);
 
 app.use('/api/servers/:id/files/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/servers/:id/files/upload', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
+app.use('/api/network/upload-test', express.raw({ type: 'application/octet-stream', limit: '64mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(authMiddleware);
 app.use((req, res, next) => {
@@ -122,15 +126,16 @@ function setSettingValue(key, value) {
 }
 
 function panelSettingsPayload() {
+  const hostToken = reqOwnerSafeHostToken();
   return {
     terminalEnabled: settingValue('terminal_enabled', '0') === '1',
-    updateRepo: settingValue('update_repo', 'https://github.com/Sarvesh12341234/Nexus-panel.git'),
+    updateRepo: FIXED_UPDATE_REPO,
     edition: panelEdition(),
     updateTag: panelEdition() === 'host' ? 'host-v1.0' : 'normal-v1.0',
     hostApiTokenPreview: `${reqOwnerSafeHostToken().slice(0, 8)}••••${reqOwnerSafeHostToken().slice(-6)}`,
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
-    maxCpuCores: os.cpus().length || 1,
+    maxCpuCores: hostCpuCount(),
     platform: process.platform,
     nexuExample: nexuExample(),
   };
@@ -404,6 +409,89 @@ async function networkStats() {
     };
   }
   return { interfaces: [], inboundBytes: 0, outboundBytes: 0 };
+}
+
+function otpHash(email, code) {
+  return crypto.createHash('sha256').update(`${String(email).toLowerCase()}:${code}:${reqOwnerSafeHostToken()}`).digest('hex');
+}
+
+async function sendPasswordOtp(email, code) {
+  const subject = 'NexusPanel password reset OTP';
+  const text = `Your NexusPanel password reset OTP is ${code}. It expires in 10 minutes.`;
+  const apiUrl = process.env.NEXUSPANEL_EMAIL_API_URL;
+  const apiKey = process.env.NEXUSPANEL_EMAIL_API_KEY;
+  if (apiUrl && globalThis.fetch) {
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({ to: email, subject, text }),
+    });
+    if (!response.ok) throw new Error(`Email API failed with ${response.status}`);
+    return 'OTP sent by configured email API.';
+  }
+
+  if (process.platform !== 'win32' && fs.existsSync('/usr/sbin/sendmail')) {
+    const message = `To: ${email}\nSubject: ${subject}\n\n${text}\n`;
+    const result = spawnSync('/usr/sbin/sendmail', ['-t'], { input: message, encoding: 'utf8' });
+    if (result.status === 0) return 'OTP sent by local sendmail.';
+  }
+
+  const logPath = path.join(dataRoot, 'password-reset-otp.log');
+  await fs.promises.mkdir(dataRoot, { recursive: true });
+  await fs.promises.appendFile(logPath, `${new Date().toISOString()} ${email} ${code}\n`, { mode: 0o600 });
+  return 'No email provider configured. Owner can read data/password-reset-otp.log on the VPS.';
+}
+
+function recoverServerFolders() {
+  if (!fs.existsSync(serversRoot)) return [];
+  const recovered = [];
+  const existingIds = new Set(db.prepare('SELECT id FROM servers').all().map((row) => Number(row.id)));
+  for (const entry of fs.readdirSync(serversRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const match = entry.name.match(/^(\d+)-(.+)$/);
+    if (!match) continue;
+    const id = Number(match[1]);
+    if (!id || existingIds.has(id)) continue;
+    const root = path.join(serversRoot, entry.name);
+    const propertiesPath = path.join(root, 'server.properties');
+    const properties = fs.existsSync(propertiesPath) ? fs.readFileSync(propertiesPath, 'utf8') : '';
+    const portMatch = properties.match(/(?:server-port|server-portv4)\s*=\s*(\d+)/i);
+    const jar = fs.readdirSync(root).find((name) => name.toLowerCase().endsWith('.jar'));
+    const hasBedrock = fs.existsSync(path.join(root, 'bedrock_server')) || fs.existsSync(path.join(root, 'bedrock_server.exe'));
+    const hasPocketMine = fs.existsSync(path.join(root, 'PocketMine-MP.phar'));
+    const type = hasBedrock || hasPocketMine ? 'bedrock' : 'java';
+    const softwareKey = hasPocketMine ? 'pocketmine' : hasBedrock ? 'bedrock-vanilla' : jar?.toLowerCase().includes('purpur') ? 'purpur' : jar?.toLowerCase().includes('paper') ? 'paper' : 'java-vanilla';
+    const executable = hasPocketMine
+      ? path.join(root, 'PocketMine-MP.phar')
+      : hasBedrock
+        ? path.join(root, process.platform === 'win32' ? 'bedrock_server.exe' : 'bedrock_server')
+        : jar ? path.join(root, jar) : '';
+    const name = entry.name.slice(match[1].length + 1).replace(/[-_]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()) || `Server ${id}`;
+    db.prepare(`
+      INSERT OR IGNORE INTO servers (
+        id, name, type, port, max_memory_mb, auto_restart, crash_backup,
+        scheduled_backups, backup_retention, server_path, software_key,
+        executable_path, install_status, install_progress, install_message, cpu_cores
+      )
+      VALUES (?, ?, ?, ?, 1024, 1, 1, 1, 4, ?, ?, ?, ?, ?, ?, 1)
+    `).run(
+      id,
+      name,
+      type,
+      clampNumber(portMatch?.[1], 1, 65535, type === 'java' ? 25565 : 19132),
+      root,
+      softwareKey,
+      executable,
+      executable ? 'installed' : 'missing',
+      executable ? 100 : 0,
+      executable ? 'Recovered from server folder.' : 'Recovered folder; executable missing.',
+    );
+    recovered.push({ id, name, root });
+  }
+  return recovered;
 }
 
 function serverPayload(server, req = null) {
@@ -1216,18 +1304,47 @@ app.get('/api/network/metrics', requireAuth, asyncRoute(async (_req, res) => {
   res.json({ network: await networkStats() });
 }));
 
-app.post('/api/network/speed', requireAuth, asyncRoute(async (_req, res) => {
-  const before = await networkStats();
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  const after = await networkStats();
-  res.json({
-    network: after,
-    speed: {
-      downloadBytesPerSec: Math.max(0, after.inboundBytes - before.inboundBytes),
-      uploadBytesPerSec: Math.max(0, after.outboundBytes - before.outboundBytes),
-    },
-  });
-}));
+app.get('/api/network/download-test', requireAuth, (req, res) => {
+  const size = clampNumber(req.query.size, 1024 * 1024, 64 * 1024 * 1024, 8 * 1024 * 1024);
+  const block = Buffer.allocUnsafe(256 * 1024).fill(0x5a);
+  let remaining = size;
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Length', String(size));
+  res.setHeader('Cache-Control', 'no-store');
+  function writeMore() {
+    while (remaining > 0) {
+      const chunk = remaining >= block.length ? block : block.subarray(0, remaining);
+      remaining -= chunk.length;
+      if (!res.write(chunk)) return res.once('drain', writeMore);
+    }
+    res.end();
+  }
+  writeMore();
+});
+
+app.post('/api/network/upload-test', requireAuth, (req, res) => {
+  res.json({ bytes: Buffer.isBuffer(req.body) ? req.body.length : 0, receivedAt: Date.now() });
+});
+
+app.get('/api/nginx/accel-config', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+  res.type('text/plain').send(`# NexusPanel optional X-Accel download offload
+# Put this in your Nginx server block, then set:
+# NEXUSPANEL_X_ACCEL_ROOT=${serversRoot.replace(/\\/g, '/')}
+# NEXUSPANEL_X_ACCEL_PREFIX=/protected-nexuspanel
+location /protected-nexuspanel/ {
+  internal;
+  alias ${serversRoot.replace(/\\/g, '/')}/;
+}
+
+location / {
+  proxy_pass http://127.0.0.1:${port};
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  client_max_body_size 0;
+}`);
+});
 
 app.post('/api/optimizer/apply', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
   const result = applyTweaks();
@@ -1250,6 +1367,39 @@ app.post('/api/login', (req, res) => {
   recordLoginEvent(req, user);
   setSessionCookie(res, createSession(user.id));
   res.json({ user: publicUser(user) });
+});
+
+app.post('/api/password/forgot', asyncRoute(async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  if (!email.includes('@')) return res.status(400).json({ error: 'Enter a valid email.' });
+  if (!user) return res.json({ ok: true, message: 'If that email exists, an OTP was sent.' });
+  const code = String(crypto.randomInt(100000, 1000000));
+  db.prepare(`
+    INSERT INTO password_reset_otps (email, code_hash, expires_at, attempts)
+    VALUES (?, ?, ?, 0)
+    ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0, created_at = CURRENT_TIMESTAMP
+  `).run(email, otpHash(email, code), Date.now() + 10 * 60 * 1000);
+  const message = await sendPasswordOtp(email, code);
+  res.json({ ok: true, message });
+}));
+
+app.post('/api/password/reset', (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const otp = String(req.body.otp || '').trim();
+  const password = String(req.body.password || '');
+  if (!email.includes('@') || !/^\d{6}$/.test(otp)) return res.status(400).json({ error: 'Email and 6-digit OTP are required.' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  const row = db.prepare('SELECT * FROM password_reset_otps WHERE email = ?').get(email);
+  if (!row || row.expires_at < Date.now()) return res.status(400).json({ error: 'OTP expired. Request a new code.' });
+  if (row.attempts >= 5) return res.status(429).json({ error: 'Too many OTP attempts. Request a new code.' });
+  if (row.code_hash !== otpHash(email, otp)) {
+    db.prepare('UPDATE password_reset_otps SET attempts = attempts + 1 WHERE email = ?').run(email);
+    return res.status(401).json({ error: 'Invalid OTP.' });
+  }
+  db.prepare('UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?').run(hashPassword(password), email);
+  db.prepare('DELETE FROM password_reset_otps WHERE email = ?').run(email);
+  res.json({ ok: true, message: 'Password reset. You can log in now.' });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -1304,7 +1454,7 @@ app.post('/api/host/provision', asyncRoute(async (req, res) => {
   }
   const type = serverInput.type === 'java' ? 'java' : 'bedrock';
   const selectedSoftware = findSoftware(serverInput.softwareKey) || defaultSoftware(type);
-  const maxCpu = os.cpus().length || 1;
+  const maxCpu = hostCpuCount();
   const cpuCores = clampNumber(serverInput.cpuCores, 1, maxCpu, 1);
   const memoryMb = clampMemoryMb(serverInput.ramMb || serverInput.maxMemoryMb, 1024);
   const result = db.prepare(`
@@ -1436,14 +1586,13 @@ app.get('/api/servers/:id/nexus-mark', requireAuth, (req, res) => {
 app.put('/api/settings', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
   setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
-  const repo = String(req.body.updateRepo || panelSettingsPayload().updateRepo).trim();
-  if (repo) setSettingValue('update_repo', repo.slice(0, 240));
+  setSettingValue('update_repo', FIXED_UPDATE_REPO);
   res.json({ settings: panelSettingsPayload() });
 });
 
 app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
-  const repo = String(req.body.repo || panelSettingsPayload().updateRepo).trim();
-  if (repo) setSettingValue('update_repo', repo.slice(0, 240));
+  const repo = FIXED_UPDATE_REPO;
+  setSettingValue('update_repo', repo);
   if (process.platform === 'win32') {
     return res.status(400).json({ error: 'Panel self-update button is Linux/systemd focused. Use git pull or update/update.sh on the VPS.' });
   }
@@ -1462,7 +1611,7 @@ app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), async
     fs.promises.writeFile(path.join(dataRoot, 'last_update.log'), output.slice(-12000), 'utf8').catch(() => {});
     if (code !== 0) console.error(`NexusPanel update failed with code ${code}`);
   });
-  res.json({ ok: true, message: 'Update started in background. Protected folders stay untouched.', repo });
+  res.json({ ok: true, message: `Update started for ${panelSettingsPayload().updateTag}. Protected folders stay untouched.`, repo });
 }));
 
 app.post('/api/terminal/run', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
@@ -1664,7 +1813,7 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
     clampNumber(req.body.startupDelaySec, 0, 600, 0),
     selectedSoftware.key,
     String(req.body.softwareVersion || 'latest').trim().slice(0, 32) || 'latest',
-    clampNumber(req.body.cpuCores, 1, os.cpus().length || 1, 1),
+    clampNumber(req.body.cpuCores, 1, hostCpuCount(), 1),
     0,
     req.user.role === 'owner' ? (Number(req.body.ownerUserId) || null) : req.user.id,
   );
@@ -1686,7 +1835,7 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
   if (name.length < 2) return res.status(400).json({ error: 'Server name is required.' });
   const memoryMb = clampMemoryMb(req.body.maxMemoryMb || nexu.resources.ramMb, nexu.resources.ramMb);
   const portValue = clampNumber(req.body.port || nexu.resources.ports[0]?.port, 1, 65535, nexu.resources.ports[0]?.port || 25565);
-  const cpuCores = clampNumber(req.body.cpuCores || nexu.resources.cpuCores, 1, os.cpus().length || 1, nexu.resources.cpuCores || 1);
+  const cpuCores = clampNumber(req.body.cpuCores || nexu.resources.cpuCores, 1, hostCpuCount(), nexu.resources.cpuCores || 1);
   const type = nexu.game.edition === 'java' || nexu.game.edition === 'bedrock' ? nexu.game.edition : 'custom';
   const selectedSoftware = findSoftware(nexu.runtime.softwareKey);
 
@@ -2129,15 +2278,14 @@ app.get('/api/servers/:id/metrics', requireAuth, (req, res) => {
 });
 
 app.get('/api/system/metrics', requireAuth, (_req, res) => {
-  const total = os.totalmem();
-  const free = os.freemem();
+  const memory = hostMemoryStats();
   const load = os.loadavg()[0] || 0;
-  const cores = os.cpus().length || 1;
   res.json({
-    cpuPercent: Math.min(100, Math.round((load / cores) * 100)),
-    ramUsedMb: Math.round((total - free) / 1024 / 1024),
-    ramTotalMb: Math.round(total / 1024 / 1024),
+    cpuPercent: hostCpuPercent(),
+    ramUsedMb: Math.round(memory.used / 1024 / 1024),
+    ramTotalMb: Math.round(memory.total / 1024 / 1024),
     load: Number(load.toFixed(2)),
+    cores: hostCpuCount(),
   });
 });
 
@@ -2669,6 +2817,8 @@ async function ensureInitialOwner() {
 
 async function start() {
   await ensureInitialOwner();
+  const recovered = recoverServerFolders();
+  if (recovered.length) console.log(`Recovered ${recovered.length} server folder(s) into the database.`);
   startSchedulers();
   refreshWakeWatchers();
   setInterval(refreshWakeWatchers, 5000).unref();

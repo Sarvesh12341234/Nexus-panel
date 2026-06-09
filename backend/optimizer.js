@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
+const { hostCpuCount } = require('./system_info');
 
 const SYSCTL_TWEAKS = [
   ['net.core.rmem_max', '134217728', 'UDP receive ceiling for Bedrock traffic bursts'],
@@ -16,8 +17,12 @@ const SYSCTL_TWEAKS = [
   ['net.ipv4.tcp_tw_reuse', '1', 'Reuses safe TIME_WAIT sockets for outbound checks'],
   ['net.ipv4.ip_local_port_range', '1024 65535', 'Larger outbound ephemeral port range'],
   ['fs.file-max', '1048576', 'Higher system file descriptor ceiling'],
+  ['fs.inotify.max_user_watches', '1048576', 'More live file watches for plugin/config-heavy servers'],
+  ['fs.inotify.max_user_instances', '1024', 'More parallel watcher instances for host panels'],
   ['vm.swappiness', '10', 'Reduces swapping on low-memory hosts'],
   ['vm.vfs_cache_pressure', '50', 'Keeps filesystem cache warmer for worlds and backups'],
+  ['vm.dirty_background_ratio', '5', 'Starts background disk flushes earlier to avoid backup spikes'],
+  ['vm.dirty_ratio', '20', 'Caps dirty memory so large uploads do not stall the host'],
 ];
 
 const DNS_PROFILES = [
@@ -81,6 +86,21 @@ const TECHNIQUE_PACK = [
     name: 'Firewall sanity',
     command: 'ufw allow 19132/udp; ufw allow 25565/tcp',
     reason: 'Keeps Bedrock UDP and Java TCP reachable on VPS installs.',
+  },
+  {
+    name: 'Nginx X-Accel',
+    command: 'NEXUSPANEL_X_ACCEL_ROOT + NEXUSPANEL_X_ACCEL_PREFIX',
+    reason: 'Lets Nginx serve huge downloads while Node keeps authentication only.',
+  },
+  {
+    name: 'I/O scheduler check',
+    command: 'cat /sys/block/<disk>/queue/scheduler',
+    reason: 'Shows whether VPS storage is using a latency-friendly scheduler.',
+  },
+  {
+    name: 'Cgroup quota plan',
+    command: 'systemd-run --scope -p CPUQuota=<n>% -p MemoryMax=<m>M',
+    reason: 'Future Nexus-Mark isolation path for host-edition resource control.',
   },
 ];
 
@@ -185,7 +205,7 @@ function optimizerStatus() {
     canApply: supported && isRoot(),
     kernel,
     vps,
-    cpuCount: os.cpus().length,
+    cpuCount: hostCpuCount(),
     totalMemoryMb: Math.round(os.totalmem() / 1024 / 1024),
     dns: dnsStatus(),
     tweaks: tweakRows(),

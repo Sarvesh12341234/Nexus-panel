@@ -70,6 +70,8 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - `normal-v1.0`: advanced solo panel with terminal, templates, fast transfer, backups, plugin/file/software managers.
 - `host-v1.0`: hosting edition using the same engine plus owner/all-server visibility and assigned-user server isolation.
 - The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v1.0` or `host-v1.0`.
+- The update repository is locked to `Sarvesh12341234/Nexus-panel`; users cannot change it from the panel UI.
+- If an update finds server folders such as `5-summa` missing from SQLite, NexusPanel recovers them into the server list on boot.
 
 ## v1.0 Transfer + Safety
 
@@ -79,6 +81,7 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Backend verifies chunk checksum and final file checksum before completing upload.
 - Downloads support HTTP range requests for resume/split download managers.
 - Optional Nginx `X-Accel-Redirect` can offload huge downloads from Node.
+- The Network page uses a real browser-to-panel upload/download probe instead of guessing from interface counters.
 - Backups default to `/var/lib/nexuspanel/backups` on Linux, outside `/opt/nexuspanel`.
 - ZIP extraction validates the file first and asks whether to replace or skip duplicates.
 
@@ -116,6 +119,8 @@ With this enabled, NexusPanel still checks login/auth first, then Nginx streams 
 - Template-first setup replaces the old tunnel page: Bedrock, Java crossplay, PocketMine, Purpur performance, Rust, ARK, Valheim, Palworld, Factorio, Satisfactory, and Project Zomboid templates.
 - Settings includes a safe GitHub updater for `Sarvesh12341234/Nexus-panel`, owner-only terminal toggle, and Nexus-Mark controls.
 - Network page shows inbound/outbound traffic totals and a one-click current upload/download speed sample.
+- System metrics use Linux `/proc/stat` CPU deltas and `MemAvailable` RAM where available, with robust logical-core detection through `nproc`/`lscpu`.
+- Template view defaults host edition to Minecraft templates; selecting another game switches the available templates and software path.
 - Host API can create an account and assigned server in one request for hosting automation.
 - Template JSON supports requirements, RAM/CPU/disk, ports, start args, paths, properties, and Nexus-Mark security profile.
 - Nexus-Mark is NexusPanel's original no-Docker control layer: path sandboxing, per-server root, RAM allocation guard, external resource profile files, and Linux systemd/cgroup plan metadata.
@@ -134,6 +139,15 @@ npm start
 ```
 
 The owner can create admin accounts with an email, password, and access level from `0` to `100`.
+
+Forgot-password OTP reset is built in. Configure a tiny email relay with:
+
+```bash
+NEXUSPANEL_EMAIL_API_URL=https://your-email-api/send
+NEXUSPANEL_EMAIL_API_KEY=optional-token
+```
+
+Without an email relay, OTPs are written to `data/password-reset-otp.log` for the VPS owner.
 
 Host API provisioning example:
 

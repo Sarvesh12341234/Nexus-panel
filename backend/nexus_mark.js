@@ -1,16 +1,16 @@
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { externalDataRoot } = require('./paths');
+const { hostCpuCount } = require('./system_info');
 
 function cpuLimitPercent(cpuCores = 1) {
-  const total = Math.max(1, os.cpus().length || 1);
+  const total = Math.max(1, hostCpuCount());
   const requested = Math.max(1, Math.min(total, Number(cpuCores) || 1));
   return Math.max(1, Math.round((requested / total) * 100));
 }
 
 function profileForServer(server, nexu = null) {
-  const cpuCores = Math.max(1, Math.min(os.cpus().length || 1, Number(server.cpu_cores || nexu?.resources?.cpuCores || 1)));
+  const cpuCores = Math.max(1, Math.min(hostCpuCount(), Number(server.cpu_cores || nexu?.resources?.cpuCores || 1)));
   const ramMb = Math.max(256, Number(server.max_memory_mb || nexu?.resources?.ramMb || 1024));
   return {
     engine: 'nexus-mark',

@@ -1143,6 +1143,25 @@ code {
   justify-content: flex-end;
 }
 
+.server-rows-list,
+.template-grid,
+.software-grid,
+.plugin-list {
+  min-width: 0;
+}
+
+.server-row-card > *,
+.plugin-row > *,
+.user-row > * {
+  min-width: 0;
+}
+
+.server-row-card .row-actions,
+.plugin-row .user-actions,
+.user-row .user-actions {
+  row-gap: 10px;
+}
+
 .optimizer-summary {
   grid-template-columns: minmax(260px, 420px);
 }
@@ -1231,6 +1250,7 @@ code {
   .file-toolbar,
   .topbar-actions {
     justify-content: flex-start;
+    width: 100%;
   }
 }
 
@@ -1277,6 +1297,14 @@ code {
   .plugin-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .server-row-card .row-actions,
+  .plugin-row .user-actions,
+  .user-row .user-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
   }
 
   button,

@@ -168,6 +168,7 @@ module.exports = {
   clearSessionCookie,
   createSession,
   createUser,
+  hashPassword,
   publicUser,
   requireAccess,
   requireAuth,

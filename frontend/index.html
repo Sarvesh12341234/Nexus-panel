@@ -29,6 +29,7 @@
           <input name="password" type="password" autocomplete="current-password" required>
         </label>
         <button type="submit">Login</button>
+        <button class="secondary" type="button" data-action="forgot-password">Forgot password</button>
       </form>
     </section>
 
@@ -129,7 +130,13 @@
 
         <section class="view-section" id="view-templates" hidden>
           <div class="surface tool-surface">
-            <div class="section-head"><div><p class="eyebrow">Templates</p><h2>One-click server blueprints</h2></div><button class="secondary" type="button" data-action="import-nexu">Add Template JSON</button></div>
+            <div class="section-head">
+              <div><p class="eyebrow">Templates</p><h2>One-click server blueprints</h2></div>
+              <div class="row-actions">
+                <label class="compact-select">Game <select id="templateGameSelect"></select></label>
+                <button class="secondary" type="button" data-action="import-nexu">Add Template JSON</button>
+              </div>
+            </div>
             <input id="nexuImportInput" type="file" accept=".json,.nexu,application/json" hidden>
             <div class="template-grid" id="templateGrid"></div>
           </div>

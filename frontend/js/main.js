@@ -8,6 +8,7 @@ const state = {
   plugins: [],
   softwareCatalog: [],
   templates: [],
+  templateGameFilter: '',
   settings: null,
   loginEvents: [],
   health: null,
@@ -33,6 +34,7 @@ const elements = {
   serverGrid: document.querySelector('#serverGrid'),
   serverRowsGrid: document.querySelector('#serverRowsGrid'),
   templateGrid: document.querySelector('#templateGrid'),
+  templateGameSelect: document.querySelector('#templateGameSelect'),
   nexuImportInput: document.querySelector('#nexuImportInput'),
   serverList: document.querySelector('#serverList'),
   activeServerSelect: document.querySelector('#activeServerSelect'),
@@ -556,9 +558,29 @@ function renderServers() {
   }).join('');
 }
 
+function templateGameGroup(template) {
+  const family = template.nexu?.game?.family || '';
+  const game = template.game || 'Other';
+  if (family === 'minecraft' || game.toLowerCase().includes('minecraft')) return 'Minecraft';
+  return game;
+}
+
 function renderTemplates() {
   if (!elements.templateGrid) return;
-  const templates = state.templates || [];
+  const allTemplates = state.templates || [];
+  const games = [...new Set(allTemplates.map(templateGameGroup))].sort((a, b) => a.localeCompare(b));
+  const defaultGame = state.settings?.edition === 'host' && games.includes('Minecraft') ? 'Minecraft' : 'All';
+  if (!state.templateGameFilter || (state.templateGameFilter !== 'All' && !games.includes(state.templateGameFilter))) {
+    state.templateGameFilter = defaultGame;
+  }
+  if (elements.templateGameSelect) {
+    const options = state.settings?.edition === 'host' ? games : ['All', ...games];
+    elements.templateGameSelect.innerHTML = options.map((game) => `<option value="${escapeHtml(game)}" ${game === state.templateGameFilter ? 'selected' : ''}>${escapeHtml(game)}</option>`).join('');
+  }
+  const templates = state.templateGameFilter === 'All'
+    ? allTemplates
+    : allTemplates.filter((template) => templateGameGroup(template) === state.templateGameFilter);
+  const maxCpuCores = Math.max(1, Number(state.settings?.maxCpuCores || 1));
   elements.templateGrid.innerHTML = templates.map((template) => `
     <article class="template-card">
       <div class="status-row">
@@ -583,7 +605,7 @@ function renderTemplates() {
       <div class="field-grid mini">
         <label>Name <input data-template-name="${escapeHtml(template.key)}" value="${escapeHtml(template.name)}"></label>
         <label>RAM MB <input data-template-ram="${escapeHtml(template.key)}" type="number" min="256" max="${state.settings?.maxAllocatableMemoryMb || 65536}" step="256" value="${template.memoryMb}"></label>
-        <label>CPU cores <input data-template-cpu="${escapeHtml(template.key)}" type="number" min="1" max="${navigator.hardwareConcurrency || 64}" step="1" value="${template.cpuCores || 1}"></label>
+        <label>CPU cores <input data-template-cpu="${escapeHtml(template.key)}" type="number" min="1" max="${maxCpuCores}" step="1" value="${template.cpuCores || 1}"></label>
         <label>Port <input data-template-port="${escapeHtml(template.key)}" type="number" min="1" max="65535" value="${template.port}"></label>
       </div>
       <button type="button" data-action="create-template-server" data-template-key="${escapeHtml(template.key)}">${template.edition === 'custom' ? 'Create Template Server' : 'Create + Auto Setup'}</button>
@@ -878,8 +900,9 @@ function renderSettings() {
     <form class="settings-form" id="settingsForm">
       <label class="switch"><input name="terminalEnabled" type="checkbox" ${settings.terminalEnabled ? 'checked' : ''}><span></span>Owner terminal row</label>
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
-      <label>Update repo <input name="updateRepo" value="${escapeHtml(settings.updateRepo || '')}"></label>
+      <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
+      <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
       <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
       <button class="save-wide" type="submit">Save Settings</button>
     </form>
@@ -1003,12 +1026,16 @@ async function renderNetwork(speed = null) {
   const data = await api('/api/network/metrics').catch(() => ({ network: { inboundBytes: 0, outboundBytes: 0, interfaces: [] } }));
   const network = data.network || {};
   elements.networkPanel.innerHTML = `
-    <div class="section-head"><div><p class="eyebrow">Network</p><h2>VPS traffic monitor</h2></div><button type="button" data-action="network-speed-test">Check Network Speed</button></div>
+    <div class="section-head"><div><p class="eyebrow">Network</p><h2>VPS traffic monitor</h2></div><div class="row-actions"><button class="secondary" type="button" data-action="show-nginx-config">Nginx Config</button><button type="button" data-action="network-speed-test">Check Network Speed</button></div></div>
     <div class="quick-stats">
       <article><span>Inbound Used</span><strong>${formatBytes(network.inboundBytes || 0)}</strong></article>
       <article><span>Outbound Used</span><strong>${formatBytes(network.outboundBytes || 0)}</strong></article>
       <article><span>Download Speed</span><strong>${speed ? `${formatBytes(speed.downloadBytesPerSec)}/s` : 'Click check'}</strong></article>
       <article><span>Upload Speed</span><strong>${speed ? `${formatBytes(speed.uploadBytesPerSec)}/s` : 'Click check'}</strong></article>
+    </div>
+    <div class="public-help-grid">
+      <article><strong>Fast Downloads</strong><span>Range downloads stay resumable; optional Nginx X-Accel can offload huge files.</span></article>
+      <article><strong>Speed Test</strong><span>Measures your browser to this panel, so VPS/LAN speed is visible directly.</span></article>
     </div>
     <div class="plugin-list">
       ${(network.interfaces || []).map((item) => `<div class="plugin-row"><strong>${escapeHtml(item.name)}</strong><div class="row-actions"><span>${formatBytes(item.rxBytes)} in</span><span>${formatBytes(item.txBytes)} out</span></div></div>`).join('') || '<p class="empty-state">No network counters available on this OS.</p>'}
@@ -1266,6 +1293,13 @@ elements.serverForm.type.addEventListener('change', () => {
 elements.softwareSelect.addEventListener('change', () => {
   hydrateCreateVersionSelect();
 });
+
+if (elements.templateGameSelect) {
+  elements.templateGameSelect.addEventListener('change', () => {
+    state.templateGameFilter = elements.templateGameSelect.value;
+    renderTemplates();
+  });
+}
 
 elements.activeServerSelect.addEventListener('change', () => {
   state.activeServerId = Number(elements.activeServerSelect.value);
@@ -1558,6 +1592,20 @@ document.addEventListener('click', async (event) => {
     const serverCard = event.target.closest('[data-server-id]');
     if (serverCard) state.activeServerId = Number(serverCard.dataset.serverId);
 
+    if (action === 'forgot-password') {
+      const email = prompt('Enter your NexusPanel account email:');
+      if (!email) return;
+      const request = await api('/api/password/forgot', { method: 'POST', body: JSON.stringify({ email }) });
+      showToast(request.message || 'OTP requested.');
+      const otp = prompt('Enter the 6-digit OTP:');
+      if (!otp) return;
+      const password = prompt('Enter your new password (8+ chars):');
+      if (!password) return;
+      const reset = await api('/api/password/reset', { method: 'POST', body: JSON.stringify({ email, otp, password }) });
+      showToast(reset.message || 'Password reset.');
+      return;
+    }
+
     if (action === 'logout') {
       await api('/api/logout', { method: 'POST' });
       state.user = null;
@@ -1603,8 +1651,7 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'run-panel-update') {
       if (!confirm('Update NexusPanel from GitHub now? Server files, data, software cache, and external backups stay protected.')) return;
-      const repo = document.querySelector('#settingsForm input[name="updateRepo"]')?.value || state.settings?.updateRepo || '';
-      const result = await api('/api/settings/update', { method: 'POST', body: JSON.stringify({ repo }) });
+      const result = await api('/api/settings/update', { method: 'POST', body: JSON.stringify({}) });
       showToast(result.message || 'Update started.');
       return;
     }
@@ -1699,10 +1746,38 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'network-speed-test') {
       actionTarget.disabled = true;
-      showToast('Checking current network speed...');
-      const data = await api('/api/network/speed', { method: 'POST' });
-      await renderNetwork(data.speed);
+      showToast('Testing panel transfer speed...');
+      const downloadSize = 8 * 1024 * 1024;
+      const downloadStart = performance.now();
+      const downloadBuffer = await fetch(`/api/network/download-test?size=${downloadSize}`, { credentials: 'same-origin' }).then((res) => {
+        if (!res.ok) throw new Error('Download speed test failed.');
+        return res.arrayBuffer();
+      });
+      const downloadSeconds = Math.max(0.001, (performance.now() - downloadStart) / 1000);
+      const uploadBuffer = new Uint8Array(4 * 1024 * 1024).fill(90);
+      const uploadStart = performance.now();
+      const uploadResult = await fetch('/api/network/upload-test', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: uploadBuffer,
+      });
+      if (!uploadResult.ok) throw new Error('Upload speed test failed.');
+      const uploadSeconds = Math.max(0.001, (performance.now() - uploadStart) / 1000);
+      await renderNetwork({
+        downloadBytesPerSec: downloadBuffer.byteLength / downloadSeconds,
+        uploadBytesPerSec: uploadBuffer.byteLength / uploadSeconds,
+      });
       showToast('Network speed updated.');
+      actionTarget.disabled = false;
+      return;
+    }
+    if (action === 'show-nginx-config') {
+      const response = await fetch('/api/nginx/accel-config', { credentials: 'same-origin' });
+      const text = await response.text();
+      if (!response.ok) throw new Error(text || 'Could not load Nginx config.');
+      await navigator.clipboard?.writeText(text).catch(() => {});
+      prompt('Nginx X-Accel config copied if browser allowed it:', text);
       return;
     }
     if (action === 'run-health-check') {
