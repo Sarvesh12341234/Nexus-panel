@@ -142,6 +142,29 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS backup_share_codes (
+    server_id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS backup_share_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_server_id INTEGER NOT NULL,
+    target_server_id INTEGER NOT NULL,
+    requester_user_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'denied', 'revoked')),
+    expires_at INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_server_id, target_server_id),
+    FOREIGN KEY (source_server_id) REFERENCES servers(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_server_id) REFERENCES servers(id) ON DELETE CASCADE,
+    FOREIGN KEY (requester_user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
 `);
 
 const serverColumns = {

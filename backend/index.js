@@ -141,12 +141,15 @@ function setSettingValue(key, value) {
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
+  const defaultTag = edition === 'host' ? 'host-v1.2.0' : 'normal-v1.2.0';
+  const configuredTag = settingValue('update_target_tag', defaultTag);
   return {
     version: PANEL_VERSION,
     terminalEnabled: settingValue('terminal_enabled', '0') === '1',
+    timeZone: settingValue('time_zone', 'UTC'),
     updateRepo: FIXED_UPDATE_REPO,
     edition,
-    updateTag: edition === 'host' ? 'host-v1.2' : 'normal-v1.2',
+    updateTag: configuredTag,
     updateStatus,
     hostApiTokenPreview: edition === 'host' && user?.role === 'owner' ? `${hostToken.slice(0, 8)}....${hostToken.slice(-6)}` : '',
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
@@ -597,6 +600,37 @@ function adminExpiresAt(body) {
   return Date.now() + Math.max(1, minutes) * 60 * 1000;
 }
 
+function durationMs(body, fallbackMinutes = 60, maxMinutes = 1440) {
+  const value = clampNumber(body.durationValue ?? body.accessDurationValue ?? body.adminDurationValue, 1, maxMinutes, fallbackMinutes);
+  const unit = String(body.durationUnit || body.accessDurationUnit || body.adminDurationUnit || 'minutes').toLowerCase();
+  const minutes = unit.startsWith('day') ? value * 1440
+    : unit.startsWith('hour') ? value * 60
+      : value;
+  return Math.max(1, Math.min(minutes, maxMinutes)) * 60 * 1000;
+}
+
+function randomSixDigitCode() {
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+function ensureBackupShareCode(server, body = {}) {
+  const ttl = durationMs(body, 60, 24 * 60);
+  const existing = db.prepare('SELECT * FROM backup_share_codes WHERE server_id = ?').get(server.id);
+  if (existing && existing.expires_at > Date.now()) return existing;
+  let code = randomSixDigitCode();
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const used = db.prepare('SELECT server_id FROM backup_share_codes WHERE code = ? AND server_id != ?').get(code, server.id);
+    if (!used) break;
+    code = randomSixDigitCode();
+  }
+  db.prepare(`
+    INSERT INTO backup_share_codes (server_id, code, expires_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(server_id) DO UPDATE SET code = excluded.code, expires_at = excluded.expires_at, updated_at = CURRENT_TIMESTAMP
+  `).run(server.id, code, Date.now() + ttl);
+  return db.prepare('SELECT * FROM backup_share_codes WHERE server_id = ?').get(server.id);
+}
+
 function browserFromUserAgent(userAgent) {
   const ua = String(userAgent || '');
   if (/Edg\//i.test(ua)) return 'Microsoft Edge';
@@ -734,6 +768,11 @@ function canUseServer(user, server) {
   if (user.role === 'owner') return true;
   if (!isHostEdition()) return true;
   return Number(server.owner_user_id) === Number(user.id);
+}
+
+function canOwnServerShare(user, server) {
+  if (!user || !server) return false;
+  return user.role === 'owner' || Number(server.owner_user_id) === Number(user.id);
 }
 
 function resolveServerOwnerUserId(req, requestedValue, fallback = null) {
@@ -1157,7 +1196,14 @@ async function restoreServerBackup(server, backupName) {
   if (runtimeStatus(server.id) === 'online') throw new Error('Stop the server before restoring a backup.');
   const name = String(backupName || '').replaceAll('\\', '/').replace(/^\/+/, '');
   if (!name.endsWith('.zip') || name.includes('/')) throw new Error('Choose a backup ZIP to restore.');
-  const backupPath = assertInside(backupsRoot, path.join(backupsRoot, String(server.id), name));
+  return restoreBackupFileIntoServer(server, server.id, name);
+}
+
+async function restoreBackupFileIntoServer(server, sourceServerId, backupName) {
+  if (runtimeStatus(server.id) === 'online') throw new Error('Stop the server before restoring a backup.');
+  const name = String(backupName || '').replaceAll('\\', '/').replace(/^\/+/, '');
+  if (!name.endsWith('.zip') || name.includes('/')) throw new Error('Choose a backup ZIP to restore.');
+  const backupPath = assertInside(backupsRoot, path.join(backupsRoot, String(sourceServerId), name));
   const stats = await fs.promises.stat(backupPath).catch(() => null);
   if (!stats || !stats.isFile()) throw new Error('Backup file not found.');
 
@@ -1358,11 +1404,11 @@ app.get('/api/optimizer/plan', requireAccess(permissions.MANAGE_SERVERS), (_req,
   res.json(planCommands());
 });
 
-app.get('/api/network/metrics', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {
+app.get('/api/network/metrics', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
   res.json({ network: await networkStats() });
 }));
 
-app.get('/api/network/download-test', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.get('/api/network/download-test', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
   const size = clampNumber(req.query.size, 1024 * 1024, 64 * 1024 * 1024, 8 * 1024 * 1024);
   const block = Buffer.allocUnsafe(256 * 1024).fill(0x5a);
   let remaining = size;
@@ -1380,7 +1426,7 @@ app.get('/api/network/download-test', requireAccess(permissions.MANAGE_ADMINS), 
   writeMore();
 });
 
-app.post('/api/network/upload-test', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.post('/api/network/upload-test', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
   res.json({ bytes: Buffer.isBuffer(req.body) ? req.body.length : 0, receivedAt: Date.now() });
 });
 
@@ -1438,10 +1484,15 @@ app.post('/api/password/forgot', asyncRoute(async (req, res) => {
       VALUES (?, ?, ?, 0)
       ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0, created_at = CURRENT_TIMESTAMP
     `).run(email, otpHash(email, code), Date.now() + 10 * 60 * 1000);
-    await sendPasswordOtp(email, code).catch(async (error) => {
+    let delivery = 'If that email exists, an OTP was sent or logged for the owner.';
+    await sendPasswordOtp(email, code).then((message) => {
+      delivery = message;
+    }).catch(async (error) => {
       console.error(`Password reset OTP delivery failed: ${error.message}`);
       await fs.promises.appendFile(path.join(dataRoot, 'password-reset-otp.log'), `${new Date().toISOString()} ${email} ${code}\n`, { mode: 0o600 }).catch(() => {});
+      delivery = 'Email delivery failed. Owner can read data/password-reset-otp.log on the VPS.';
     });
+    return res.json({ ok: true, message: delivery });
   }
   res.json({ ok: true, message: 'If that email exists, an OTP was sent or logged for the owner.' });
 }));
@@ -1567,6 +1618,12 @@ app.post('/api/users', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
     accessLevel: req.body.accessLevel,
     expiresAt: adminExpiresAt(req.body),
   });
+  const assignedServerId = Number(req.body.assignedServerId || 0);
+  if (assignedServerId && user.role !== 'owner') {
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(assignedServerId);
+    if (!server) return res.status(404).json({ error: 'Assigned server not found.' });
+    db.prepare('UPDATE servers SET owner_user_id = ? WHERE id = ?').run(user.id, server.id);
+  }
 
   res.status(201).json({ user });
 });
@@ -1658,6 +1715,10 @@ app.get('/api/servers/:id/nexus-mark', requireAccess(permissions.MANAGE_SERVERS)
 app.put('/api/settings', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
   setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
+  const timeZone = String(req.body.timeZone || 'UTC').replace(/[^A-Za-z0-9_+\-\/]/g, '').slice(0, 80) || 'UTC';
+  setSettingValue('time_zone', timeZone);
+  const updateTag = String(req.body.updateTargetTag || req.body.updateTag || panelSettingsPayload(req.user).updateTag).trim();
+  if (/^(normal|host)-v\d+\.\d+(?:\.\d+)?$/.test(updateTag)) setSettingValue('update_target_tag', updateTag);
   setSettingValue('update_repo', FIXED_UPDATE_REPO);
   res.json({ settings: panelSettingsPayload(req.user) });
 });
@@ -1679,9 +1740,12 @@ app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), async
     finishedAt: 0,
     exitCode: null,
   };
+  const requestedTag = String(req.body.updateTargetTag || req.body.updateTag || settingValue('update_target_tag', panelSettingsPayload(req.user).updateTag)).trim();
+  const updateTag = /^(normal|host)-v\d+\.\d+(?:\.\d+)?$/.test(requestedTag) ? requestedTag : panelSettingsPayload(req.user).updateTag;
+  setSettingValue('update_target_tag', updateTag);
   const child = spawn('bash', [script, repo], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, NEXUSPANEL_WEB_UPDATE: '1' },
+    env: { ...process.env, NEXUSPANEL_WEB_UPDATE: '1', NEXUSPANEL_UPDATE_TAG: updateTag },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -2416,6 +2480,16 @@ app.post('/api/servers/:id/start', requireAccess(permissions.POWER_SERVERS), asy
   }
 }));
 
+app.post('/api/servers/:id/fix', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id);
+  if (runtimeStatus(server.id) === 'online') return res.status(409).json({ error: 'Stop the server before running Fix Server.' });
+  const software = softwareForServer(server);
+  if (!software) return res.status(400).json({ error: 'This server has no repairable software runtime.' });
+  const repair = await repairMissingExecutable(server, software);
+  appendLog(server.id, `[NexusPanel] Fix Server completed: ${repair.message}`);
+  res.json({ ok: true, repair, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
+}));
+
 app.post('/api/servers/:id/eula', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   await agreeJavaEula(server);
@@ -2510,8 +2584,85 @@ app.delete('/api/servers/:id/whitelist', requireAccess(permissions.MANAGE_SERVER
 
 app.get('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
-  res.json({ backups: await backupRows(server) });
+  const canShareOwner = canOwnServerShare(req.user, server);
+  const code = canShareOwner ? db.prepare('SELECT code, expires_at FROM backup_share_codes WHERE server_id = ? AND expires_at > ?').get(server.id, Date.now()) : null;
+  const incoming = canShareOwner ? db.prepare(`
+    SELECT r.id, r.status, r.expires_at, r.created_at, s.name AS target_name, u.email AS requester_email
+    FROM backup_share_requests r
+    JOIN servers s ON s.id = r.target_server_id
+    JOIN users u ON u.id = r.requester_user_id
+    WHERE r.source_server_id = ?
+    ORDER BY r.updated_at DESC
+  `).all(server.id) : [];
+  const sharedSources = db.prepare(`
+    SELECT r.id, r.source_server_id, r.expires_at, s.name AS source_name
+    FROM backup_share_requests r
+    JOIN servers s ON s.id = r.source_server_id
+    WHERE r.target_server_id = ? AND r.status = 'approved' AND (r.expires_at = 0 OR r.expires_at > ?)
+    ORDER BY s.name ASC
+  `).all(server.id, Date.now());
+  const sharedBackups = [];
+  for (const source of sharedSources) {
+    const sourceServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(source.source_server_id);
+    if (!sourceServer) continue;
+    sharedBackups.push({
+      requestId: source.id,
+      sourceServerId: source.source_server_id,
+      sourceName: source.source_name,
+      expiresAt: source.expires_at,
+      backups: await backupRows(sourceServer),
+    });
+  }
+  res.json({ backups: await backupRows(server), canManageShare: canShareOwner, shareCode: code || null, shareRequests: incoming, sharedBackups });
 }));
+
+app.post('/api/servers/:id/backups/share-code', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can create backup codes.' });
+  const code = ensureBackupShareCode(server, req.body || {});
+  res.json({ code: code.code, expiresAt: code.expires_at });
+});
+
+app.delete('/api/servers/:id/backups/share-code', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can hide backup codes.' });
+  db.prepare('DELETE FROM backup_share_codes WHERE server_id = ?').run(server.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/servers/:id/backups/share-request', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+  const target = getServerOr404(req.params.id);
+  const code = String(req.body.code || '').trim();
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter a 6-digit backup code.' });
+  const share = db.prepare('SELECT * FROM backup_share_codes WHERE code = ? AND expires_at > ?').get(code, Date.now());
+  if (!share) return res.status(404).json({ error: 'Backup code not found or expired.' });
+  if (Number(share.server_id) === Number(target.id)) return res.status(400).json({ error: 'This code belongs to the selected server.' });
+  db.prepare(`
+    INSERT INTO backup_share_requests (source_server_id, target_server_id, requester_user_id, status, expires_at)
+    VALUES (?, ?, ?, 'pending', 0)
+    ON CONFLICT(source_server_id, target_server_id) DO UPDATE SET requester_user_id = excluded.requester_user_id, status = 'pending', expires_at = 0, updated_at = CURRENT_TIMESTAMP
+  `).run(share.server_id, target.id, req.user.id);
+  res.status(201).json({ ok: true, message: 'Backup access request sent to the source server owner.' });
+});
+
+app.post('/api/servers/:id/backups/share-requests/:requestId/approve', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can approve backup access.' });
+  const request = db.prepare('SELECT * FROM backup_share_requests WHERE id = ? AND source_server_id = ?').get(Number(req.params.requestId), server.id);
+  if (!request) return res.status(404).json({ error: 'Share request not found.' });
+  const expiresAt = Date.now() + durationMs(req.body || {}, 60, 24 * 60);
+  db.prepare('UPDATE backup_share_requests SET status = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run('approved', expiresAt, request.id);
+  res.json({ ok: true, expiresAt });
+});
+
+app.delete('/api/servers/:id/backups/share-requests/:requestId', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can remove backup access.' });
+  const request = db.prepare('SELECT * FROM backup_share_requests WHERE id = ? AND source_server_id = ?').get(Number(req.params.requestId), server.id);
+  if (!request) return res.status(404).json({ error: 'Share request not found.' });
+  db.prepare('UPDATE backup_share_requests SET status = ?, expires_at = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run('revoked', request.id);
+  res.json({ ok: true });
+});
 
 app.post('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
@@ -2539,7 +2690,17 @@ app.get('/api/servers/:id/backups/download', requireAccess(permissions.MANAGE_FI
 
 app.post('/api/servers/:id/backups/restore', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
-  const result = await restoreServerBackup(server, req.body.name);
+  const sourceServerId = Number(req.body.sourceServerId || server.id);
+  if (sourceServerId !== Number(server.id)) {
+    const access = db.prepare(`
+      SELECT * FROM backup_share_requests
+      WHERE source_server_id = ? AND target_server_id = ? AND status = 'approved' AND (expires_at = 0 OR expires_at > ?)
+    `).get(sourceServerId, server.id, Date.now());
+    if (!access) return res.status(403).json({ error: 'No active shared backup access for this server.' });
+  }
+  const result = sourceServerId === Number(server.id)
+    ? await restoreServerBackup(server, req.body.name)
+    : await restoreBackupFileIntoServer(server, sourceServerId, req.body.name);
   res.json({ ok: true, ...result, backups: await backupRows(server) });
 }));
 

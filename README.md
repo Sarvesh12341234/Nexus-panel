@@ -14,7 +14,7 @@ Open `http://localhost:3000`.
 Linux/Ubuntu one-command installer:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v1.2/nexuspanel-normal-v1.2-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v1.2.0/nexuspanel-normal-v1.2.0-linux-installer.sh | sudo bash
 ```
 
 ## VPS Background Service
@@ -65,15 +65,15 @@ bash update/update.sh
 
 Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the external backup store.
 
-## v1.2 Editions
+## v1.2.0 Editions
 
-- `normal-v1.2`: advanced solo panel with fast transfer, backups, plugin/file/software managers, shared admin visibility, and host-only features hidden.
-- `host-v1.2`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, and assigned-user server isolation.
-- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v1.2` or `host-v1.2`.
+- `normal-v1.2.0`: advanced solo panel with fast transfer, backups, plugin/file/software managers, shared admin visibility, and host-only features hidden.
+- `host-v1.2.0`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, and assigned-user server isolation.
+- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v1.2.0` or `host-v1.2.0`.
 - The update repository is locked to `Sarvesh12341234/Nexus-panel`; users cannot change it from the panel UI.
 - If an update finds server folders such as `5-summa` missing from SQLite, NexusPanel recovers them into the server list on boot.
 
-## v1.2 Transfer + Safety
+## v1.2.0 Transfer + Safety
 
 - Upload chunks increased to `32MB`.
 - Uploads use up to `4` parallel chunks per file.
@@ -88,14 +88,16 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Backup intervals support typed minute or hour values instead of hours only.
 - ZIP extraction validates the file first and asks whether to replace or skip duplicates.
 
-## v1.2 Fixes
+## v1.2.0 Fixes
 
 - Settings updater shows live progress, status text, and final exit state.
-- Server settings now expose per-server auto start, auto restart, wake on join, whitelist, crash backup, auto backup, retention, startup delay, RAM, and port after creation.
+- Server settings now expose per-server auto start, auto restart, wake on join, crash backup, startup delay, RAM, port, and a confirmed Fix Server action after creation.
+- Backups include minute/hour scheduling, 6-digit share-code requests, owner approval, timed access, revoke, and a separate shared-backup restore section.
 - Normal edition admins can see assigned panel servers by permission level; host-only templates and host token controls are hidden outside host edition.
 - Software version selects prefer the latest refreshed version for installs.
 - Starting a server can run a deterministic smart repair for missing executables before retrying.
 - Admin creation supports permanent or temporary accounts, with expiry enforced during auth.
+- Login has a real reset-password code form; without email relay the code is written to `data/password-reset-otp.log` for the VPS owner.
 
 Optional Nginx acceleration:
 

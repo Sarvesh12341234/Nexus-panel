@@ -67,6 +67,7 @@ const elements = {
   consoleMetrics: document.querySelector('#consoleMetrics'),
   commandForm: document.querySelector('#commandForm'),
   serverConfigForm: document.querySelector('#serverConfigForm'),
+  adminServerAssign: document.querySelector('#adminServerAssign'),
   fileList: document.querySelector('#fileList'),
   filePathLabel: document.querySelector('#filePathLabel'),
   fileEditor: document.querySelector('#fileEditor'),
@@ -94,6 +95,7 @@ const versionCache = new Map();
 let lastCreateSoftwareKey = '';
 const UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024;
 const UPLOAD_PARALLELISM = 4;
+const timeZones = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : ['UTC'];
 const themes = [
   { key: 'nexus', name: 'Plain · Nexus Mint', mode: 'plain' },
   { key: 'ember', name: 'Plain · Ember Arena', mode: 'plain' },
@@ -203,24 +205,18 @@ function fillServerConfigForm(server, force = false) {
   form.maxMemoryMb.disabled = state.user?.role !== 'owner';
   form.maxMemoryMb.title = state.user?.role === 'owner' ? 'Owner can change RAM allocation.' : 'Only the owner can change RAM allocation.';
   form.port.value = server.port;
-  const backupMinutes = Number(server.backupIntervalMinutes || (server.backupIntervalHours || 24) * 60);
-  form.backupIntervalUnit.value = backupMinutes % 60 === 0 ? 'hours' : 'minutes';
-  form.backupIntervalValue.value = form.backupIntervalUnit.value === 'hours' ? Math.max(1, Math.round(backupMinutes / 60)) : Math.max(1, backupMinutes);
-  form.backupRetention.value = server.backupRetention || 4;
   form.startupDelaySec.value = server.startupDelaySec || 0;
   form.autoRestart.checked = Boolean(server.autoRestart);
   form.autoStart.checked = Boolean(server.autoStart);
-  form.scheduledBackups.checked = Boolean(server.scheduledBackups);
   form.crashBackup.checked = Boolean(server.crashBackup);
   form.wakeOnJoin.checked = Boolean(server.wakeOnJoin);
-  form.whitelist.checked = Boolean(server.whitelist);
   const ownerLabel = form.querySelector('#serverOwnerConfigLabel');
   const ownerSelect = form.querySelector('select[name="ownerUserId"]');
   if (ownerLabel && ownerSelect) {
     const isOwner = state.user?.role === 'owner';
     ownerLabel.hidden = !isOwner;
     ownerSelect.disabled = !isOwner;
-    ownerSelect.innerHTML = '<option value="">Owner / unassigned</option>' + (state.users || [])
+      ownerSelect.innerHTML = '<option value="">Owner / unassigned</option>' + (state.users || [])
       .filter((user) => user.role !== 'owner')
       .map((user) => `<option value="${user.id}" ${Number(server.ownerUserId || 0) === Number(user.id) ? 'selected' : ''}>${escapeHtml(user.name)} - ${escapeHtml(user.email)}</option>`)
       .join('');
@@ -250,6 +246,11 @@ function ensureFileControls() {
     elements.uploadLabel = panel.querySelector('#uploadLabel');
     elements.uploadProgress = panel.querySelector('#uploadProgress');
     elements.uploadSessionList = panel.querySelector('#uploadSessionList');
+  }
+  if (elements.adminServerAssign) {
+    elements.adminServerAssign.innerHTML = '<option value="">No server assignment</option>' + state.servers
+      .map((item) => `<option value="${item.id}">${escapeHtml(item.name)}</option>`)
+      .join('');
   }
 }
 
@@ -923,6 +924,8 @@ function renderSettings() {
   const settings = state.settings || {};
   const update = settings.updateStatus || {};
   const isHost = settings.edition === 'host';
+  const selectedZone = settings.timeZone || 'UTC';
+  const zoneOptions = timeZones.map((zone) => `<option value="${escapeHtml(zone)}" ${zone === selectedZone ? 'selected' : ''}>${escapeHtml(zone)}</option>`).join('');
   elements.settingsPanel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Settings</p><h2>Panel engine</h2></div><button type="button" data-action="run-panel-update">Update from GitHub</button></div>
     <form class="settings-form" id="settingsForm">
@@ -930,9 +933,11 @@ function renderSettings() {
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.2.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
+      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v1.2.0"></label>
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
       <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
       <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
+      <label>Timezone <select name="timeZone">${zoneOptions}</select></label>
       <button class="save-wide" type="submit">Save Settings</button>
     </form>
     <div class="upload-panel">
@@ -1020,6 +1025,8 @@ function renderBackups() {
   const backupUnit = backupMinutes % 60 === 0 ? 'hours' : 'minutes';
   const backupValue = backupUnit === 'hours' ? Math.max(1, Math.round(backupMinutes / 60)) : Math.max(1, backupMinutes);
   api(`/api/servers/${server.id}/backups`).then((data) => {
+    const requests = data.shareRequests || [];
+    const shared = data.sharedBackups || [];
     elements.backupPanel.innerHTML = `
       <div class="section-head"><div><p class="eyebrow">Backups</p><h2>${escapeHtml(server.name)}</h2></div><button type="button" data-action="manual-backup">Manual backup</button></div>
       <form class="backup-settings" id="backupSettingsForm">
@@ -1030,7 +1037,23 @@ function renderBackups() {
         <button type="submit">Save backup settings</button>
       </form>
       <p class="muted">Stored outside the panel install by default: <code>/var/lib/nexuspanel/backups/${server.id}/</code> on Linux. Server-folder <code>backups/</code>, <code>archives/</code>, and top-level ZIPs are skipped to prevent recursive giant backups.</p>
+      ${data.canManageShare ? `<div class="backup-settings">
+        <button class="secondary" type="button" data-action="backup-code-show">${data.shareCode ? 'Refresh Backup Code' : 'Create Backup Code'}</button>
+        ${data.shareCode ? `<code>${escapeHtml(data.shareCode.code)}</code><span class="muted">expires ${escapeHtml(formatDateTime(data.shareCode.expires_at))}</span><button class="danger" type="button" data-action="backup-code-hide">Hide Code</button>` : '<span class="muted">Create a 6-digit code so another server can request access.</span>'}
+      </div>` : ''}
+      <form class="backup-settings" id="backupCodeForm">
+        <label>Add code <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456"></label>
+        <button type="submit">Request shared backup</button>
+      </form>
+      ${data.canManageShare ? `<div class="plugin-list">
+        ${requests.map((request) => `<div class="plugin-row"><div><strong>${escapeHtml(request.target_name || 'Server')}</strong><div class="muted">${escapeHtml(request.requester_email || '')} | ${escapeHtml(request.status)}${request.expires_at ? ` | until ${escapeHtml(formatDateTime(request.expires_at))}` : ''}</div></div><div class="row-actions">${request.status === 'pending' ? '<input type="number" min="1" max="24" value="1" data-share-hours>' : ''}<button class="secondary" type="button" data-action="backup-request-approve" data-request-id="${request.id}" ${request.status === 'pending' ? '' : 'disabled'}>Accept</button><button class="danger" type="button" data-action="backup-request-remove" data-request-id="${request.id}">Remove</button></div></div>`).join('') || '<p class="empty-state">No backup access requests.</p>'}
+      </div>` : ''}
       <div class="plugin-list">${data.backups.map((backup) => `<div class="plugin-row"><div><strong>${escapeHtml(backup.name)}</strong><div class="muted">${Math.round(backup.size / 1024)} KB</div></div><div class="row-actions"><button class="secondary" type="button" data-action="restore-backup" data-backup-path="${escapeHtml(backup.path)}">Restore</button><a class="button-link" href="/api/servers/${server.id}/backups/download?name=${encodeURIComponent(backup.name)}">Download</a><button class="danger" type="button" data-action="delete-backup" data-backup-path="${escapeHtml(backup.path)}">Delete</button></div></div>`).join('') || '<p class="empty-state">No backups yet.</p>'}</div>
+      <h3>Shared backups</h3>
+      <div class="plugin-list">${shared.map((group) => `
+        <div class="plugin-row"><div><strong>${escapeHtml(group.sourceName)}</strong><div class="muted">Access until ${escapeHtml(formatDateTime(group.expiresAt))}</div></div></div>
+        ${(group.backups || []).map((backup) => `<div class="plugin-row"><div><strong>${escapeHtml(backup.name)}</strong><div class="muted">${Math.round(backup.size / 1024)} KB | shared-backup</div></div><div class="row-actions"><button class="secondary" type="button" data-action="restore-backup" data-backup-path="${escapeHtml(backup.path)}" data-source-server-id="${group.sourceServerId}">Restore here</button></div></div>`).join('')}
+      `).join('') || '<p class="empty-state">No shared backups approved for this server.</p>'}</div>
     `;
   }).catch((error) => showToast(error.message));
 }
@@ -1271,6 +1294,23 @@ function formatBytes(bytes) {
   return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  try {
+    return date.toLocaleString(undefined, {
+      timeZone: state.settings?.timeZone || 'UTC',
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return date.toLocaleString();
+  }
+}
+
 function startRefreshLoop() {
   window.clearInterval(state.refreshTimer);
   state.refreshTimer = window.setInterval(() => {
@@ -1477,8 +1517,6 @@ if (elements.serverConfigForm) {
       ...server,
       ...formData(elements.serverConfigForm),
       port: Number(elements.serverConfigForm.port.value),
-      backupIntervalValue: Number(elements.serverConfigForm.backupIntervalValue.value),
-      backupRetention: Number(elements.serverConfigForm.backupRetention.value),
       startupDelaySec: Number(elements.serverConfigForm.startupDelaySec.value),
       type: server.type,
       softwareKey: server.softwareKey,
@@ -1603,6 +1641,22 @@ document.addEventListener('submit', async (event) => {
   }
 });
 
+document.addEventListener('submit', async (event) => {
+  if (event.target.id !== 'backupCodeForm') return;
+  event.preventDefault();
+  const server = activeServer();
+  if (!server) return;
+  const payload = formData(event.target);
+  try {
+    await api(`/api/servers/${server.id}/backups/share-request`, { method: 'POST', body: JSON.stringify(payload) });
+    showToast('Backup access request sent.');
+    event.target.reset();
+    renderBackups();
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
 elements.adminForm.addEventListener('input', () => {
   elements.accessOutput.value = elements.adminForm.accessLevel.value;
 });
@@ -1693,7 +1747,8 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'run-panel-update') {
       if (!confirm('Update NexusPanel from GitHub now? Server files, data, software cache, and external backups stay protected.')) return;
-      const result = await api('/api/settings/update', { method: 'POST', body: JSON.stringify({}) });
+      const tag = document.querySelector('#settingsForm [name="updateTargetTag"]')?.value || state.settings?.updateTag || '';
+      const result = await api('/api/settings/update', { method: 'POST', body: JSON.stringify({ updateTargetTag: tag }) });
       showToast(result.message || 'Update started.');
       await refreshServerStatusOnly();
       return;
@@ -1789,30 +1844,33 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'network-speed-test') {
       actionTarget.disabled = true;
-      showToast('Testing panel transfer speed...');
-      const downloadSize = 8 * 1024 * 1024;
-      const downloadStart = performance.now();
-      const downloadBuffer = await fetch(`/api/network/download-test?size=${downloadSize}`, { credentials: 'same-origin' }).then((res) => {
-        if (!res.ok) throw new Error('Download speed test failed.');
-        return res.arrayBuffer();
-      });
-      const downloadSeconds = Math.max(0.001, (performance.now() - downloadStart) / 1000);
-      const uploadBuffer = new Uint8Array(4 * 1024 * 1024).fill(90);
-      const uploadStart = performance.now();
-      const uploadResult = await fetch('/api/network/upload-test', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: uploadBuffer,
-      });
-      if (!uploadResult.ok) throw new Error('Upload speed test failed.');
-      const uploadSeconds = Math.max(0.001, (performance.now() - uploadStart) / 1000);
-      await renderNetwork({
-        downloadBytesPerSec: downloadBuffer.byteLength / downloadSeconds,
-        uploadBytesPerSec: uploadBuffer.byteLength / uploadSeconds,
-      });
-      showToast('Network speed updated.');
-      actionTarget.disabled = false;
+      try {
+        showToast('Testing panel transfer speed...');
+        const downloadSize = 8 * 1024 * 1024;
+        const downloadStart = performance.now();
+        const downloadBuffer = await fetch(`/api/network/download-test?size=${downloadSize}`, { credentials: 'same-origin' }).then((res) => {
+          if (!res.ok) throw new Error('Download speed test failed.');
+          return res.arrayBuffer();
+        });
+        const downloadSeconds = Math.max(0.001, (performance.now() - downloadStart) / 1000);
+        const uploadBuffer = new Uint8Array(4 * 1024 * 1024).fill(90);
+        const uploadStart = performance.now();
+        const uploadResult = await fetch('/api/network/upload-test', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: uploadBuffer,
+        });
+        if (!uploadResult.ok) throw new Error('Upload speed test failed.');
+        const uploadSeconds = Math.max(0.001, (performance.now() - uploadStart) / 1000);
+        await renderNetwork({
+          downloadBytesPerSec: downloadBuffer.byteLength / downloadSeconds,
+          uploadBytesPerSec: uploadBuffer.byteLength / uploadSeconds,
+        });
+        showToast('Network speed updated.');
+      } finally {
+        actionTarget.disabled = false;
+      }
       return;
     }
     if (action === 'show-nginx-config') {
@@ -1848,6 +1906,48 @@ document.addEventListener('click', async (event) => {
       renderBackups();
       return;
     }
+    if (action === 'backup-code-show') {
+      const server = activeServer();
+      if (!server) return;
+      const hours = Number(prompt('How many hours should this code stay active? 1-24', '1') || 1);
+      await api(`/api/servers/${server.id}/backups/share-code`, {
+        method: 'POST',
+        body: JSON.stringify({ durationValue: Math.max(1, Math.min(24, hours)), durationUnit: 'hours' }),
+      });
+      showToast('Backup code ready.');
+      renderBackups();
+      return;
+    }
+    if (action === 'backup-code-hide') {
+      const server = activeServer();
+      if (!server) return;
+      await api(`/api/servers/${server.id}/backups/share-code`, { method: 'DELETE' });
+      showToast('Backup code hidden.');
+      renderBackups();
+      return;
+    }
+    if (action === 'backup-request-approve') {
+      const server = activeServer();
+      if (!server) return;
+      const row = actionTarget.closest('.plugin-row');
+      const hours = Number(row?.querySelector('[data-share-hours]')?.value || 1);
+      await api(`/api/servers/${server.id}/backups/share-requests/${actionTarget.dataset.requestId}/approve`, {
+        method: 'POST',
+        body: JSON.stringify({ durationValue: Math.max(1, Math.min(24, hours)), durationUnit: 'hours' }),
+      });
+      showToast('Backup access approved.');
+      renderBackups();
+      return;
+    }
+    if (action === 'backup-request-remove') {
+      const server = activeServer();
+      if (!server) return;
+      if (!confirm('Remove this backup access/request?')) return;
+      await api(`/api/servers/${server.id}/backups/share-requests/${actionTarget.dataset.requestId}`, { method: 'DELETE' });
+      showToast('Backup access removed.');
+      renderBackups();
+      return;
+    }
     if (action === 'delete-backup') {
       const server = activeServer();
       if (!server) return;
@@ -1862,12 +1962,13 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       if (!server) return;
       const backupPath = actionTarget.dataset.backupPath;
+      const sourceServerId = actionTarget.dataset.sourceServerId || '';
       if (server.status === 'online') return showToast('Stop the server before restoring a backup.');
       if (!backupPath || !confirm(`Restore ${backupPath.split('/').pop()}? This deletes current server files except software/runtime, then unzips the backup.`)) return;
       showToast('Restoring backup...');
       await api(`/api/servers/${server.id}/backups/restore`, {
         method: 'POST',
-        body: JSON.stringify({ name: backupPath }),
+        body: JSON.stringify({ name: backupPath, sourceServerId }),
       });
       filePath = '';
       showToast('Backup restored.');
@@ -1978,6 +2079,16 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       fileClipboard = { mode: action === 'file-copy-selected' ? 'copy' : 'move', paths: selected, serverId: server?.id || null };
       showToast(`${fileClipboard.mode === 'copy' ? 'Copied' : 'Cut'} ${selected.length} item(s).`);
+      return;
+    }
+    if (action === 'fix-server') {
+      const server = activeServer();
+      if (!server) return showToast('Create a server first.');
+      if (server.status === 'online') return showToast('Stop the server before running Fix Server.');
+      if (!confirm(`Run Fix Server for "${server.name}"? This checks executable paths and repairs missing runtime files when possible.`)) return;
+      const result = await api(`/api/servers/${server.id}/fix`, { method: 'POST' });
+      showToast(result.repair?.message || 'Fix Server completed.');
+      await refresh();
       return;
     }
     if (action === 'file-paste') {
