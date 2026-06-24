@@ -40,6 +40,15 @@ const editionPath = path.join(dataRoot, 'edition');
 const terminalSessions = new Map();
 const wakeWatchers = new Map();
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
+const PANEL_VERSION = '1.2.0';
+let updateStatus = {
+  running: false,
+  progress: 0,
+  message: 'Idle',
+  startedAt: 0,
+  finishedAt: 0,
+  exitCode: null,
+};
 
 app.set('trust proxy', true);
 
@@ -117,6 +126,10 @@ function panelEdition() {
   return (process.env.NEXUSPANEL_EDITION || (fs.existsSync(editionPath) ? fs.readFileSync(editionPath, 'utf8').trim() : '') || 'normal').replace(/[^a-z0-9-]/gi, '').toLowerCase() || 'normal';
 }
 
+function isHostEdition() {
+  return panelEdition() === 'host';
+}
+
 function setSettingValue(key, value) {
   db.prepare(`
     INSERT INTO panel_settings (key, value)
@@ -126,19 +139,36 @@ function setSettingValue(key, value) {
 }
 
 function panelSettingsPayload(user = null) {
+  const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
   return {
+    version: PANEL_VERSION,
     terminalEnabled: settingValue('terminal_enabled', '0') === '1',
     updateRepo: FIXED_UPDATE_REPO,
-    edition: panelEdition(),
-    updateTag: panelEdition() === 'host' ? 'host-v1.0' : 'normal-v1.0',
-    hostApiTokenPreview: user?.role === 'owner' ? `${hostToken.slice(0, 8)}••••${hostToken.slice(-6)}` : '',
+    edition,
+    updateTag: edition === 'host' ? 'host-v1.2' : 'normal-v1.2',
+    updateStatus,
+    hostApiTokenPreview: edition === 'host' && user?.role === 'owner' ? `${hostToken.slice(0, 8)}....${hostToken.slice(-6)}` : '',
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
     maxCpuCores: hostCpuCount(),
     platform: process.platform,
-    nexuExample: nexuExample(),
+    nexuExample: edition === 'host' ? nexuExample() : null,
   };
+}
+
+function backupIntervalMinutesFrom(server) {
+  const minutes = Number(server.backup_interval_minutes || 0);
+  if (Number.isFinite(minutes) && minutes > 0) return Math.round(minutes);
+  return Math.max(1, Number(server.backup_interval_hours || 24)) * 60;
+}
+
+function parseBackupIntervalMinutes(body, fallbackMinutes = 1440) {
+  if (body.backupIntervalMinutes !== undefined) return clampNumber(body.backupIntervalMinutes, 1, 5256000, fallbackMinutes);
+  const amount = Number(body.backupIntervalValue ?? body.backupIntervalHours ?? fallbackMinutes / 60);
+  const unit = String(body.backupIntervalUnit || (body.backupIntervalHours !== undefined ? 'hours' : 'minutes')).toLowerCase();
+  const multiplier = unit.startsWith('hour') || unit === 'hr' || unit === 'hrs' ? 60 : 1;
+  return clampNumber(amount * multiplier, 1, 5256000, fallbackMinutes);
 }
 
 function reqOwnerSafeHostToken() {
@@ -516,6 +546,7 @@ function serverPayload(server, req = null) {
     autoRestart: Boolean(server.auto_restart),
     crashBackup: Boolean(server.crash_backup),
     scheduledBackups: Boolean(server.scheduled_backups),
+    backupIntervalMinutes: backupIntervalMinutesFrom(server),
     backupIntervalHours: server.backup_interval_hours,
     lastBackupAt: server.last_backup_at,
     backupRetention: server.backup_retention,
@@ -538,8 +569,9 @@ function serverPayload(server, req = null) {
 }
 
 function userRows() {
+  db.prepare('DELETE FROM users WHERE role != ? AND expires_at > 0 AND expires_at <= ?').run('owner', Date.now());
   return db.prepare(`
-    SELECT id, email, name, role, access_level, created_at
+    SELECT id, email, name, role, access_level, expires_at, created_at
     FROM users
     ORDER BY role DESC, email ASC
   `).all().map((user) => ({
@@ -548,8 +580,21 @@ function userRows() {
     name: user.name,
     role: user.role,
     accessLevel: user.access_level,
+    expiresAt: user.expires_at || 0,
     createdAt: user.created_at,
   }));
+}
+
+function adminExpiresAt(body) {
+  const mode = String(body.adminDurationMode || 'permanent').toLowerCase();
+  if (mode === 'permanent') return 0;
+  const value = clampNumber(body.adminDurationValue, 1, 525600, 60);
+  const unit = String(body.adminDurationUnit || 'minutes').toLowerCase();
+  const minutes = unit.startsWith('year') ? value * 525600
+    : unit.startsWith('day') ? value * 1440
+      : unit.startsWith('hour') ? value * 60
+        : value;
+  return Date.now() + Math.max(1, minutes) * 60 * 1000;
 }
 
 function browserFromUserAgent(userAgent) {
@@ -678,7 +723,7 @@ async function runHealthCheck(force = false) {
 }
 
 function serverRows(user, req = null) {
-  const rows = user?.role === 'owner'
+  const rows = user?.role === 'owner' || !isHostEdition()
     ? db.prepare('SELECT * FROM servers ORDER BY created_at DESC').all()
     : db.prepare('SELECT * FROM servers WHERE owner_user_id = ? ORDER BY created_at DESC').all(user?.id || 0);
   return rows.map((server) => serverPayload(server, req));
@@ -687,6 +732,7 @@ function serverRows(user, req = null) {
 function canUseServer(user, server) {
   if (!user || !server) return false;
   if (user.role === 'owner') return true;
+  if (!isHostEdition()) return true;
   return Number(server.owner_user_id) === Number(user.id);
 }
 
@@ -1285,7 +1331,7 @@ app.get('/api/overview', (req, res) => {
     servers: req.user ? serverRows(req.user, req) : [],
     plugins: req.user ? pluginRows(req.user.role === 'owner' ? null : serverRows(req.user, req).map((server) => server.id)) : [],
     softwareCatalog: req.user ? softwareCatalog() : [],
-    templates: req.user ? templateRows() : [],
+    templates: req.user && isHostEdition() ? templateRows() : [],
     settings: req.user ? panelSettingsPayload(req.user) : null,
     users: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? userRows() : [],
     loginEvents: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? loginEventRows(10) : [],
@@ -1442,11 +1488,13 @@ app.get('/api/audit/logins', requireAccess(permissions.MANAGE_ADMINS), (_req, re
 });
 
 app.get('/api/host/token', requireAuth, (req, res) => {
+  if (!isHostEdition()) return res.status(404).json({ error: 'Host API is available only in host edition.' });
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only owner can view host API token.' });
   res.json({ token: reqOwnerSafeHostToken() });
 });
 
 app.post('/api/host/token/regenerate', requireAuth, (req, res) => {
+  if (!isHostEdition()) return res.status(404).json({ error: 'Host API is available only in host edition.' });
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only owner can regenerate host API token.' });
   setSettingValue('host_api_token', crypto.randomBytes(32).toString('base64url'));
   res.json({ token: reqOwnerSafeHostToken() });
@@ -1473,13 +1521,14 @@ app.post('/api/host/provision', asyncRoute(async (req, res) => {
   const maxCpu = hostCpuCount();
   const cpuCores = clampNumber(serverInput.cpuCores, 1, maxCpu, 1);
   const memoryMb = clampMemoryMb(serverInput.ramMb || serverInput.maxMemoryMb, 1024);
+  const backupIntervalMinutes = parseBackupIntervalMinutes(serverInput, 1440);
   const result = db.prepare(`
     INSERT INTO servers (
       name, type, port, max_memory_mb, auto_start, auto_restart, crash_backup,
-      scheduled_backups, backup_retention, wake_on_join, whitelist,
+      scheduled_backups, backup_interval_hours, backup_interval_minutes, backup_retention, wake_on_join, whitelist,
       tunnel_provider, public_alias, startup_delay_sec, software_key, software_version, cpu_cores, disk_limit_mb, owner_user_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', '', 0, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', '', 0, ?, ?, ?, ?, ?)
   `).run(
     String(serverInput.name || `${name} Server`).trim().slice(0, 80),
     type,
@@ -1489,6 +1538,8 @@ app.post('/api/host/provision', asyncRoute(async (req, res) => {
     toBool(serverInput.autoRestart, true),
     toBool(serverInput.crashBackup, true),
     toBool(serverInput.scheduledBackups, true),
+    Math.max(1, Math.round(backupIntervalMinutes / 60)),
+    backupIntervalMinutes,
     clampNumber(serverInput.backupRetention, 1, 20, 4),
     toBool(serverInput.wakeOnJoin),
     toBool(serverInput.whitelist),
@@ -1514,6 +1565,7 @@ app.post('/api/users', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
     password: req.body.password,
     role: 'admin',
     accessLevel: req.body.accessLevel,
+    expiresAt: adminExpiresAt(req.body),
   });
 
   res.status(201).json({ user });
@@ -1593,6 +1645,10 @@ app.get('/api/settings', requireAuth, (req, res) => {
   res.json({ settings: panelSettingsPayload(req.user) });
 });
 
+app.get('/api/settings/update-status', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ update: updateStatus });
+});
+
 app.get('/api/servers/:id/nexus-mark', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   const nexu = parseJsonObject(server.nexu_payload);
@@ -1609,11 +1665,20 @@ app.put('/api/settings', requireAccess(permissions.MANAGE_ADMINS), (req, res) =>
 app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
   const repo = FIXED_UPDATE_REPO;
   setSettingValue('update_repo', repo);
+  if (updateStatus.running) return res.status(409).json({ error: 'Update is already running.' });
   if (process.platform === 'win32') {
     return res.status(400).json({ error: 'Panel self-update button is Linux/systemd focused. Use git pull or update/update.sh on the VPS.' });
   }
   const script = path.join(__dirname, '..', 'update', 'update.sh');
   if (!fs.existsSync(script)) return res.status(404).json({ error: 'update/update.sh was not found.' });
+  updateStatus = {
+    running: true,
+    progress: 5,
+    message: 'Starting updater...',
+    startedAt: Date.now(),
+    finishedAt: 0,
+    exitCode: null,
+  };
   const child = spawn('bash', [script, repo], {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, NEXUSPANEL_WEB_UPDATE: '1' },
@@ -1621,10 +1686,28 @@ app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), async
     windowsHide: true,
   });
   let output = '';
-  child.stdout.on('data', (chunk) => { output += String(chunk).slice(-6000); });
-  child.stderr.on('data', (chunk) => { output += String(chunk).slice(-6000); });
+  const capture = (chunk) => {
+    const text = String(chunk);
+    output = `${output}${text}`.slice(-12000);
+    const lastLine = text.trim().split(/\r?\n/).filter(Boolean).at(-1);
+    updateStatus = {
+      ...updateStatus,
+      progress: Math.min(95, Math.max(updateStatus.progress + 5, updateStatus.progress)),
+      message: lastLine ? lastLine.slice(-220) : updateStatus.message,
+    };
+  };
+  child.stdout.on('data', capture);
+  child.stderr.on('data', capture);
   child.on('exit', (code) => {
     fs.promises.writeFile(path.join(dataRoot, 'last_update.log'), output.slice(-12000), 'utf8').catch(() => {});
+    updateStatus = {
+      running: false,
+      progress: code === 0 ? 100 : updateStatus.progress,
+      message: code === 0 ? 'Update complete. Restarting service if configured.' : `Update failed with exit ${code}. Check data/last_update.log.`,
+      startedAt: updateStatus.startedAt,
+      finishedAt: Date.now(),
+      exitCode: code,
+    };
     if (code !== 0) console.error(`NexusPanel update failed with code ${code}`);
   });
   res.json({ ok: true, message: `Update started for ${panelSettingsPayload(req.user).updateTag}. Protected folders stay untouched.`, repo });
@@ -1808,10 +1891,10 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
   const result = db.prepare(`
     INSERT INTO servers (
       name, type, port, max_memory_mb, auto_start, auto_restart, crash_backup,
-      scheduled_backups, backup_retention, wake_on_join, whitelist,
+      scheduled_backups, backup_interval_hours, backup_interval_minutes, backup_retention, wake_on_join, whitelist,
       tunnel_provider, public_alias, startup_delay_sec, software_key, software_version, cpu_cores, disk_limit_mb, owner_user_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     name,
     type,
@@ -1821,6 +1904,8 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
     toBool(req.body.autoRestart, true),
     toBool(req.body.crashBackup, true),
     toBool(req.body.scheduledBackups, true),
+    Math.max(1, Math.round(parseBackupIntervalMinutes(req.body, 1440) / 60)),
+    parseBackupIntervalMinutes(req.body, 1440),
     clampNumber(req.body.backupRetention, 1, 20, 4),
     toBool(req.body.wakeOnJoin),
     toBool(req.body.whitelist),
@@ -1858,11 +1943,11 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
   const result = db.prepare(`
     INSERT INTO servers (
       name, type, port, max_memory_mb, auto_start, auto_restart, crash_backup,
-      scheduled_backups, backup_retention, wake_on_join, whitelist,
+      scheduled_backups, backup_interval_hours, backup_interval_minutes, backup_retention, wake_on_join, whitelist,
       tunnel_provider, public_alias, startup_delay_sec, software_key, software_version, install_status, install_message,
       cpu_cores, disk_limit_mb, template_key, nexu_payload, nexus_mark_profile, owner_user_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     name,
     type,
@@ -1872,6 +1957,8 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
     1,
     1,
     1,
+    24,
+    1440,
     4,
     0,
     0,
@@ -1926,7 +2013,7 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
     UPDATE servers
     SET name = ?, type = ?, port = ?, max_memory_mb = ?, auto_start = ?,
         auto_restart = ?, crash_backup = ?, scheduled_backups = ?,
-        backup_retention = ?, wake_on_join = ?, whitelist = ?,
+        backup_interval_hours = ?, backup_interval_minutes = ?, backup_retention = ?, wake_on_join = ?, whitelist = ?,
         tunnel_provider = ?, public_alias = ?, startup_delay_sec = ?,
         server_path = ?, software_key = ?, software_version = ?, executable_path = ?,
         owner_user_id = ?
@@ -1940,6 +2027,8 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
     toBool(req.body.autoRestart, Boolean(target.auto_restart)),
     toBool(req.body.crashBackup, Boolean(target.crash_backup)),
     toBool(req.body.scheduledBackups, Boolean(target.scheduled_backups)),
+    Math.max(1, Math.round(parseBackupIntervalMinutes(req.body, backupIntervalMinutesFrom(target)) / 60)),
+    parseBackupIntervalMinutes(req.body, backupIntervalMinutesFrom(target)),
     clampNumber(req.body.backupRetention, 1, 20, target.backup_retention),
     toBool(req.body.wakeOnJoin, Boolean(target.wake_on_join)),
     toBool(req.body.whitelist, Boolean(target.whitelist)),
@@ -2310,13 +2399,22 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
   });
 });
 
-app.post('/api/servers/:id/start', requireAccess(permissions.POWER_SERVERS), (req, res) => {
+app.post('/api/servers/:id/start', requireAccess(permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can start.' });
-  res.json(startServer(resolveInstalledExecutable(server, software), software));
-});
+  try {
+    return res.json(startServer(resolveInstalledExecutable(server, software), software));
+  } catch (error) {
+    if (!/install server software|executable/i.test(error.message)) throw error;
+    appendLog(server.id, `[NexusPanel] Smart fix: ${error.message}`);
+    const repaired = await repairMissingExecutable(server, software);
+    const fixedServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
+    const result = startServer(resolveInstalledExecutable(fixedServer, software), software);
+    return res.json({ ...result, repaired });
+  }
+}));
 
 app.post('/api/servers/:id/eula', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
@@ -2447,10 +2545,11 @@ app.post('/api/servers/:id/backups/restore', requireAccess(permissions.MANAGE_FI
 
 app.put('/api/servers/:id/backups/settings', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
-  const interval = clampNumber(req.body.backupIntervalHours, 1, 168, server.backup_interval_hours || 24);
+  const intervalMinutes = parseBackupIntervalMinutes(req.body, backupIntervalMinutesFrom(server));
+  const intervalHours = Math.max(1, Math.round(intervalMinutes / 60));
   const retention = clampNumber(req.body.backupRetention, 1, 50, server.backup_retention || 4);
-  db.prepare('UPDATE servers SET scheduled_backups = ?, backup_interval_hours = ?, backup_retention = ? WHERE id = ?')
-    .run(toBool(req.body.scheduledBackups, Boolean(server.scheduled_backups)), interval, retention, server.id);
+  db.prepare('UPDATE servers SET scheduled_backups = ?, backup_interval_hours = ?, backup_interval_minutes = ?, backup_retention = ? WHERE id = ?')
+    .run(toBool(req.body.scheduledBackups, Boolean(server.scheduled_backups)), intervalHours, intervalMinutes, retention, server.id);
   res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id)) });
 });
 
@@ -2785,7 +2884,7 @@ async function runAutoBackups() {
   const now = Date.now();
   const rows = db.prepare('SELECT * FROM servers WHERE scheduled_backups = 1').all();
   for (const server of rows) {
-    const intervalMs = Math.max(1, server.backup_interval_hours || 24) * 60 * 60 * 1000;
+    const intervalMs = backupIntervalMinutesFrom(server) * 60 * 1000;
     if (now - Number(server.last_backup_at || 0) < intervalMs) continue;
     createServerBackup(server, 'auto').catch((error) => appendLog(server.id, `[NexusPanel] Auto backup failed: ${error.message}`));
   }

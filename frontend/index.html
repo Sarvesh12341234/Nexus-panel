@@ -150,6 +150,16 @@
               <label>RAM MB <input name="maxMemoryMb" type="number" min="256" max="65536" step="256"></label>
               <label>Port <input name="port" type="number" min="1024" max="65535"></label>
               <label id="serverOwnerConfigLabel" hidden>Assigned user <select name="ownerUserId"><option value="">Owner / unassigned</option></select></label>
+              <label>Backup every <input name="backupIntervalValue" type="number" min="1" max="5256000" value="24"></label>
+              <label>Backup unit <select name="backupIntervalUnit"><option value="hours">Hours</option><option value="minutes">Minutes</option></select></label>
+              <label>Keep backups <input name="backupRetention" type="number" min="1" max="50" value="4"></label>
+              <label>Startup delay sec <input name="startupDelaySec" type="number" min="0" max="600" value="0"></label>
+              <label class="switch"><input name="autoRestart" type="checkbox"><span></span>Auto restart</label>
+              <label class="switch"><input name="autoStart" type="checkbox"><span></span>Auto start</label>
+              <label class="switch"><input name="scheduledBackups" type="checkbox"><span></span>Auto backup</label>
+              <label class="switch"><input name="crashBackup" type="checkbox"><span></span>Crash backup</label>
+              <label class="switch"><input name="wakeOnJoin" type="checkbox"><span></span>Wake on join</label>
+              <label class="switch"><input name="whitelist" type="checkbox"><span></span>Whitelist</label>
               <button type="submit">Save Server Settings</button>
             </form>
             <div class="server-actions">
@@ -257,6 +267,9 @@
               <input name="name" placeholder="Admin name" required>
               <input name="email" type="email" placeholder="Admin email" required>
               <input name="password" type="password" placeholder="Password" minlength="8" required>
+              <select name="adminDurationMode"><option value="permanent">Permanent</option><option value="temporary">Temporary</option></select>
+              <input name="adminDurationValue" type="number" min="1" max="525600" value="60">
+              <select name="adminDurationUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select>
               <label class="range-label">Access <input name="accessLevel" type="range" min="0" max="100" step="5" value="5"><output id="accessOutput">5</output></label>
               <button type="submit">Create admin</button>
             </form>

@@ -19,6 +19,7 @@ db.exec(`
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('owner', 'admin')),
     access_level INTEGER NOT NULL DEFAULT 0 CHECK (access_level BETWEEN 0 AND 100),
+    expires_at INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
@@ -44,6 +45,7 @@ db.exec(`
     crash_backup INTEGER NOT NULL DEFAULT 1,
     scheduled_backups INTEGER NOT NULL DEFAULT 1,
     backup_interval_hours INTEGER NOT NULL DEFAULT 24,
+    backup_interval_minutes INTEGER NOT NULL DEFAULT 1440,
     last_backup_at INTEGER NOT NULL DEFAULT 0,
     backup_retention INTEGER NOT NULL DEFAULT 4,
     wake_on_join INTEGER NOT NULL DEFAULT 0,
@@ -148,6 +150,7 @@ const serverColumns = {
   crash_backup: 'INTEGER NOT NULL DEFAULT 1',
   scheduled_backups: 'INTEGER NOT NULL DEFAULT 1',
   backup_interval_hours: 'INTEGER NOT NULL DEFAULT 24',
+  backup_interval_minutes: 'INTEGER NOT NULL DEFAULT 1440',
   last_backup_at: 'INTEGER NOT NULL DEFAULT 0',
   backup_retention: 'INTEGER NOT NULL DEFAULT 4',
   wake_on_join: 'INTEGER NOT NULL DEFAULT 0',
@@ -170,6 +173,10 @@ const serverColumns = {
   owner_user_id: 'INTEGER',
 };
 
+const userColumns = {
+  expires_at: 'INTEGER NOT NULL DEFAULT 0',
+};
+
 const uploadColumns = {
   chunks_json: "TEXT NOT NULL DEFAULT '[]'",
 };
@@ -178,6 +185,13 @@ const existingServerColumns = new Set(db.prepare('PRAGMA table_info(servers)').a
 for (const [name, definition] of Object.entries(serverColumns)) {
   if (!existingServerColumns.has(name)) {
     db.exec(`ALTER TABLE servers ADD COLUMN ${name} ${definition}`);
+  }
+}
+
+const existingUserColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((column) => column.name));
+for (const [name, definition] of Object.entries(userColumns)) {
+  if (!existingUserColumns.has(name)) {
+    db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
   }
 }
 

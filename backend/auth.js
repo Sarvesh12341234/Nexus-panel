@@ -82,10 +82,11 @@ function publicUser(user) {
     name: user.name,
     role: user.role,
     accessLevel: user.access_level,
+    expiresAt: user.expires_at || 0,
   };
 }
 
-function createUser({ email, name, password, role = 'admin', accessLevel = 0 }) {
+function createUser({ email, name, password, role = 'admin', accessLevel = 0, expiresAt = 0 }) {
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail.includes('@')) throw new Error('A valid email is required.');
   if (!name || String(name).trim().length < 2) throw new Error('Name must be at least 2 characters.');
@@ -93,11 +94,12 @@ function createUser({ email, name, password, role = 'admin', accessLevel = 0 }) 
 
   const cleanRole = role === 'owner' ? 'owner' : 'admin';
   const cleanAccessLevel = cleanRole === 'owner' ? 100 : Math.max(0, Math.min(100, Number(accessLevel) || 0));
+  const cleanExpiresAt = cleanRole === 'owner' ? 0 : Math.max(0, Number(expiresAt) || 0);
 
   const result = db.prepare(`
-    INSERT INTO users (email, name, password_hash, role, access_level)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(normalizedEmail, String(name).trim(), hashPassword(password), cleanRole, cleanAccessLevel);
+    INSERT INTO users (email, name, password_hash, role, access_level, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(normalizedEmail, String(name).trim(), hashPassword(password), cleanRole, cleanAccessLevel, cleanExpiresAt);
 
   return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid));
 }
@@ -143,7 +145,12 @@ function authMiddleware(req, _res, next) {
     WHERE sessions.id = ? AND sessions.expires_at > ?
   `).get(sessionId, Date.now());
 
-  if (row) req.user = row;
+  if (row && row.expires_at && row.expires_at <= Date.now()) {
+    db.prepare('DELETE FROM users WHERE id = ? AND role != ?').run(row.id, 'owner');
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+  } else if (row) {
+    req.user = row;
+  }
   next();
 }
 

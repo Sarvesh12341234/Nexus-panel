@@ -14,7 +14,7 @@ Open `http://localhost:3000`.
 Linux/Ubuntu one-command installer:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v1.0/nexuspanel-normal-v1.0-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v1.2/nexuspanel-normal-v1.2-linux-installer.sh | sudo bash
 ```
 
 ## VPS Background Service
@@ -65,25 +65,37 @@ bash update/update.sh
 
 Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the external backup store.
 
-## v1.0 Editions
+## v1.2 Editions
 
-- `normal-v1.0`: advanced solo panel with terminal, templates, fast transfer, backups, plugin/file/software managers.
-- `host-v1.0`: hosting edition using the same engine plus owner/all-server visibility and assigned-user server isolation.
-- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v1.0` or `host-v1.0`.
+- `normal-v1.2`: advanced solo panel with fast transfer, backups, plugin/file/software managers, shared admin visibility, and host-only features hidden.
+- `host-v1.2`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, and assigned-user server isolation.
+- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v1.2` or `host-v1.2`.
 - The update repository is locked to `Sarvesh12341234/Nexus-panel`; users cannot change it from the panel UI.
 - If an update finds server folders such as `5-summa` missing from SQLite, NexusPanel recovers them into the server list on boot.
 
-## v1.0 Transfer + Safety
+## v1.2 Transfer + Safety
 
 - Upload chunks increased to `32MB`.
 - Uploads use up to `4` parallel chunks per file.
 - Browser calculates SHA-256 for the full file and each chunk.
 - Backend verifies chunk checksum and final file checksum before completing upload.
+- Upload progress now resumes from saved chunks without crashing the browser progress code.
+- File-manager copy/cut/paste is locked to the source server, preventing cross-server paste leaks.
 - Downloads support HTTP range requests for resume/split download managers.
 - Optional Nginx `X-Accel-Redirect` can offload huge downloads from Node.
 - The Network page uses a real browser-to-panel upload/download probe instead of guessing from interface counters.
 - Backups default to `/var/lib/nexuspanel/backups` on Linux, outside `/opt/nexuspanel`.
+- Backup intervals support typed minute or hour values instead of hours only.
 - ZIP extraction validates the file first and asks whether to replace or skip duplicates.
+
+## v1.2 Fixes
+
+- Settings updater shows live progress, status text, and final exit state.
+- Server settings now expose per-server auto start, auto restart, wake on join, whitelist, crash backup, auto backup, retention, startup delay, RAM, and port after creation.
+- Normal edition admins can see assigned panel servers by permission level; host-only templates and host token controls are hidden outside host edition.
+- Software version selects prefer the latest refreshed version for installs.
+- Starting a server can run a deterministic smart repair for missing executables before retrying.
+- Admin creation supports permanent or temporary accounts, with expiry enforced during auth.
 
 Optional Nginx acceleration:
 

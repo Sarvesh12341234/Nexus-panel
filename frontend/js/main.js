@@ -85,7 +85,7 @@ const elements = {
 };
 
 let filePath = '';
-let fileClipboard = { mode: '', paths: [] };
+let fileClipboard = { mode: '', paths: [], serverId: null };
 let currentUpload = { path: '', size: 0, paused: false, canceled: false };
 let consoleStickToBottom = true;
 let consoleRenderToken = 0;
@@ -203,6 +203,17 @@ function fillServerConfigForm(server, force = false) {
   form.maxMemoryMb.disabled = state.user?.role !== 'owner';
   form.maxMemoryMb.title = state.user?.role === 'owner' ? 'Owner can change RAM allocation.' : 'Only the owner can change RAM allocation.';
   form.port.value = server.port;
+  const backupMinutes = Number(server.backupIntervalMinutes || (server.backupIntervalHours || 24) * 60);
+  form.backupIntervalUnit.value = backupMinutes % 60 === 0 ? 'hours' : 'minutes';
+  form.backupIntervalValue.value = form.backupIntervalUnit.value === 'hours' ? Math.max(1, Math.round(backupMinutes / 60)) : Math.max(1, backupMinutes);
+  form.backupRetention.value = server.backupRetention || 4;
+  form.startupDelaySec.value = server.startupDelaySec || 0;
+  form.autoRestart.checked = Boolean(server.autoRestart);
+  form.autoStart.checked = Boolean(server.autoStart);
+  form.scheduledBackups.checked = Boolean(server.scheduledBackups);
+  form.crashBackup.checked = Boolean(server.crashBackup);
+  form.wakeOnJoin.checked = Boolean(server.wakeOnJoin);
+  form.whitelist.checked = Boolean(server.whitelist);
   const ownerLabel = form.querySelector('#serverOwnerConfigLabel');
   const ownerSelect = form.querySelector('select[name="ownerUserId"]');
   if (ownerLabel && ownerSelect) {
@@ -368,7 +379,7 @@ async function uploadFile(server, file, destinationPath, onProgress) {
     const loaded = chunks.reduce((sum, chunk) => sum + (chunk.uploaded ? chunk.end - chunk.offset : chunk.loaded), 0);
     onProgress(Math.min(100, Math.round((loaded / file.size) * 100)), phase);
   };
-  if (uploadedBytes > 0) updateProgress('resuming');
+  if (chunks.some((chunk) => chunk.uploaded)) updateProgress('resuming');
 
   let cursor = 0;
   async function worker() {
@@ -492,6 +503,10 @@ function renderStats() {
 
 function renderView() {
   if (elements.terminalNav) elements.terminalNav.hidden = !(state.settings?.terminalEnabled && state.user?.role === 'owner');
+  document.querySelectorAll('[data-view="templates"]').forEach((button) => {
+    button.hidden = state.settings?.edition !== 'host';
+  });
+  if (state.activeView === 'templates' && state.settings?.edition !== 'host') state.activeView = 'dashboard';
   document.querySelectorAll('.view-section').forEach((section) => {
     section.hidden = section.id !== `view-${state.activeView}`;
   });
@@ -906,27 +921,35 @@ async function renderFiles() {
 function renderSettings() {
   if (!elements.settingsPanel) return;
   const settings = state.settings || {};
+  const update = settings.updateStatus || {};
+  const isHost = settings.edition === 'host';
   elements.settingsPanel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Settings</p><h2>Panel engine</h2></div><button type="button" data-action="run-panel-update">Update from GitHub</button></div>
     <form class="settings-form" id="settingsForm">
       <label class="switch"><input name="terminalEnabled" type="checkbox" ${settings.terminalEnabled ? 'checked' : ''}><span></span>Owner terminal row</label>
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
+      <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.2.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
       <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
       <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
       <button class="save-wide" type="submit">Save Settings</button>
     </form>
-    ${state.user?.role === 'owner' ? `<div class="server-actions"><button class="secondary" type="button" data-action="show-host-token">Show Host API Token</button><button class="danger" type="button" data-action="regen-host-token">Regenerate Host Token</button><code>${escapeHtml(settings.hostApiTokenPreview || '')}</code></div>` : ''}
+    <div class="upload-panel">
+      <span>${escapeHtml(update.message || 'Updater idle')}</span>
+      <div class="install-track"><span style="width:${Number(update.progress || 0)}%"></span></div>
+      <small>${update.running ? 'Update is running...' : `Last exit: ${update.exitCode ?? 'none'}`}</small>
+    </div>
+    ${isHost && state.user?.role === 'owner' ? `<div class="server-actions"><button class="secondary" type="button" data-action="show-host-token">Show Host API Token</button><button class="danger" type="button" data-action="regen-host-token">Regenerate Host Token</button><code>${escapeHtml(settings.hostApiTokenPreview || '')}</code></div>` : ''}
     <div class="public-help-grid">
       <article><strong>Nexus-Mark</strong><span>Original lightweight control profile: safe paths, RAM caps, CPU plan metadata, and future cgroup/systemd slicing on Linux.</span></article>
       <article><strong>Template Imports</strong><span>JSON game blueprints. Custom game servers stay isolated per server.</span></article>
       <article><strong>Updater</strong><span>Pulls panel code while protecting server data and the external backup store.</span></article>
     </div>
-    <details class="nexu-details">
+    ${isHost ? `<details class="nexu-details">
       <summary>Example Template JSON</summary>
       <pre>${escapeHtml(JSON.stringify(settings.nexuExample || {}, null, 2))}</pre>
-    </details>
+    </details>` : ''}
   `;
 }
 
@@ -993,12 +1016,16 @@ function renderBackups() {
     elements.backupPanel.innerHTML = '<p class="empty-state">Create a server to manage backups.</p>';
     return;
   }
+  const backupMinutes = Number(server.backupIntervalMinutes || (server.backupIntervalHours || 24) * 60);
+  const backupUnit = backupMinutes % 60 === 0 ? 'hours' : 'minutes';
+  const backupValue = backupUnit === 'hours' ? Math.max(1, Math.round(backupMinutes / 60)) : Math.max(1, backupMinutes);
   api(`/api/servers/${server.id}/backups`).then((data) => {
     elements.backupPanel.innerHTML = `
       <div class="section-head"><div><p class="eyebrow">Backups</p><h2>${escapeHtml(server.name)}</h2></div><button type="button" data-action="manual-backup">Manual backup</button></div>
       <form class="backup-settings" id="backupSettingsForm">
         <label class="switch"><input name="scheduledBackups" type="checkbox" ${server.scheduledBackups ? 'checked' : ''}><span></span>Auto backup</label>
-        <label>Every hours <input name="backupIntervalHours" type="number" min="1" max="168" value="${server.backupIntervalHours || 24}"></label>
+        <label>Every <input name="backupIntervalValue" type="number" min="1" max="5256000" value="${backupValue}"></label>
+        <label>Unit <select name="backupIntervalUnit"><option value="hours" ${backupUnit === 'hours' ? 'selected' : ''}>Hours</option><option value="minutes" ${backupUnit === 'minutes' ? 'selected' : ''}>Minutes</option></select></label>
         <label>Keep latest <input name="backupRetention" type="number" min="1" max="50" value="${server.backupRetention || 4}"></label>
         <button type="submit">Save backup settings</button>
       </form>
@@ -1065,7 +1092,7 @@ function renderAdmins() {
 
   elements.userList.innerHTML = '<p class="muted access-help">Access guide: 0 view, 5 start/stop/restart/kill, 20 console view, 40 send commands, 60 manage servers, 80 files/config/backups, 100 owner/admin controls.</p>' + state.users.map((user) => `
     <div class="user-row" data-user-id="${user.id}">
-      <div><strong>${escapeHtml(user.name)}</strong><div class="muted">${escapeHtml(user.email)} | ${user.role} | ${accessName(user.accessLevel)}</div></div>
+      <div><strong>${escapeHtml(user.name)}</strong><div class="muted">${escapeHtml(user.email)} | ${user.role} | ${accessName(user.accessLevel)} | ${user.expiresAt ? `expires ${escapeHtml(new Date(user.expiresAt).toLocaleString())}` : 'permanent'}</div></div>
       <div class="user-actions"><input type="number" min="0" max="100" step="5" value="${user.accessLevel}" ${user.role === 'owner' ? 'disabled' : ''}><button class="secondary" type="button" data-action="update-user" ${user.role === 'owner' ? 'disabled' : ''}>Save</button><button class="danger" type="button" data-action="delete-user" ${user.role === 'owner' ? 'disabled' : ''}>Delete</button></div>
     </div>
   `).join('');
@@ -1142,9 +1169,8 @@ async function hydrateSoftwareVersionSelects() {
   const selects = [...document.querySelectorAll('[data-software-version]')];
   await Promise.all(selects.map(async (select) => {
     const key = select.dataset.softwareVersion;
-    const server = activeServer();
     const versions = await getSoftwareVersions(key);
-    select.innerHTML = versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}" ${server && server.softwareKey === key && server.softwareVersion === version ? 'selected' : ''}>${escapeHtml(version)}</option>`).join('');
+    select.innerHTML = versions.slice(0, 80).map((version, index) => `<option value="${escapeHtml(version)}" ${index === 0 ? 'selected' : ''}>${escapeHtml(version)}</option>`).join('');
   }));
 }
 
@@ -1206,6 +1232,7 @@ async function refreshServerStatusOnly() {
   renderServerSwitcher();
   if (state.activeView === 'dashboard') renderServers();
   if (state.activeView === 'software') renderSoftware();
+  if (state.activeView === 'settings') renderSettings();
 }
 
 function setView(view) {
@@ -1248,12 +1275,13 @@ function startRefreshLoop() {
   window.clearInterval(state.refreshTimer);
   state.refreshTimer = window.setInterval(() => {
     if (!state.user) return;
-    const dueStatus = Date.now() - state.statusRefreshAt > 3500;
+    const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
+    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy ? 1200 : 2500);
     if (state.activeView === 'console') {
       renderConsole().catch(() => {});
       if (!dueStatus) return;
     }
-    if (dueStatus || state.servers.some((server) => server.installStatus === 'installing')) {
+    if (dueStatus || liveBusy) {
       state.statusRefreshAt = Date.now();
       refreshServerStatusOnly().catch(() => {});
     }
@@ -1449,6 +1477,9 @@ if (elements.serverConfigForm) {
       ...server,
       ...formData(elements.serverConfigForm),
       port: Number(elements.serverConfigForm.port.value),
+      backupIntervalValue: Number(elements.serverConfigForm.backupIntervalValue.value),
+      backupRetention: Number(elements.serverConfigForm.backupRetention.value),
+      startupDelaySec: Number(elements.serverConfigForm.startupDelaySec.value),
       type: server.type,
       softwareKey: server.softwareKey,
       softwareVersion: server.softwareVersion,
@@ -1561,7 +1592,7 @@ document.addEventListener('submit', async (event) => {
   const server = activeServer();
   if (!server) return;
   const payload = formData(event.target);
-  payload.backupIntervalHours = Number(payload.backupIntervalHours);
+  payload.backupIntervalValue = Number(payload.backupIntervalValue);
   payload.backupRetention = Number(payload.backupRetention);
   try {
     await api(`/api/servers/${server.id}/backups/settings`, { method: 'PUT', body: JSON.stringify(payload) });
@@ -1664,6 +1695,7 @@ document.addEventListener('click', async (event) => {
       if (!confirm('Update NexusPanel from GitHub now? Server files, data, software cache, and external backups stay protected.')) return;
       const result = await api('/api/settings/update', { method: 'POST', body: JSON.stringify({}) });
       showToast(result.message || 'Update started.');
+      await refreshServerStatusOnly();
       return;
     }
     if (action === 'show-host-token') {
@@ -1943,7 +1975,8 @@ document.addEventListener('click', async (event) => {
     if (action === 'file-copy-selected' || action === 'file-cut-selected') {
       const selected = selectedFilePaths();
       if (!selected.length) return showToast('Select files or folders first.');
-      fileClipboard = { mode: action === 'file-copy-selected' ? 'copy' : 'move', paths: selected };
+      const server = activeServer();
+      fileClipboard = { mode: action === 'file-copy-selected' ? 'copy' : 'move', paths: selected, serverId: server?.id || null };
       showToast(`${fileClipboard.mode === 'copy' ? 'Copied' : 'Cut'} ${selected.length} item(s).`);
       return;
     }
@@ -1951,12 +1984,16 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
       if (!fileClipboard.paths.length) return showToast('Nothing copied or cut.');
+      if (fileClipboard.serverId !== server.id) {
+        fileClipboard = { mode: '', paths: [], serverId: null };
+        return showToast('Paste canceled: clipboard belongs to another server.');
+      }
       await api(`/api/servers/${server.id}/files/${fileClipboard.mode === 'move' ? 'move' : 'copy'}`, {
         method: 'POST',
         body: JSON.stringify({ paths: fileClipboard.paths, destination: filePath }),
       });
       showToast(`${fileClipboard.mode === 'move' ? 'Moved' : 'Copied'} ${fileClipboard.paths.length} item(s).`);
-      if (fileClipboard.mode === 'move') fileClipboard = { mode: '', paths: [] };
+      if (fileClipboard.mode === 'move') fileClipboard = { mode: '', paths: [], serverId: null };
       await renderFiles();
       return;
     }
