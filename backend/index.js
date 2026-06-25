@@ -1388,6 +1388,41 @@ app.get('/api/overview', (req, res) => {
   res.json(payload);
 });
 
+app.get('/api/user/timezone', requireAuth, (req, res) => {
+  try {
+    const timezone = settingValue('time_zone', 'UTC');
+    res.json({ timezone });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/user/timezone', requireAuth, (req, res) => {
+  try {
+    const { timezone } = req.body;
+    if (!timezone) return res.status(400).json({ error: 'Timezone is required' });
+    // Validate timezone
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: timezone });
+    } catch {
+      return res.status(400).json({ error: 'Invalid timezone' });
+    }
+    setSettingValue('time_zone', timezone);
+    res.json({ success: true, timezone });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get('/api/timezones', requireAuth, (req, res) => {
+  try {
+    const timezones = Intl.supportedValuesOf('timeZone');
+    res.json({ timezones });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.use('/api/servers/:id', (req, res, next) => {
   if (!req.user) return next();
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.params.id));
@@ -1662,6 +1697,23 @@ app.delete('/api/users/:id', requireAccess(permissions.MANAGE_ADMINS), (req, res
 
 app.get('/api/servers', requireAuth, (req, res) => {
   res.json({ servers: serverRows(req.user, req) });
+});
+
+app.get('/api/servers/:id', requireAuth, (req, res) => {
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.params.id));
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  
+  const minutes = backupIntervalMinutesFrom(server);
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  
+  res.json({
+    ...serverPayload(server, req),
+    backup_interval_hours: hours,
+    backup_interval_minutes: mins,
+    backup_interval_formatted: hours > 0 && mins > 0 ? `${hours}h ${mins}m` : hours > 0 ? `${hours} hour${hours > 1 ? 's' : ''}` : `${mins} minute${mins > 1 ? 's' : ''}`,
+    next_backup_at: server.last_backup_at ? new Date(server.last_backup_at + (minutes * 60 * 1000)).toISOString() : null
+  });
 });
 
 app.get('/api/software/catalog', requireAuth, (_req, res) => {
