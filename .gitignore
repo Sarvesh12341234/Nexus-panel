@@ -1,0 +1,12 @@
+node_modules/
+data/
+.env
+backups/
+backupfolder/
+servers/
+tunnels/
+software/
+dist-release/
+*.log
+smoke-cookies.txt
+ui-cookies.txt

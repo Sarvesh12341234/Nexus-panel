@@ -1,0 +1,211 @@
+# 🚀 NexusPanel - Minecraft Server Control Panel
+
+A lightweight, powerful, and user-friendly web-based control panel for Minecraft **Bedrock and Java** servers.
+
+## 🎯 Features
+
+```bash
+npm install
+npm start
+```
+
+Open `http://localhost:3000`.
+
+Linux/Ubuntu one-command installer:
+
+```bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v1.0/nexuspanel-normal-v1.0-linux-installer.sh | sudo bash
+```
+
+## VPS Background Service
+
+On Linux VPS hosts with systemd, `npm start` installs/starts NexusPanel as a background system service instead of keeping it attached to your terminal. The service restarts automatically if the panel crashes and starts again after the VPS reboots.
+
+```bash
+npm start
+```
+
+Useful commands:
+
+```bash
+npm run service:status
+npm run service:logs
+sudo npm run service:install
+sudo npm run service:uninstall
+npm run foreground
+```
+
+After service install, Linux also gets the direct command:
+
+```bash
+nexuspanel start
+nexuspanel stop
+nexuspanel restart
+nexuspanel status
+nexuspanel logs
+nexuspanel update
+nexuspanel change panelport 8080
+```
+
+On first run, `nexuspanel start` or `nexuspanel install` asks for owner account name, email, and password before starting the panel.
+
+- `npm start`: smart mode; on Linux/systemd it moves the panel to the background service.
+- `npm run foreground`: normal console mode for debugging.
+- `npm run service:logs`: live logs from `journalctl -u nexuspanel -f`.
+- Windows/non-systemd machines keep using foreground mode automatically.
+
+## Safe Updates
+
+NexusPanel includes a safe updater that snapshots panel code, pulls/copies updates, runs `npm install`, and restarts the service without touching Minecraft data.
+
+```bash
+cd /root/summa/panel
+bash update/update.sh
+```
+
+Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the external backup store.
+
+## v1.0 Editions
+
+- `normal-v1.0`: advanced solo panel with terminal, templates, fast transfer, backups, plugin/file/software managers.
+- `host-v1.0`: hosting edition using the same engine plus owner/all-server visibility and assigned-user server isolation.
+- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v1.0` or `host-v1.0`.
+- The update repository is locked to `Sarvesh12341234/Nexus-panel`; users cannot change it from the panel UI.
+- If an update finds server folders such as `5-summa` missing from SQLite, NexusPanel recovers them into the server list on boot.
+
+## v1.0 Transfer + Safety
+
+- Upload chunks increased to `32MB`.
+- Uploads use up to `4` parallel chunks per file.
+- Browser calculates SHA-256 for the full file and each chunk.
+- Backend verifies chunk checksum and final file checksum before completing upload.
+- Downloads support HTTP range requests for resume/split download managers.
+- Optional Nginx `X-Accel-Redirect` can offload huge downloads from Node.
+- The Network page uses a real browser-to-panel upload/download probe instead of guessing from interface counters.
+- Backups default to `/var/lib/nexuspanel/backups` on Linux, outside `/opt/nexuspanel`.
+- ZIP extraction validates the file first and asks whether to replace or skip duplicates.
+
+Optional Nginx acceleration:
+
+```nginx
+location /protected-files/ {
+  internal;
+  alias /opt/nexuspanel/servers/;
+}
+```
+
+Then set the service environment:
+
+```bash
+NEXUSPANEL_X_ACCEL_ROOT=/opt/nexuspanel/servers
+NEXUSPANEL_X_ACCEL_PREFIX=/protected-files
+```
+
+With this enabled, NexusPanel still checks login/auth first, then Nginx streams the real file at maximum VPS speed.
+
+## New Panel Upgrades
+
+- 10 selectable neon themes from the top bar.
+- External backups saved in `/var/lib/nexuspanel/backups/<server-id>/` on Linux, not inside the server or panel source folder.
+- Server delete button with online-server protection.
+- RAM/port/name editor after server creation.
+- Live whitelist reload for running Java/Bedrock servers where supported by the server software.
+- Whitelist remove confirmation plus remove-all action.
+- Server metrics: process RAM, allocated RAM, CPU, and detected online players.
+- Console scroll lock: scrolling up no longer snaps back down.
+- Chunked/resumable file uploads with pause/cancel and cross-device progress visibility.
+- File manager actions: upload, copy, cut, paste, archive, unzip, delete, select all.
+- More optimizer capability cards and VPS tuning notes.
+- Template-first setup replaces the old tunnel page: Bedrock, Java crossplay, PocketMine, Purpur performance, Rust, ARK, Valheim, Palworld, Factorio, Satisfactory, and Project Zomboid templates.
+- Settings includes a safe GitHub updater for `Sarvesh12341234/Nexus-panel`, owner-only terminal toggle, and Nexus-Mark controls.
+- Network page shows inbound/outbound traffic totals and a one-click current upload/download speed sample.
+- System metrics use Linux `/proc/stat` CPU deltas and `MemAvailable` RAM where available, with robust logical-core detection through `nproc`/`lscpu`.
+- Template view defaults host edition to Minecraft templates; selecting another game switches the available templates and software path.
+- Host API can create an account and assigned server in one request for hosting automation.
+- Template JSON supports requirements, RAM/CPU/disk, ports, start args, paths, properties, and Nexus-Mark security profile.
+- Nexus-Mark is NexusPanel's original no-Docker control layer: path sandboxing, per-server root, RAM allocation guard, external resource profile files, and Linux systemd/cgroup plan metadata.
+- The UI includes a DevTools deterrent that redirects to Google for common inspector shortcuts; real protection is still server-side owner auth and permission checks.
+
+## Accounts
+
+On first launch, NexusPanel asks for an owner account in the terminal before the web panel starts. After that, the web panel only shows login until a valid session exists. Accounts are saved in `data/nexuspanel.sqlite`.
+
+For unattended setup, set:
+
+```bash
+NEXUSPANEL_OWNER_EMAIL=owner@example.com
+NEXUSPANEL_OWNER_PASSWORD=password123
+npm start
+```
+
+The owner can create admin accounts with an email, password, and access level from `0` to `100`.
+
+Forgot-password OTP reset is built in. Configure a tiny email relay with:
+
+```bash
+NEXUSPANEL_EMAIL_API_URL=https://your-email-api/send
+NEXUSPANEL_EMAIL_API_KEY=optional-token
+```
+
+Without an email relay, OTPs are written to `data/password-reset-otp.log` for the VPS owner.
+
+Host API provisioning example:
+
+```bash
+curl -X POST http://YOUR_PANEL:3000/api/host/provision \
+  -H "Authorization: Bearer YOUR_HOST_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"account":{"email":"player@example.com","password":"StrongPass123","name":"Player","accessLevel":5},"server":{"name":"Player SMP","type":"java","ramMb":4096,"cpuCores":2,"port":25565,"softwareKey":"paper"}}'
+```
+
+| Level | Access |
+| --- | --- |
+| `0` | View only |
+| `5` | Start, stop, restart, kill |
+| `20` | View console |
+| `40` | Send console commands |
+| `60` | Manage servers |
+| `80` | Manage files and configs |
+| `100` | Manage admins and all panel controls |
+
+Passwords are hashed with Node's `crypto.scryptSync`. Login sessions are stored in SQLite and sent as signed HTTP-only cookies.
+
+## Current MVP
+
+- First-run owner creation
+- Email/password login
+- SQLite users, sessions, and server records
+- Owner admin creation and access editing
+- Guarded API routes based on numeric permissions
+- Basic server dashboard records for Bedrock and Java
+- Single-call `/api/overview` dashboard refresh for faster loading
+- Lightweight server options: auto start, auto restart, crash backup, daily backups, backup retention, wake on join, whitelist, RAM cap, and startup delay
+- Host optimizer panel for Linux/VPS networking, DNS planning, BBR/fq, socket buffers, MTU probing, file limits, and low-memory swappiness
+- Smart software catalog for Bedrock Dedicated Server, Java Vanilla, Paper, Purpur, and PocketMine-MP
+- Linux Java servers auto-detect missing Java and try to install Java 21 through the host package manager before downloading server software.
+- Nexu templates are NexusPanel's original import format for future/custom games.
+- Plugin/pack registry with compatibility checks and safe per-server target paths
+
+## Host Optimizer
+
+NexusPanel detects the host OS before showing optimization actions.
+
+- Windows: optimization is disabled and shown as unsupported.
+- Linux: current sysctl values, DNS resolvers, kernel, RAM, CPU count, and VPS hints are shown.
+- Linux root: the owner can apply whitelisted sysctl tweaks from the panel.
+- Linux non-root: NexusPanel shows copyable commands instead of trying privileged writes.
+
+The optimizer stays lightweight: no background agent, no polling loop, no AI service, no Docker, and no extra packages.
+
+## Software And Plugins
+
+NexusPanel keeps server files under `servers/` and rejects plugin paths that try to escape that directory.
+
+- Java Vanilla: no plugin loader.
+- Paper and Purpur: `.jar` plugins go to `servers/<server>/plugins/`.
+- PocketMine-MP: `.phar` plugins go to `servers/<server>/plugins/`.
+- Bedrock Dedicated Server: `.mcpack` and `.mcaddon` packs go under `servers/<server>/packs/`.
+
+The plugin section currently registers the correct target path and compatibility metadata. A later file-manager/upload step can copy the actual file into that verified path.
+
+Software installation currently prepares the correct server folder, executable path, and progress/status state. It writes an install marker at the target executable path so the panel can show install progress immediately; replacing that marker with real Paper/Purpur/Bedrock download logic is the next step.
