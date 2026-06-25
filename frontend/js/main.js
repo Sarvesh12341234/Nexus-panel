@@ -926,6 +926,7 @@ function renderSettings() {
   const isHost = settings.edition === 'host';
   const selectedZone = settings.timeZone || 'UTC';
   const zoneOptions = timeZones.map((zone) => `<option value="${escapeHtml(zone)}" ${zone === selectedZone ? 'selected' : ''}>${escapeHtml(zone)}</option>`).join('');
+  
   elements.settingsPanel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Settings</p><h2>Panel engine</h2></div><button type="button" data-action="run-panel-update">Update from GitHub</button></div>
     <form class="settings-form" id="settingsForm">
@@ -937,7 +938,40 @@ function renderSettings() {
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
       <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
       <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
-      <label>Timezone <select name="timeZone">${zoneOptions}</select></label>
+      
+      <!-- Timezone with Save Button -->
+      <div class="settings-group">
+        <label>Timezone 
+          <select name="timeZone" id="userTimezoneSelect">${zoneOptions}</select>
+        </label>
+        <button type="button" class="secondary" data-action="save-timezone" style="margin-top: 8px;">Save Timezone</button>
+        <span id="timezoneStatus" style="margin-left: 10px;"></span>
+      </div>
+      
+      <!-- Backup Interval Settings -->
+      <div class="settings-group">
+        <h4>💾 Server Backup Interval</h4>
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px;">
+          <label>Apply to server:
+            <select id="settingsServerSelect">
+              <option value="">Select a server...</option>
+              ${state.servers.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px;">
+          <input type="number" id="backupHours" min="0" max="168" value="24" style="width: 80px; padding: 6px;">
+          <span>hours</span>
+          <input type="number" id="backupMinutes" min="0" max="59" value="0" style="width: 80px; padding: 6px;">
+          <span>minutes</span>
+          <span id="backupDisplay" style="font-weight: bold; margin-left: 10px;"></span>
+        </div>
+        <div style="margin-top: 8px;">
+          <button type="button" class="secondary" data-action="save-backup-interval">Save Backup Settings</button>
+          <span id="backupStatus" style="margin-left: 10px;"></span>
+        </div>
+      </div>
+      
       <button class="save-wide" type="submit">Save Settings</button>
     </form>
     <div class="upload-panel">
@@ -956,7 +990,67 @@ function renderSettings() {
       <pre>${escapeHtml(JSON.stringify(settings.nexuExample || {}, null, 2))}</pre>
     </details>` : ''}
   `;
+  
+  // Initialize backup display
+  updateBackupDisplay();
+  
+  // Load server settings when server is selected
+  const serverSelect = document.getElementById('settingsServerSelect');
+  if (serverSelect) {
+    serverSelect.addEventListener('change', () => {
+      const serverId = parseInt(serverSelect.value);
+      if (serverId) loadServerBackupSettings(serverId);
+    });
+    // Load first server by default
+    if (state.servers.length > 0) {
+      serverSelect.value = state.servers[0].id;
+      loadServerBackupSettings(state.servers[0].id);
+    }
+  }
+  
+  // Add listeners for backup hours/minutes
+  const hoursInput = document.getElementById('backupHours');
+  const minutesInput = document.getElementById('backupMinutes');
+  if (hoursInput) hoursInput.addEventListener('input', updateBackupDisplay);
+  if (minutesInput) minutesInput.addEventListener('input', updateBackupDisplay);
 }
+
+// Helper function to update backup display
+function updateBackupDisplay() {
+  const hours = parseInt(document.getElementById('backupHours')?.value) || 0;
+  const minutes = parseInt(document.getElementById('backupMinutes')?.value) || 0;
+  const display = document.getElementById('backupDisplay');
+  
+  if (!display) return;
+  
+  if (hours === 0 && minutes === 0) {
+    display.textContent = 'Disabled';
+    display.style.color = '#999';
+  } else if (hours === 0) {
+    display.textContent = `${minutes} minute${minutes > 1 ? 's' : ''}`;
+    display.style.color = '#4CAF50';
+  } else if (minutes === 0) {
+    display.textContent = `${hours} hour${hours > 1 ? 's' : ''}`;
+    display.style.color = '#4CAF50';
+  } else {
+    display.textContent = `${hours}h ${minutes}m`;
+    display.style.color = '#4CAF50';
+  }
+}
+
+// Helper function to load server backup settings
+async function loadServerBackupSettings(serverId) {
+  if (!serverId) return;
+  try {
+    const data = await api(`/api/servers/${serverId}`);
+    document.getElementById('backupHours').value = data.backup_interval_hours || 24;
+    document.getElementById('backupMinutes').value = data.backup_interval_minutes || 0;
+    updateBackupDisplay();
+  } catch (error) {
+    console.error('Failed to load server settings:', error);
+  }
+}
+
 
 function renderTerminal() {
   if (!elements.terminalPanel) return;
@@ -1687,6 +1781,89 @@ document.addEventListener('click', async (event) => {
   try {
     const serverCard = event.target.closest('[data-server-id]');
     if (serverCard) state.activeServerId = Number(serverCard.dataset.serverId);
+
+        // ===== SAVE TIMEZONE =====
+    if (action === 'save-timezone') {
+      const select = document.getElementById('userTimezoneSelect');
+      const status = document.getElementById('timezoneStatus');
+      if (!select || !select.value) {
+        showToast('Please select a timezone');
+        return;
+      }
+      try {
+        await api('/api/user/timezone', {
+          method: 'POST',
+          body: JSON.stringify({ timezone: select.value })
+        });
+        showToast(`✅ Timezone set to ${select.value}`);
+        if (status) {
+          status.textContent = `✅ Set to ${select.value}`;
+          status.style.color = '#4CAF50';
+          setTimeout(() => { status.textContent = ''; }, 5000);
+        }
+        if (state.settings) state.settings.timeZone = select.value;
+      } catch (error) {
+        showToast(`❌ Error: ${error.message}`);
+        if (status) {
+          status.textContent = `❌ ${error.message}`;
+          status.style.color = '#f44336';
+          setTimeout(() => { status.textContent = ''; }, 5000);
+        }
+      }
+      return;
+    }
+
+    // ===== SAVE BACKUP INTERVAL =====
+    if (action === 'save-backup-interval') {
+      const serverId = parseInt(document.getElementById('settingsServerSelect')?.value);
+      if (!serverId) {
+        showToast('Please select a server first');
+        return;
+      }
+      
+      const hours = parseInt(document.getElementById('backupHours')?.value) || 0;
+      const minutes = parseInt(document.getElementById('backupMinutes')?.value) || 0;
+      const status = document.getElementById('backupStatus');
+      
+      if (hours < 0 || hours > 168) {
+        showToast('Hours must be between 0 and 168');
+        return;
+      }
+      if (minutes < 0 || minutes > 59) {
+        showToast('Minutes must be between 0 and 59');
+        return;
+      }
+      
+      try {
+        const finalHours = (hours === 0 && minutes === 0) ? 1 : hours;
+        const finalMinutes = (hours === 0 && minutes === 0) ? 0 : minutes;
+        
+        await api(`/api/servers/${serverId}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            backup_interval_hours: finalHours,
+            backup_interval_minutes: finalMinutes
+          })
+        });
+        
+        showToast('✅ Backup settings saved!');
+        if (status) {
+          status.textContent = '✅ Saved successfully!';
+          status.style.color = '#4CAF50';
+          setTimeout(() => { status.textContent = ''; }, 5000);
+        }
+        updateBackupDisplay();
+        await refresh();
+      } catch (error) {
+        showToast(`❌ Error: ${error.message}`);
+        if (status) {
+          status.textContent = `❌ ${error.message}`;
+          status.style.color = '#f44336';
+          setTimeout(() => { status.textContent = ''; }, 5000);
+        }
+      }
+      return;
+    }
 
     if (action === 'forgot-password') {
       const email = prompt('Enter your NexusPanel account email:');

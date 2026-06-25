@@ -45,7 +45,7 @@ db.exec(`
     crash_backup INTEGER NOT NULL DEFAULT 1,
     scheduled_backups INTEGER NOT NULL DEFAULT 1,
     backup_interval_hours INTEGER NOT NULL DEFAULT 24,
-    backup_interval_minutes INTEGER NOT NULL DEFAULT 1440,
+    backup_interval_minutes INTEGER NOT NULL DEFAULT 0,
     last_backup_at INTEGER NOT NULL DEFAULT 0,
     backup_retention INTEGER NOT NULL DEFAULT 4,
     wake_on_join INTEGER NOT NULL DEFAULT 0,
@@ -57,9 +57,9 @@ db.exec(`
     software_key TEXT NOT NULL DEFAULT '',
     software_version TEXT NOT NULL DEFAULT 'latest',
     executable_path TEXT NOT NULL DEFAULT '',
-  install_status TEXT NOT NULL DEFAULT 'missing',
-  install_progress INTEGER NOT NULL DEFAULT 0,
-  install_message TEXT NOT NULL DEFAULT 'Software not installed',
+    install_status TEXT NOT NULL DEFAULT 'missing',
+    install_progress INTEGER NOT NULL DEFAULT 0,
+    install_message TEXT NOT NULL DEFAULT 'Software not installed',
     cpu_cores INTEGER NOT NULL DEFAULT 1,
     disk_limit_mb INTEGER NOT NULL DEFAULT 0,
     template_key TEXT NOT NULL DEFAULT '',
@@ -164,7 +164,12 @@ db.exec(`
     FOREIGN KEY (target_server_id) REFERENCES servers(id) ON DELETE CASCADE,
     FOREIGN KEY (requester_user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+`);
 
+// Insert default timezone
+db.exec(`
+  INSERT OR IGNORE INTO panel_settings (key, value) 
+  VALUES ('timezone', 'UTC')
 `);
 
 const serverColumns = {
@@ -173,7 +178,7 @@ const serverColumns = {
   crash_backup: 'INTEGER NOT NULL DEFAULT 1',
   scheduled_backups: 'INTEGER NOT NULL DEFAULT 1',
   backup_interval_hours: 'INTEGER NOT NULL DEFAULT 24',
-  backup_interval_minutes: 'INTEGER NOT NULL DEFAULT 1440',
+  backup_interval_minutes: 'INTEGER NOT NULL DEFAULT 0',
   last_backup_at: 'INTEGER NOT NULL DEFAULT 0',
   backup_retention: 'INTEGER NOT NULL DEFAULT 4',
   wake_on_join: 'INTEGER NOT NULL DEFAULT 0',
