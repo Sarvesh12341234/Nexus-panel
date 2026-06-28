@@ -1670,3 +1670,29 @@ body[data-theme-mode="picture"] #backupMinutes {
   background: color-mix(in srgb, var(--bg), rgba(0,0,0,0.6) 40%);
   backdrop-filter: blur(8px);
 }
+
+body[data-density="compact"] .workspace {
+  gap: 0.65rem;
+  padding: 0.75rem;
+}
+
+body[data-density="compact"] .surface,
+body[data-density="compact"] .tool-surface,
+body[data-density="compact"] .server-card,
+body[data-density="compact"] .plugin-row {
+  padding: 0.7rem;
+}
+
+body[data-density="compact"] .nav-item {
+  min-height: 34px;
+  padding-block: 0.4rem;
+}
+
+body[data-reduced-motion="true"] *,
+body[data-reduced-motion="true"] *::before,
+body[data-reduced-motion="true"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}

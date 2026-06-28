@@ -92,10 +92,19 @@ let consoleStickToBottom = true;
 let consoleRenderToken = 0;
 let terminalSession = { id: '', cursor: 0, timer: 0 };
 const versionCache = new Map();
+const publicBackupLinks = new Map();
+const UI_PREFERENCES_KEY = 'nexusUiPreferences';
+const uiHistory = [];
+const uiRedo = [];
+let uiPreferences = loadUiPreferences();
 let lastCreateSoftwareKey = '';
 const UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024;
 const UPLOAD_PARALLELISM = 4;
-const timeZones = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : ['UTC'];
+const timeZones = [...new Set([
+  ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : ['UTC']),
+  'Asia/Kolkata',
+  'Asia/Calcutta',
+])].sort();
 const themes = [
   { key: 'nexus', name: 'Plain · Nexus Mint', mode: 'plain' },
   { key: 'ember', name: 'Plain · Ember Arena', mode: 'plain' },
@@ -137,6 +146,41 @@ const viewTitles = {
   settings: ['Panel', 'Settings'],
   terminal: ['Owner', 'VPS Terminal'],
 };
+const defaultNavOrder = Object.keys(viewTitles);
+
+function loadUiPreferences() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) || '{}');
+    return {
+      navOrder: Array.isArray(saved.navOrder) ? saved.navOrder : [],
+      compact: Boolean(saved.compact),
+      reducedMotion: Boolean(saved.reducedMotion),
+      liveRefresh: saved.liveRefresh !== false,
+    };
+  } catch {
+    return { navOrder: [], compact: false, reducedMotion: false, liveRefresh: true };
+  }
+}
+
+function applyUiPreferences() {
+  document.body.dataset.density = uiPreferences.compact ? 'compact' : 'comfortable';
+  document.body.dataset.reducedMotion = uiPreferences.reducedMotion ? 'true' : 'false';
+  const nav = document.querySelector('.nav-list');
+  if (!nav) return;
+  const buttons = new Map([...nav.querySelectorAll('[data-view]')].map((button) => [button.dataset.view, button]));
+  const order = [...uiPreferences.navOrder, ...defaultNavOrder].filter((key, index, list) => buttons.has(key) && list.indexOf(key) === index);
+  for (const key of order) nav.appendChild(buttons.get(key));
+}
+
+function commitUiPreferences(next) {
+  uiHistory.push(structuredClone(uiPreferences));
+  if (uiHistory.length > 30) uiHistory.shift();
+  uiRedo.length = 0;
+  uiPreferences = { ...uiPreferences, ...next };
+  localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
+  applyUiPreferences();
+  if (state.activeView === 'settings') renderSettings();
+}
 
 function showToast(message) {
   if (!elements.toast) return;
@@ -544,7 +588,7 @@ function renderServerRows() {
       </div>
       <code>${escapeHtml(server.serverPath || '')}</code>
       <div class="row-actions">
-        <button type="button" data-action="activate-server">Open</button>
+        <button type="button" data-action="manage-server">Open</button>
         <button class="secondary" type="button" data-action="open-console">Console</button>
         <button class="danger" type="button" data-action="delete-server" ${server.status === 'online' ? 'disabled' : ''}>Delete</button>
       </div>
@@ -728,7 +772,7 @@ function renderPlugins() {
     elements.pluginList.innerHTML = '<p class="empty-state">Plugin manager is locked until file access level 80.</p>';
     return;
   }
-  
+
   if (!server) {
     elements.pluginList.innerHTML = '<p class="empty-state">Create a server to install plugins.</p>';
     return;
@@ -747,7 +791,7 @@ function renderPlugins() {
     elements.pluginList.innerHTML = '<p class="empty-state">No plugins installed for this server yet. Search Modrinth above.</p>';
     return;
   }
-  
+
   elements.pluginList.innerHTML = plugins.map((plugin) => {
     return `
       <div class="plugin-row" data-plugin-id="${plugin.id}">
@@ -926,7 +970,11 @@ function renderSettings() {
   const isHost = settings.edition === 'host';
   const selectedZone = settings.timeZone || 'UTC';
   const zoneOptions = timeZones.map((zone) => `<option value="${escapeHtml(zone)}" ${zone === selectedZone ? 'selected' : ''}>${escapeHtml(zone)}</option>`).join('');
-  
+  const visibleNavOrder = [...document.querySelectorAll('.nav-list [data-view]')].map((button) => ({
+    key: button.dataset.view,
+    label: button.textContent.trim(),
+  }));
+
   elements.settingsPanel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Settings</p><h2>Panel engine</h2></div><button type="button" data-action="run-panel-update">Update from GitHub</button></div>
     <form class="settings-form" id="settingsForm">
@@ -938,46 +986,21 @@ function renderSettings() {
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
       <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
       <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
-      
+
       <!-- Timezone with Save Button -->
       <div class="settings-group">
-        <label>Timezone 
+        <label>Timezone
           <select name="timeZone" id="userTimezoneSelect">${zoneOptions}</select>
         </label>
         <button type="button" class="secondary" data-action="save-timezone" style="margin-top: 8px;">Save Timezone</button>
         <span id="timezoneStatus" style="margin-left: 10px;"></span>
       </div>
-      
-      <!-- Backup Interval Settings -->
-      <div class="settings-group">
-        <h4>💾 Server Backup Interval</h4>
-        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px;">
-          <label>Apply to server:
-            <select id="settingsServerSelect">
-              <option value="">Select a server...</option>
-              ${state.servers.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}
-            </select>
-          </label>
-        </div>
-        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px;">
-          <input type="number" id="backupHours" min="0" max="168" value="24" style="width: 80px; padding: 6px;">
-          <span>hours</span>
-          <input type="number" id="backupMinutes" min="0" max="59" value="0" style="width: 80px; padding: 6px;">
-          <span>minutes</span>
-          <span id="backupDisplay" style="font-weight: bold; margin-left: 10px;"></span>
-        </div>
-        <div style="margin-top: 8px;">
-          <button type="button" class="secondary" data-action="save-backup-interval">Save Backup Settings</button>
-          <span id="backupStatus" style="margin-left: 10px;"></span>
-        </div>
-      </div>
-      
       <button class="save-wide" type="submit">Save Settings</button>
     </form>
     <div class="upload-panel">
-      <span>${escapeHtml(update.message || 'Updater idle')}</span>
-      <div class="install-track"><span style="width:${Number(update.progress || 0)}%"></span></div>
-      <small>${update.running ? 'Update is running...' : `Last exit: ${update.exitCode ?? 'none'}`}</small>
+      <span id="panelUpdateMessage">${escapeHtml(update.message || 'Updater idle')}</span>
+      <div class="install-track"><span id="panelUpdateProgress" style="width:${Number(update.progress || 0)}%"></span></div>
+      <small id="panelUpdateDetail">${update.running ? `Update is running: ${Number(update.progress || 0)}%` : `Last exit: ${update.exitCode ?? 'none'}`}</small>
     </div>
     ${isHost && state.user?.role === 'owner' ? `<div class="server-actions"><button class="secondary" type="button" data-action="show-host-token">Show Host API Token</button><button class="danger" type="button" data-action="regen-host-token">Regenerate Host Token</button><code>${escapeHtml(settings.hostApiTokenPreview || '')}</code></div>` : ''}
     <div class="public-help-grid">
@@ -989,66 +1012,35 @@ function renderSettings() {
       <summary>Example Template JSON</summary>
       <pre>${escapeHtml(JSON.stringify(settings.nexuExample || {}, null, 2))}</pre>
     </details>` : ''}
+    <details class="nexu-details">
+      <summary>Beta UI lab</summary>
+      <div class="backup-settings">
+        <label class="switch"><input type="checkbox" data-action="beta-compact" ${uiPreferences.compact ? 'checked' : ''}><span></span>Compact density</label>
+        <label class="switch"><input type="checkbox" data-action="beta-reduced-motion" ${uiPreferences.reducedMotion ? 'checked' : ''}><span></span>Reduced motion</label>
+        <label class="switch"><input type="checkbox" data-action="beta-live-refresh" ${uiPreferences.liveRefresh ? 'checked' : ''}><span></span>Live polling</label>
+        <button class="secondary" type="button" data-action="beta-undo" ${uiHistory.length ? '' : 'disabled'}>Undo</button>
+        <button class="secondary" type="button" data-action="beta-redo" ${uiRedo.length ? '' : 'disabled'}>Redo</button>
+        <button class="danger" type="button" data-action="beta-reset">Reset UI</button>
+      </div>
+      <div class="plugin-list">
+        ${visibleNavOrder.map((item, index) => `<div class="plugin-row"><strong>${escapeHtml(item.label)}</strong><div class="row-actions"><button class="secondary" type="button" data-action="beta-nav-move" data-nav-key="${escapeHtml(item.key)}" data-direction="-1" ${index === 0 ? 'disabled' : ''}>Move up</button><button class="secondary" type="button" data-action="beta-nav-move" data-nav-key="${escapeHtml(item.key)}" data-direction="1" ${index === visibleNavOrder.length - 1 ? 'disabled' : ''}>Move down</button></div></div>`).join('')}
+      </div>
+    </details>
   `;
-  
-  // Initialize backup display
-  updateBackupDisplay();
-  
-  // Load server settings when server is selected
-  const serverSelect = document.getElementById('settingsServerSelect');
-  if (serverSelect) {
-    serverSelect.addEventListener('change', () => {
-      const serverId = parseInt(serverSelect.value);
-      if (serverId) loadServerBackupSettings(serverId);
-    });
-    // Load first server by default
-    if (state.servers.length > 0) {
-      serverSelect.value = state.servers[0].id;
-      loadServerBackupSettings(state.servers[0].id);
-    }
-  }
-  
-  // Add listeners for backup hours/minutes
-  const hoursInput = document.getElementById('backupHours');
-  const minutesInput = document.getElementById('backupMinutes');
-  if (hoursInput) hoursInput.addEventListener('input', updateBackupDisplay);
-  if (minutesInput) minutesInput.addEventListener('input', updateBackupDisplay);
+
 }
 
-// Helper function to update backup display
-function updateBackupDisplay() {
-  const hours = parseInt(document.getElementById('backupHours')?.value) || 0;
-  const minutes = parseInt(document.getElementById('backupMinutes')?.value) || 0;
-  const display = document.getElementById('backupDisplay');
-  
-  if (!display) return;
-  
-  if (hours === 0 && minutes === 0) {
-    display.textContent = 'Disabled';
-    display.style.color = '#999';
-  } else if (hours === 0) {
-    display.textContent = `${minutes} minute${minutes > 1 ? 's' : ''}`;
-    display.style.color = '#4CAF50';
-  } else if (minutes === 0) {
-    display.textContent = `${hours} hour${hours > 1 ? 's' : ''}`;
-    display.style.color = '#4CAF50';
-  } else {
-    display.textContent = `${hours}h ${minutes}m`;
-    display.style.color = '#4CAF50';
-  }
-}
-
-// Helper function to load server backup settings
-async function loadServerBackupSettings(serverId) {
-  if (!serverId) return;
-  try {
-    const data = await api(`/api/servers/${serverId}`);
-    document.getElementById('backupHours').value = data.backup_interval_hours || 24;
-    document.getElementById('backupMinutes').value = data.backup_interval_minutes || 0;
-    updateBackupDisplay();
-  } catch (error) {
-    console.error('Failed to load server settings:', error);
-  }
+function updateSettingsLiveStatus() {
+  if (state.activeView !== 'settings') return;
+  const update = state.settings?.updateStatus || {};
+  const message = document.getElementById('panelUpdateMessage');
+  const progress = document.getElementById('panelUpdateProgress');
+  const detail = document.getElementById('panelUpdateDetail');
+  if (message) message.textContent = update.message || 'Updater idle';
+  if (progress) progress.style.width = `${Number(update.progress || 0)}%`;
+  if (detail) detail.textContent = update.running
+    ? `Update is running: ${Number(update.progress || 0)}%`
+    : `Last exit: ${update.exitCode ?? 'none'}`;
 }
 
 
@@ -1118,9 +1110,53 @@ function renderBackups() {
   const backupMinutes = Number(server.backupIntervalMinutes || (server.backupIntervalHours || 24) * 60);
   const backupUnit = backupMinutes % 60 === 0 ? 'hours' : 'minutes';
   const backupValue = backupUnit === 'hours' ? Math.max(1, Math.round(backupMinutes / 60)) : Math.max(1, backupMinutes);
+
   api(`/api/servers/${server.id}/backups`).then((data) => {
     const requests = data.shareRequests || [];
     const shared = data.sharedBackups || [];
+
+    // Helper function to format backup display name
+    function formatBackupDisplayName(filename) {
+      if (!filename) return 'Unknown';
+      const name = filename.replace(/\.zip$/, '');
+      const parts = name.split('--');
+      if (parts.length === 2) {
+        const [datePart, timePart] = parts;
+        const dateSegments = datePart.split('-');
+        const timeSegments = timePart.split('-');
+        const day = dateSegments[dateSegments.length - 3] || '';
+        const month = dateSegments[dateSegments.length - 2] || '';
+        const year = dateSegments[dateSegments.length - 1] || '';
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const monthName = monthNames[parseInt(month) - 1] || month;
+        const hour = timeSegments[0] || '';
+        const minute = timeSegments[1] || '';
+        const ampm = timeSegments[2] || '';
+        return `${monthName} ${parseInt(day)}, ${year} | ${parseInt(hour)}:${minute} ${ampm}`;
+      }
+      return name;
+    }
+
+    // Helper function to format date in 12-hour format
+    function formatBackupDate(timestamp) {
+      const date = new Date(timestamp);
+      if (Number.isNaN(date.getTime())) return 'Invalid Date';
+      const timezone = state.settings?.timeZone || 'UTC';
+      try {
+        return date.toLocaleString('en-US', {
+          timeZone: timezone,
+          year: 'numeric',
+          month: 'short',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+        }).replace(',', ' |');
+      } catch {
+        return date.toLocaleString();
+      }
+    }
+
     elements.backupPanel.innerHTML = `
       <div class="section-head"><div><p class="eyebrow">Backups</p><h2>${escapeHtml(server.name)}</h2></div><button type="button" data-action="manual-backup">Manual backup</button></div>
       <form class="backup-settings" id="backupSettingsForm">
@@ -1133,20 +1169,64 @@ function renderBackups() {
       <p class="muted">Stored outside the panel install by default: <code>/var/lib/nexuspanel/backups/${server.id}/</code> on Linux. Server-folder <code>backups/</code>, <code>archives/</code>, and top-level ZIPs are skipped to prevent recursive giant backups.</p>
       ${data.canManageShare ? `<div class="backup-settings">
         <button class="secondary" type="button" data-action="backup-code-show">${data.shareCode ? 'Refresh Backup Code' : 'Create Backup Code'}</button>
-        ${data.shareCode ? `<code>${escapeHtml(data.shareCode.code)}</code><span class="muted">expires ${escapeHtml(formatDateTime(data.shareCode.expires_at))}</span><button class="danger" type="button" data-action="backup-code-hide">Hide Code</button>` : '<span class="muted">Create a 6-digit code so another server can request access.</span>'}
+        ${data.shareCode ? `<code>${escapeHtml(data.shareCode.code)}</code><span class="muted">expires ${escapeHtml(formatBackupDate(data.shareCode.expires_at))}</span><button class="danger" type="button" data-action="backup-code-hide">Hide Code</button>` : '<span class="muted">Create a 6-digit code so another server can request access.</span>'}
       </div>` : ''}
+      ${data.canManageShare ? `<div class="backup-settings">
+        <button class="secondary" type="button" data-action="public-backup-link">Create public links</button>
+        <button class="danger" type="button" data-action="revoke-public-backup-link">Revoke public links</button>
+        <span class="muted">Links are revocable, expire within 24 hours, and work between NexusPanel installations.</span>
+      </div>
+      <div class="plugin-list">${(publicBackupLinks.get(server.id)?.archives || []).map((backup) => `
+        <div class="plugin-row"><div><strong>${escapeHtml(backup.name)}</strong><div class="muted">Public until ${escapeHtml(formatBackupDate(publicBackupLinks.get(server.id).expiresAt))}</div></div><div class="row-actions"><button class="secondary" type="button" data-action="copy-public-backup-link" data-public-url="${escapeHtml(backup.url)}">Copy link</button></div></div>
+      `).join('')}</div>` : ''}
       <form class="backup-settings" id="backupCodeForm">
         <label>Add code <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456"></label>
         <button type="submit">Request shared backup</button>
       </form>
+      <form class="backup-settings" id="publicBackupImportForm">
+        <label>Public backup URL <input name="url" type="url" placeholder="https://panel.example/api/public/backups/..." required></label>
+        <button type="submit">Import backup</button>
+      </form>
       ${data.canManageShare ? `<div class="plugin-list">
-        ${requests.map((request) => `<div class="plugin-row"><div><strong>${escapeHtml(request.target_name || 'Server')}</strong><div class="muted">${escapeHtml(request.requester_email || '')} | ${escapeHtml(request.status)}${request.expires_at ? ` | until ${escapeHtml(formatDateTime(request.expires_at))}` : ''}</div></div><div class="row-actions">${request.status === 'pending' ? '<input type="number" min="1" max="24" value="1" data-share-hours>' : ''}<button class="secondary" type="button" data-action="backup-request-approve" data-request-id="${request.id}" ${request.status === 'pending' ? '' : 'disabled'}>Accept</button><button class="danger" type="button" data-action="backup-request-remove" data-request-id="${request.id}">Remove</button></div></div>`).join('') || '<p class="empty-state">No backup access requests.</p>'}
+        ${requests.map((request) => `<div class="plugin-row"><div><strong>${escapeHtml(request.target_name || 'Server')}</strong><div class="muted">${escapeHtml(request.requester_email || '')} | ${escapeHtml(request.status)}${request.expires_at ? ` | until ${escapeHtml(formatBackupDate(request.expires_at))}` : ''}</div></div><div class="row-actions">${request.status === 'pending' ? '<input type="number" min="1" max="24" value="1" data-share-hours>' : ''}<button class="secondary" type="button" data-action="backup-request-approve" data-request-id="${request.id}" ${request.status === 'pending' ? '' : 'disabled'}>Accept</button><button class="danger" type="button" data-action="backup-request-remove" data-request-id="${request.id}">Remove</button></div></div>`).join('') || '<p class="empty-state">No backup access requests.</p>'}
       </div>` : ''}
-      <div class="plugin-list">${data.backups.map((backup) => `<div class="plugin-row"><div><strong>${escapeHtml(backup.name)}</strong><div class="muted">${Math.round(backup.size / 1024)} KB</div></div><div class="row-actions"><button class="secondary" type="button" data-action="restore-backup" data-backup-path="${escapeHtml(backup.path)}">Restore</button><a class="button-link" href="/api/servers/${server.id}/backups/download?name=${encodeURIComponent(backup.name)}">Download</a><button class="danger" type="button" data-action="delete-backup" data-backup-path="${escapeHtml(backup.path)}">Delete</button></div></div>`).join('') || '<p class="empty-state">No backups yet.</p>'}</div>
+
+      <!-- BACKUP LIST WITH 12-HOUR FORMAT -->
+      <div class="plugin-list">
+        ${data.backups.map((backup) => {
+          const displayName = formatBackupDisplayName(backup.name);
+          const formattedDate = formatBackupDate(backup.createdAt);
+          return `
+            <div class="plugin-row">
+              <div>
+                <strong>${escapeHtml(displayName)}</strong>
+                <div class="muted">${Math.round(backup.size / 1024)} KB | ${escapeHtml(formattedDate)}</div>
+              </div>
+              <div class="row-actions">
+                <button class="secondary" type="button" data-action="restore-backup" data-backup-path="${escapeHtml(backup.path)}">Restore</button>
+                <a class="button-link" href="/api/servers/${server.id}/backups/download?name=${encodeURIComponent(backup.name)}">Download</a>
+                <button class="danger" type="button" data-action="delete-backup" data-backup-path="${escapeHtml(backup.path)}">Delete</button>
+              </div>
+            </div>
+          `;
+        }).join('') || '<p class="empty-state">No backups yet.</p>'}
+      </div>
+
       <h3>Shared backups</h3>
       <div class="plugin-list">${shared.map((group) => `
-        <div class="plugin-row"><div><strong>${escapeHtml(group.sourceName)}</strong><div class="muted">Access until ${escapeHtml(formatDateTime(group.expiresAt))}</div></div></div>
-        ${(group.backups || []).map((backup) => `<div class="plugin-row"><div><strong>${escapeHtml(backup.name)}</strong><div class="muted">${Math.round(backup.size / 1024)} KB | shared-backup</div></div><div class="row-actions"><button class="secondary" type="button" data-action="restore-backup" data-backup-path="${escapeHtml(backup.path)}" data-source-server-id="${group.sourceServerId}">Restore here</button></div></div>`).join('')}
+        <div class="plugin-row"><div><strong>${escapeHtml(group.sourceName)}</strong><div class="muted">Access until ${escapeHtml(formatBackupDate(group.expiresAt))}</div></div></div>
+        ${(group.backups || []).map((backup) => {
+          const displayName = formatBackupDisplayName(backup.name);
+          const formattedDate = formatBackupDate(backup.createdAt);
+          return `
+            <div class="plugin-row">
+              <div><strong>${escapeHtml(displayName)}</strong><div class="muted">${Math.round(backup.size / 1024)} KB | shared-backup | ${escapeHtml(formattedDate)}</div></div>
+              <div class="row-actions">
+                <button class="secondary" type="button" data-action="restore-backup" data-backup-path="${escapeHtml(backup.path)}" data-source-server-id="${group.sourceServerId}">Restore here</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
       `).join('') || '<p class="empty-state">No shared backups approved for this server.</p>'}</div>
     `;
   }).catch((error) => showToast(error.message));
@@ -1154,7 +1234,7 @@ function renderBackups() {
 
 async function renderOptimizer() {
   if (!can(state.permissions.MANAGE_SERVERS)) return;
-  
+
   try {
     const optimizer = state.optimizer || await api('/api/optimizer/status').catch(() => ({}));
     elements.optimizerSummary.innerHTML = `
@@ -1306,7 +1386,7 @@ async function refresh({ keepView = true } = {}) {
     state.settings = overview.settings || null;
     state.loginEvents = overview.loginEvents || [];
     state.health = overview.health || null;
-    
+
     if (state.activeServerId && !state.servers.some((server) => server.id === state.activeServerId)) {
       state.activeServerId = null;
     }
@@ -1326,7 +1406,7 @@ async function refresh({ keepView = true } = {}) {
     renderServerSwitcher();
     if (state.activeView === 'dashboard') renderSoftwareChoices();
     await renderActiveView();
-    
+
     if (!keepView) setView('dashboard');
   } catch (error) {
     showToast('Failed to load data: ' + error.message);
@@ -1349,7 +1429,7 @@ async function refreshServerStatusOnly() {
   renderServerSwitcher();
   if (state.activeView === 'dashboard') renderServers();
   if (state.activeView === 'software') renderSoftware();
-  if (state.activeView === 'settings') renderSettings();
+  updateSettingsLiveStatus();
 }
 
 function setView(view) {
@@ -1375,6 +1455,23 @@ function escapeHtml(value) {
   return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#039;');
 }
 
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {}
+  }
+  const input = document.createElement('textarea');
+  input.value = value;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand('copy');
+  input.remove();
+}
+
 function formatBytes(bytes) {
   const value = Number(bytes || 0);
   if (value < 1024) return `${value} B`;
@@ -1388,27 +1485,63 @@ function formatBytes(bytes) {
   return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
-function formatDateTime(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  try {
-    return date.toLocaleString(undefined, {
-      timeZone: state.settings?.timeZone || 'UTC',
-      year: 'numeric',
-      month: 'short',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return date.toLocaleString();
+// ===== BACKUP DATE FORMATTER (12-HOUR FORMAT) =====
+function formatBackupDate(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return 'Invalid Date';
+
+  const timezone = state.settings?.timeZone || 'UTC';
+
+  // Format: Dec 25, 2026 | 10:30 PM
+  return date.toLocaleString('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: 'short',      // Dec
+    day: '2-digit',      // 25
+    hour: '2-digit',     // 10
+    minute: '2-digit',   // 30
+    hour12: true,        // AM/PM
+  }).replace(',', ' |'); // Replace comma with separator
+}
+
+// ===== FORMAT BACKUP FILENAME FOR DISPLAY =====
+function formatBackupDisplayName(filename) {
+  if (!filename) return 'Unknown';
+
+  // Remove .zip extension
+  const name = filename.replace(/\.zip$/, '');
+
+  // Try to parse the filename: server-backup-auto-25-12-2026--10-30-PM
+  const parts = name.split('--');
+  if (parts.length === 2) {
+    const [datePart, timePart] = parts;
+    const dateSegments = datePart.split('-');
+    const timeSegments = timePart.split('-');
+
+    // Extract date: 25-12-2026 -> Dec 25, 2026
+    const day = dateSegments[dateSegments.length - 3] || '';
+    const month = dateSegments[dateSegments.length - 2] || '';
+    const year = dateSegments[dateSegments.length - 1] || '';
+
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthName = monthNames[parseInt(month) - 1] || month;
+
+    // Extract time: 10-30-PM -> 10:30 PM
+    const hour = timeSegments[0] || '';
+    const minute = timeSegments[1] || '';
+    const ampm = timeSegments[2] || '';
+
+    return `${monthName} ${parseInt(day)}, ${year} | ${parseInt(hour)}:${minute} ${ampm}`;
   }
+
+  // Fallback: just show the name without extension
+  return name;
 }
 
 function startRefreshLoop() {
   window.clearInterval(state.refreshTimer);
   state.refreshTimer = window.setInterval(() => {
-    if (!state.user) return;
+    if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
     const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy ? 1200 : 2500);
     if (state.activeView === 'console') {
@@ -1751,6 +1884,29 @@ document.addEventListener('submit', async (event) => {
   }
 });
 
+document.addEventListener('submit', async (event) => {
+  if (event.target.id !== 'publicBackupImportForm') return;
+  event.preventDefault();
+  const server = activeServer();
+  if (!server) return;
+  const submitButton = event.target.querySelector('[type="submit"]');
+  submitButton.disabled = true;
+  showToast('Importing remote backup...');
+  try {
+    await api(`/api/servers/${server.id}/backups/import-url`, {
+      method: 'POST',
+      body: JSON.stringify(formData(event.target)),
+    });
+    event.target.reset();
+    showToast('Remote backup imported.');
+    renderBackups();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    submitButton.disabled = false;
+  }
+});
+
 elements.adminForm.addEventListener('input', () => {
   elements.accessOutput.value = elements.adminForm.accessLevel.value;
 });
@@ -1813,78 +1969,54 @@ document.addEventListener('click', async (event) => {
       return;
     }
 
-    // ===== SAVE BACKUP INTERVAL =====
-    if (action === 'save-backup-interval') {
-      const serverId = parseInt(document.getElementById('settingsServerSelect')?.value);
-      if (!serverId) {
-        showToast('Please select a server first');
-        return;
-      }
-      
-      const hours = parseInt(document.getElementById('backupHours')?.value) || 0;
-      const minutes = parseInt(document.getElementById('backupMinutes')?.value) || 0;
-      const status = document.getElementById('backupStatus');
-      
-      if (hours < 0 || hours > 168) {
-        showToast('Hours must be between 0 and 168');
-        return;
-      }
-      if (minutes < 0 || minutes > 59) {
-        showToast('Minutes must be between 0 and 59');
-        return;
-      }
-      
-      try {
-        const finalHours = (hours === 0 && minutes === 0) ? 1 : hours;
-        const finalMinutes = (hours === 0 && minutes === 0) ? 0 : minutes;
-        
-        await api(`/api/servers/${serverId}`, {
-          method: 'PUT',
-          body: JSON.stringify({
-            backup_interval_hours: finalHours,
-            backup_interval_minutes: finalMinutes
-          })
-        });
-        
-        showToast('✅ Backup settings saved!');
-        if (status) {
-          status.textContent = '✅ Saved successfully!';
-          status.style.color = '#4CAF50';
-          setTimeout(() => { status.textContent = ''; }, 5000);
-        }
-        updateBackupDisplay();
-        await refresh();
-      } catch (error) {
-        showToast(`❌ Error: ${error.message}`);
-        if (status) {
-          status.textContent = `❌ ${error.message}`;
-          status.style.color = '#f44336';
-          setTimeout(() => { status.textContent = ''; }, 5000);
-        }
-      }
-      return;
-    }
-
-    if (action === 'forgot-password') {
-      const email = prompt('Enter your NexusPanel account email:');
-      if (!email) return;
-      const request = await api('/api/password/forgot', { method: 'POST', body: JSON.stringify({ email }) });
-      showToast(request.message || 'OTP requested.');
-      const otp = prompt('Enter the 6-digit OTP:');
-      if (!otp) return;
-      const password = prompt('Enter your new password (8+ chars):');
-      if (!password) return;
-      const reset = await api('/api/password/reset', { method: 'POST', body: JSON.stringify({ email, otp, password }) });
-      showToast(reset.message || 'Password reset.');
-      return;
-    }
-
     if (action === 'logout') {
       await api('/api/logout', { method: 'POST' });
       state.user = null;
       window.clearInterval(state.refreshTimer);
       await refresh();
       return;
+    }
+    if (action === 'beta-compact' || action === 'beta-reduced-motion' || action === 'beta-live-refresh') {
+      const key = action === 'beta-compact' ? 'compact' : action === 'beta-reduced-motion' ? 'reducedMotion' : 'liveRefresh';
+      commitUiPreferences({ [key]: Boolean(actionTarget.checked) });
+      return;
+    }
+    if (action === 'beta-nav-move') {
+      const current = [...document.querySelectorAll('.nav-list [data-view]')].map((button) => button.dataset.view);
+      const index = current.indexOf(actionTarget.dataset.navKey);
+      const targetIndex = index + Number(actionTarget.dataset.direction || 0);
+      if (index < 0 || targetIndex < 0 || targetIndex >= current.length) return;
+      [current[index], current[targetIndex]] = [current[targetIndex], current[index]];
+      commitUiPreferences({ navOrder: current });
+      return;
+    }
+    if (action === 'beta-undo' && uiHistory.length) {
+      uiRedo.push(structuredClone(uiPreferences));
+      uiPreferences = uiHistory.pop();
+      localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
+      applyUiPreferences();
+      renderSettings();
+      return;
+    }
+    if (action === 'beta-redo' && uiRedo.length) {
+      uiHistory.push(structuredClone(uiPreferences));
+      uiPreferences = uiRedo.pop();
+      localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
+      applyUiPreferences();
+      renderSettings();
+      return;
+    }
+    if (action === 'beta-reset') {
+      commitUiPreferences({ navOrder: [], compact: false, reducedMotion: false, liveRefresh: true });
+      return;
+    }
+    if (action === 'manage-server') {
+      state.activeServerId = Number(actionTarget.closest('[data-server-id]').dataset.serverId);
+      filePath = '';
+      consoleRenderToken += 1;
+      consoleStickToBottom = true;
+      renderServerSwitcher();
+      return setView('console');
     }
     if (action === 'activate-server') {
       state.activeServerId = Number(actionTarget.closest('[data-server-id]').dataset.serverId);
@@ -2103,6 +2235,33 @@ document.addEventListener('click', async (event) => {
       renderBackups();
       return;
     }
+    if (action === 'public-backup-link') {
+      const server = activeServer();
+      if (!server) return;
+      const hours = Number(prompt('How many hours should these links stay active? 1-24', '1') || 1);
+      const share = await api(`/api/servers/${server.id}/backups/public-link`, {
+        method: 'POST',
+        body: JSON.stringify({ durationValue: Math.max(1, Math.min(24, hours)), durationUnit: 'hours' }),
+      });
+      publicBackupLinks.set(server.id, share);
+      showToast('Public backup links created.');
+      renderBackups();
+      return;
+    }
+    if (action === 'revoke-public-backup-link') {
+      const server = activeServer();
+      if (!server || !confirm('Revoke every active public backup link for this server?')) return;
+      await api(`/api/servers/${server.id}/backups/public-link`, { method: 'DELETE' });
+      publicBackupLinks.delete(server.id);
+      showToast('Public backup links revoked.');
+      renderBackups();
+      return;
+    }
+    if (action === 'copy-public-backup-link') {
+      await copyText(actionTarget.dataset.publicUrl || '');
+      showToast('Public backup link copied.');
+      return;
+    }
     if (action === 'backup-request-approve') {
       const server = activeServer();
       if (!server) return;
@@ -2261,10 +2420,10 @@ document.addEventListener('click', async (event) => {
     if (action === 'fix-server') {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
-      if (server.status === 'online') return showToast('Stop the server before running Fix Server.');
-      if (!confirm(`Run Fix Server for "${server.name}"? This checks executable paths and repairs missing runtime files when possible.`)) return;
+      if (server.status === 'online') return showToast('Stop the server before running Repair & Diagnose.');
+      if (!confirm(`Repair and diagnose "${server.name}"? This validates its runtime, cleans stale transfers, checks world storage and disk space, and rebuilds isolation metadata.`)) return;
       const result = await api(`/api/servers/${server.id}/fix`, { method: 'POST' });
-      showToast(result.repair?.message || 'Fix Server completed.');
+      showToast(result.summary || result.repair?.message || 'Repair & Diagnose completed.');
       await refresh();
       return;
     }
@@ -2436,6 +2595,7 @@ document.addEventListener('click', async (event) => {
 });
 
 initThemes();
+applyUiPreferences();
 enableDeveloperModeGuard();
 
 refresh().then(startRefreshLoop).catch((error) => {

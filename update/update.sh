@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 APP_DIR="${NEXUSPANEL_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -29,12 +29,12 @@ protect_path() {
   esac
 }
 
-echo "[NexusPanel] Safe updater starting in $APP_DIR"
+echo "[NexusPanel][5%] Safe updater starting in $APP_DIR"
 echo "[NexusPanel] Edition: $EDITION ($UPDATE_TAG)"
 echo "[NexusPanel] Minecraft data is protected: servers/, data/, backups/, backupfolder/, software/"
 
 tar --exclude='./servers' --exclude='./data' --exclude='./backups' --exclude='./backupfolder' --exclude='./software' --exclude='./node_modules' --exclude='./.git' --exclude='./update/backups' -czf "$SNAPSHOT" .
-echo "[NexusPanel] Code snapshot saved: $SNAPSHOT"
+echo "[NexusPanel][20%] Code snapshot saved: $SNAPSHOT"
 
 if command -v git >/dev/null 2>&1 && [ -d .git ]; then
   echo "[NexusPanel] Git repo detected. Pulling latest code..."
@@ -45,7 +45,8 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
       git remote add "$REMOTE" "$REPO_URL"
     fi
   fi
-  git fetch "$REMOTE" --tags
+  git fetch "$REMOTE" --tags --force
+  echo "[NexusPanel][45%] Release tags refreshed."
   if git rev-parse "$UPDATE_TAG^{}" >/dev/null 2>&1; then
     git reset --hard "$UPDATE_TAG"
   else
@@ -54,6 +55,7 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
     fi
     git reset --hard "$REMOTE/$BRANCH"
   fi
+  echo "[NexusPanel][65%] Panel code switched to $UPDATE_TAG."
 else
   echo "[NexusPanel] No git repo detected. Copy new source into this folder, then run this updater again."
 fi
@@ -61,6 +63,7 @@ fi
 if [ -f package.json ]; then
   npm install --omit=optional
 fi
+echo "[NexusPanel][85%] Dependencies verified."
 
 mkdir -p "$APP_DIR/data"
 printf '%s\n' "$EDITION" > "$APP_DIR/data/edition"
@@ -77,4 +80,4 @@ else
   echo "[NexusPanel] Service not installed; start with: npm start"
 fi
 
-echo "[NexusPanel] Update complete. Protected data was not touched."
+echo "[NexusPanel][100%] Update complete. Protected data was not touched."

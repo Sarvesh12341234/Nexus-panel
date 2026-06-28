@@ -8,8 +8,12 @@ function getUserTimezone(userId) {
   if (userResult) return userResult.value;
   
   // Fallback to global default
-  const globalResult = db.prepare('SELECT value FROM panel_settings WHERE key = ?')
-    .get('timezone');
+  const globalResult = db.prepare(`
+    SELECT value FROM panel_settings
+    WHERE key IN ('time_zone', 'timezone')
+    ORDER BY CASE key WHEN 'time_zone' THEN 0 ELSE 1 END
+    LIMIT 1
+  `).get();
   
   return globalResult?.value || 'UTC';
 }

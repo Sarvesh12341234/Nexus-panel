@@ -6,7 +6,7 @@ const { hostCpuCount } = require('./system_info');
 function cpuLimitPercent(cpuCores = 1) {
   const total = Math.max(1, hostCpuCount());
   const requested = Math.max(1, Math.min(total, Number(cpuCores) || 1));
-  return Math.max(1, Math.round((requested / total) * 100));
+  return requested * 100;
 }
 
 function profileForServer(server, nexu = null) {
@@ -20,6 +20,7 @@ function profileForServer(server, nexu = null) {
     serverId: server.id,
     cpuCores,
     cpuQuotaPercent: cpuLimitPercent(cpuCores),
+    startupCpuQuotaPercent: Math.min(hostCpuCount(), cpuCores * 4) * 100,
     memoryMaxMb: ramMb,
     diskLimitMb: Number(server.disk_limit_mb || nexu?.resources?.diskMb || 0),
     pathScope: 'server-root-only',
@@ -38,11 +39,40 @@ function profileForServer(server, nexu = null) {
         systemdScope: `nexusmark-${server.id}.scope`,
         memoryMax: `${ramMb}M`,
         cpuQuota: `${cpuLimitPercent(cpuCores)}%`,
+        startupCpuQuota: `${Math.min(hostCpuCount(), cpuCores * 4) * 100}%`,
         noNewPrivileges: true,
         privateTmp: true,
         protectSystem: 'strict-planned',
       }
       : { note: 'Windows/macOS use path sandbox + process guard only.' },
+  };
+}
+
+function wrapCommand(command, args, profile) {
+  if (process.platform !== 'linux' || process.env.NEXUSPANEL_CGROUPS === '0' || !fs.existsSync('/run/systemd/system')) {
+    return { command, args, unit: '' };
+  }
+  const probe = require('node:child_process').spawnSync('systemd-run', ['--version'], { stdio: 'ignore' });
+  if (probe.status !== 0) return { command, args, unit: '' };
+  const unit = `nexusmark-${String(profile.serverId).replace(/[^a-z0-9_.-]/gi, '-')}`;
+  return {
+    command: 'systemd-run',
+    args: [
+      '--scope',
+      '--quiet',
+      '--pipe',
+      `--unit=${unit}`,
+      '--property',
+      `MemoryMax=${profile.memoryMaxMb}M`,
+      '--property',
+      `CPUQuota=${profile.startupCpuQuotaPercent || profile.cpuQuotaPercent}%`,
+      '--property',
+      'TasksMax=512',
+      '--',
+      command,
+      ...args,
+    ],
+    unit: `${unit}.scope`,
   };
 }
 
@@ -71,5 +101,6 @@ function spawnOptions(baseOptions, profile) {
 module.exports = {
   profileForServer,
   spawnOptions,
+  wrapCommand,
   writeProfile,
 };

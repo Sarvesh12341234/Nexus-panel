@@ -164,6 +164,16 @@ db.exec(`
     FOREIGN KEY (target_server_id) REFERENCES servers(id) ON DELETE CASCADE,
     FOREIGN KEY (requester_user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS backup_public_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  );
 `);
 
 // Insert default timezone

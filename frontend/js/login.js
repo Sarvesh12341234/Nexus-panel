@@ -65,64 +65,7 @@ async function handleLogin(event) {
   }
 }
 
-async function handleForgotPassword() {
-  document.getElementById('loginForm').hidden = true;
-  document.getElementById('resetForm').hidden = false;
-  document.getElementById('resetEmail').value = document.getElementById('email').value.trim();
-}
-
-async function sendResetCode() {
-  const resetMsg = document.getElementById('resetMsg');
-  try {
-    const email = document.getElementById('resetEmail').value.trim();
-    if (!email) return;
-    const request = await fetch('/api/password/forgot', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    });
-    const requestData = await request.json();
-    if (!request.ok) throw new Error(requestData.error || 'OTP request failed');
-    resetMsg.textContent = requestData.message || 'Code requested.';
-    resetMsg.hidden = false;
-  } catch (error) {
-    resetMsg.textContent = error.message || 'Code request failed.';
-    resetMsg.hidden = false;
-  }
-}
-
-async function handleResetPassword(event) {
-  event.preventDefault();
-  const resetMsg = document.getElementById('resetMsg');
-  try {
-    const email = document.getElementById('resetEmail').value.trim();
-    const otp = document.getElementById('resetOtp').value.trim();
-    const password = document.getElementById('resetPassword').value;
-    const reset = await fetch('/api/password/reset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, otp, password }),
-    });
-    const resetData = await reset.json();
-    if (!reset.ok) throw new Error(resetData.error || 'Password reset failed');
-    resetMsg.textContent = resetData.message || 'Password reset. You can log in now.';
-    resetMsg.hidden = false;
-  } catch (error) {
-    resetMsg.textContent = error.message || 'Password reset failed.';
-    resetMsg.hidden = false;
-  }
-}
-
-function backToLogin() {
-  document.getElementById('resetForm').hidden = true;
-  document.getElementById('loginForm').hidden = false;
-}
-
 document.getElementById('loginForm').addEventListener('submit', handleLogin);
-document.getElementById('forgotPasswordBtn')?.addEventListener('click', handleForgotPassword);
-document.getElementById('sendResetCodeBtn')?.addEventListener('click', sendResetCode);
-document.getElementById('resetForm')?.addEventListener('submit', handleResetPassword);
-document.getElementById('backToLoginBtn')?.addEventListener('click', backToLogin);
 
 // Check if already logged in
 checkAuth();

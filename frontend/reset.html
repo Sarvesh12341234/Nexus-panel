@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NexusPanel - Reset Password</title>
+    <link rel="stylesheet" href="/css/login.css">
+  </head>
+  <body>
+    <div class="backplate" aria-hidden="true"></div>
+    <section class="login-screen">
+      <form class="auth-card" id="resetForm">
+        <div class="brand compact">
+          <span class="brand-mark">N</span>
+          <div>
+            <p class="eyebrow">NexusPanel</p>
+            <h1>Reset Password</h1>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="resetEmail">Email</label>
+          <input id="resetEmail" name="email" type="email" autocomplete="email" required>
+        </div>
+        <button type="button" class="btn-secondary" id="sendResetCodeBtn">Send code</button>
+        <div class="form-group">
+          <label for="resetOtp">6-digit code</label>
+          <input id="resetOtp" name="otp" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" required>
+        </div>
+        <div class="form-group">
+          <label for="resetPassword">New password</label>
+          <input id="resetPassword" name="password" type="password" autocomplete="new-password" minlength="8" required>
+        </div>
+        <button type="submit" class="btn-primary">Reset password</button>
+        <a class="btn-secondary" href="/login.html">Back to login</a>
+        <p class="error-message" id="resetMsg" hidden></p>
+      </form>
+    </section>
+    <script src="/js/reset.js" defer></script>
+  </body>
+</html>

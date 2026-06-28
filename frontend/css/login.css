@@ -122,7 +122,8 @@ body {
   opacity: 0.6;
 }
 
-button {
+button,
+.btn-secondary {
   width: 100%;
   padding: 0.875rem;
   border: 0;
@@ -135,13 +136,25 @@ button {
   transition: transform 0.2s, box-shadow 0.2s;
 }
 
-button:hover {
+button:hover,
+.btn-secondary:hover {
   transform: translateY(-2px);
   box-shadow: 0 8px 24px rgba(65, 230, 155, 0.3);
 }
 
-button:active {
+button:active,
+.btn-secondary:active {
   transform: translateY(0);
+}
+
+.btn-secondary {
+  display: block;
+  margin-top: 0.75rem;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--line);
+  color: var(--text);
+  text-align: center;
+  text-decoration: none;
 }
 
 button:disabled {
@@ -173,6 +186,12 @@ button:disabled {
   color: #ff9aa2;
   font-size: 13px;
   text-align: center;
+}
+
+.error-message[data-type="success"] {
+  background: rgba(65, 230, 155, 0.1);
+  border-color: rgba(65, 230, 155, 0.3);
+  color: #9dffd0;
 }
 
 @media (max-width: 480px) {

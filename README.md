@@ -93,6 +93,11 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Settings updater shows live progress, status text, and final exit state.
 - Server settings now expose per-server auto start, auto restart, wake on join, crash backup, startup delay, RAM, port, and a confirmed Fix Server action after creation.
 - Backups include minute/hour scheduling, 6-digit share-code requests, owner approval, timed access, revoke, and a separate shared-backup restore section.
+- Cross-panel backup transfer uses revocable public archive links with 256-bit random tokens, hashed token storage, expiry, ranged downloads, remote ZIP validation, and private-network import blocking.
+- Timezone selection is per account, includes `Asia/Kolkata` and `Asia/Calcutta`, and remains stable while live status polling runs.
+- Password recovery now has a dedicated `/reset.html` page, one-minute request throttling, session invalidation after reset, generic email-relay support, and first-class Resend payload support.
+- Auto-start now runs at panel boot with each server's startup delay. Unexpected exits can create a crash backup and auto-restart; operator Stop, Kill, and Restart remain intentional.
+- On Linux/systemd, Nexus-Mark launches game processes in transient cgroup scopes with RAM, task, and CPU limits. Servers receive a 90-second CPU startup burst before returning to their configured core limit.
 - Normal edition admins can see assigned panel servers by permission level; host-only templates and host token controls are hidden outside host edition.
 - Software version selects prefer the latest refreshed version for installs.
 - Starting a server can run a deterministic smart repair for missing executables before retrying.
@@ -159,9 +164,14 @@ Forgot-password OTP reset is built in. Configure a tiny email relay with:
 ```bash
 NEXUSPANEL_EMAIL_API_URL=https://your-email-api/send
 NEXUSPANEL_EMAIL_API_KEY=optional-token
+NEXUSPANEL_EMAIL_FROM=NexusPanel <panel@example.com>
 ```
 
 Without an email relay, OTPs are written to `data/password-reset-otp.log` for the VPS owner.
+
+For Resend, set `NEXUSPANEL_EMAIL_PROVIDER=resend` and use
+`NEXUSPANEL_EMAIL_API_URL=https://api.resend.com/emails`. The API key is sent as a
+Bearer token. Password recovery is available on the dedicated `/reset.html` page.
 
 Host API provisioning example:
 

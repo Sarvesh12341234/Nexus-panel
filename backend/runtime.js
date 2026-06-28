@@ -1,11 +1,14 @@
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnOptions } = require('./nexus_mark');
+const { spawnOptions, wrapCommand } = require('./nexus_mark');
+const { hostCpuCount } = require('./system_info');
 
 const processes = new Map();
 const logs = new Map();
 const players = new Map();
+const intentionalStops = new Set();
+let exitHandler = null;
 const MAX_LOG_LINES = 600;
 
 function appendLog(serverId, line) {
@@ -104,14 +107,41 @@ function startServer(server, software) {
   } catch {
     mark = null;
   }
-  const child = spawn(command, args, spawnOptions({
+  const storedProfile = mark || {};
+  const totalCpuCores = hostCpuCount();
+  const cpuCores = Math.max(1, Math.min(totalCpuCores, Number(server.cpu_cores || storedProfile.cpuCores || 1)));
+  const profile = {
+    ...storedProfile,
+    serverId: server.id,
+    cpuCores,
+    cpuQuotaPercent: cpuCores * 100,
+    startupCpuQuotaPercent: Math.min(totalCpuCores, cpuCores * 4) * 100,
+    memoryMaxMb: server.max_memory_mb || 1024,
+    pathScope: storedProfile.pathScope || 'server-root-only',
+  };
+  const wrapped = wrapCommand(command, args, profile);
+  const child = spawn(wrapped.command, wrapped.args, spawnOptions({
     cwd: root,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
-  }, mark || { cpuCores: 1, memoryMaxMb: server.max_memory_mb || 1024, pathScope: 'server-root-only' }));
+  }, profile));
 
   processes.set(server.id, child);
   child.stopCommand = software.stopCommand || 'stop';
+  child.nexusUnit = wrapped.unit;
+  if (wrapped.unit) {
+    appendLog(server.id, `[NexusPanel] Cgroup active: startup ${profile.startupCpuQuotaPercent}% CPU, then ${profile.cpuQuotaPercent}% CPU.`);
+    const throttleTimer = setTimeout(() => {
+      if (!processes.has(server.id)) return;
+      const result = spawnSync('systemctl', ['set-property', wrapped.unit, `CPUQuota=${profile.cpuQuotaPercent}%`], {
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+      if (result.status === 0) appendLog(server.id, `[NexusPanel] Startup CPU burst ended. Limit is now ${profile.cpuCores} core(s).`);
+      else appendLog(server.id, `[NexusPanel] CPU throttle update failed: ${String(result.stderr || '').trim() || 'systemctl error'}`);
+    }, 90 * 1000);
+    throttleTimer.unref();
+  }
   child.stdout.on('data', (chunk) => splitLines(server.id, chunk));
   child.stderr.on('data', (chunk) => splitLines(server.id, chunk));
   child.on('error', (error) => {
@@ -119,9 +149,14 @@ function startServer(server, software) {
     processes.delete(server.id);
   });
   child.on('exit', (code, signal) => {
+    const intentional = intentionalStops.delete(server.id);
     appendLog(server.id, `[NexusPanel] Process exited code=${code ?? 'none'} signal=${signal ?? 'none'}`);
     processes.delete(server.id);
     players.delete(server.id);
+    if (exitHandler) {
+      Promise.resolve(exitHandler({ server, software, code, signal, intentional }))
+        .catch((error) => appendLog(server.id, `[NexusPanel] Exit recovery failed: ${error.message}`));
+    }
   });
 
   return { ok: true, message: 'Server start requested.' };
@@ -131,6 +166,7 @@ function restartServer(server, software) {
   const child = processes.get(server.id);
   if (!child) return startServer(server, software);
   appendLog(server.id, '[NexusPanel] Restart requested.');
+  intentionalStops.add(server.id);
   child.stdin.write(`${child.stopCommand || 'stop'}\n`);
   const timer = setInterval(() => {
     if (!processes.has(server.id)) {
@@ -157,6 +193,7 @@ function sendCommand(serverId, command) {
 function stopServer(serverId) {
   const child = processes.get(serverId);
   if (!child) return { ok: true, message: 'Server is already offline.' };
+  intentionalStops.add(serverId);
   child.stdin.write(`${child.stopCommand || 'stop'}\n`);
   appendLog(serverId, '[NexusPanel] Sent graceful stop.');
   return { ok: true, message: 'Stop command sent.' };
@@ -165,9 +202,14 @@ function stopServer(serverId) {
 function killServer(serverId) {
   const child = processes.get(serverId);
   if (!child) return { ok: true, message: 'Server is already offline.' };
+  intentionalStops.add(serverId);
   child.kill('SIGTERM');
   appendLog(serverId, '[NexusPanel] Kill requested.');
   return { ok: true, message: 'Kill requested.' };
+}
+
+function setExitHandler(handler) {
+  exitHandler = typeof handler === 'function' ? handler : null;
 }
 
 module.exports = {
@@ -179,5 +221,6 @@ module.exports = {
   sendCommand,
   startServer,
   restartServer,
+  setExitHandler,
   stopServer,
 };

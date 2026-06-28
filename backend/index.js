@@ -1,19 +1,24 @@
 const express = require('express');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
+const dns = require('node:dns').promises;
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline/promises');
+const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
 const { db, getUserCount } = require('./db');
+const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
 const { assertInside, backupsRoot, displayPath, ensureServerDirs, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
 const { clearSoftwareVersionCache, defaultSoftware, findSoftware, pluginKindForFile, resolveDownload, softwareCatalog, softwareVersions } = require('./software');
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { profileForServer, writeProfile } = require('./nexus_mark');
-const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, startServer, stopServer } = require('./runtime');
+const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer } = require('./runtime');
 const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const {
@@ -39,6 +44,7 @@ const healthPath = path.join(dataRoot, 'panel_health.json');
 const editionPath = path.join(dataRoot, 'edition');
 const terminalSessions = new Map();
 const wakeWatchers = new Map();
+const passwordResetRequests = new Map();
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
 const PANEL_VERSION = '1.2.0';
 let updateStatus = {
@@ -146,7 +152,7 @@ function panelSettingsPayload(user = null) {
   return {
     version: PANEL_VERSION,
     terminalEnabled: settingValue('terminal_enabled', '0') === '1',
-    timeZone: settingValue('time_zone', 'UTC'),
+    timeZone: user ? getUserTimezone(user.id) : 'UTC',
     updateRepo: FIXED_UPDATE_REPO,
     edition,
     updateTag: configuredTag,
@@ -454,15 +460,26 @@ async function sendPasswordOtp(email, code) {
   const apiUrl = process.env.NEXUSPANEL_EMAIL_API_URL;
   const apiKey = process.env.NEXUSPANEL_EMAIL_API_KEY;
   if (apiUrl && globalThis.fetch) {
+    const provider = String(process.env.NEXUSPANEL_EMAIL_PROVIDER || '').toLowerCase();
+    const isResend = provider === 'resend' || apiUrl.includes('api.resend.com');
+    const from = process.env.NEXUSPANEL_EMAIL_FROM;
+    if (isResend && !from) throw new Error('NEXUSPANEL_EMAIL_FROM is required for Resend.');
+    const body = isResend
+      ? { from, to: [email], subject, text }
+      : { to: email, from: from || undefined, subject, text };
     const response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       },
-      body: JSON.stringify({ to: email, subject, text }),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
     });
-    if (!response.ok) throw new Error(`Email API failed with ${response.status}`);
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => '')).slice(0, 240);
+      throw new Error(`Email API failed with ${response.status}${detail ? `: ${detail}` : ''}`);
+    }
     return 'OTP sent by configured email API.';
   }
 
@@ -611,6 +628,44 @@ function durationMs(body, fallbackMinutes = 60, maxMinutes = 1440) {
 
 function randomSixDigitCode() {
   return String(crypto.randomInt(100000, 1000000));
+}
+
+function tokenHash(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+function isPrivateAddress(address) {
+  const value = String(address || '').toLowerCase();
+  if (net.isIPv4(value)) {
+    const [a, b] = value.split('.').map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (net.isIPv6(value)) {
+    return value === '::1' || value === '::' || value.startsWith('fc') || value.startsWith('fd')
+      || value.startsWith('fe8') || value.startsWith('fe9') || value.startsWith('fea') || value.startsWith('feb');
+  }
+  return true;
+}
+
+async function validatePublicBackupUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || ''));
+  } catch {
+    throw new Error('Enter a valid public backup URL.');
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('Only public HTTP or HTTPS backup URLs are allowed.');
+  }
+  if (!url.pathname.includes('/api/public/backups/')) {
+    throw new Error('This is not a NexusPanel public backup URL.');
+  }
+  const addresses = await dns.lookup(url.hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some((entry) => isPrivateAddress(entry.address))) {
+    throw new Error('Backup imports cannot connect to local or private network addresses.');
+  }
+  return url;
 }
 
 function ensureBackupShareCode(server, body = {}) {
@@ -1063,24 +1118,52 @@ async function createServerBackup(server, reason = 'manual') {
   const root = ensureServerDirs(server);
   const backupsDir = assertInside(backupsRoot, path.join(backupsRoot, String(server.id)));
   await fs.promises.mkdir(backupsDir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const archiveName = `${server.name.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'server'}-${reason}-${stamp}.zip`;
+
+  // ===== NEW: 12-HOUR FORMAT FOR FILENAME =====
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+
+  let hours = now.getHours();
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12 || 12; // Convert to 12-hour format
+  const hourStr = String(hours).padStart(2, '0');
+
+  // Format: server-name-backup-reason-day-month-year || hour-minute-AM/PM
+  const dateStr = `${day}-${month}-${year}`;
+  const timeStr = `${hourStr}-${minutes}-${ampm}`;
+
+  const serverName = server.name
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase() || 'server';
+
+  const archiveName = `${serverName}-backup-${reason}-${dateStr}--${timeStr}.zip`;
   const archivePath = path.join(backupsDir, archiveName);
+
+  // ===== EXISTING BACKUP LOGIC =====
   const excludedTopLevel = new Set(['archives', 'backup', 'backups', 'backupfolder', 'software', 'runtime']);
   const entries = (await fs.promises.readdir(root, { withFileTypes: true }))
     .filter((entry) => !excludedTopLevel.has(entry.name.toLowerCase()))
     .filter((entry) => !entry.isFile() || !entry.name.toLowerCase().endsWith('.zip'))
     .filter((entry) => !entry.name.endsWith('.download') && !entry.name.endsWith('.uploading'))
     .map((entry) => entry.name);
+
   await createZip(root, entries, archivePath);
+
   const retention = Math.max(1, Number(server.backup_retention) || 4);
   const backups = (await fs.promises.readdir(backupsDir, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && entry.name.endsWith('.zip'))
     .map((entry) => ({ name: entry.name, path: path.join(backupsDir, entry.name), mtime: fs.statSync(path.join(backupsDir, entry.name)).mtimeMs }))
     .sort((a, b) => b.mtime - a.mtime);
+
   for (const old of backups.slice(retention)) await fs.promises.rm(old.path, { force: true });
+
   db.prepare('UPDATE servers SET last_backup_at = ? WHERE id = ?').run(Date.now(), server.id);
   appendLog(server.id, `[NexusPanel] Backup created: ${archiveName}`);
+
   return { name: archiveName, path: archiveName, size: fs.statSync(archivePath).size };
 }
 
@@ -1190,6 +1273,75 @@ async function repairMissingExecutable(server, software) {
   `).run(targetPath, `Repaired missing executable from ${software.name} ${download.version || version}`, server.id);
   appendLog(server.id, `[NexusPanel] Repaired missing executable: ${displayPath(targetPath)}`);
   return { repaired: true, path: targetPath, message: `Repaired executable at ${displayPath(targetPath)}` };
+}
+
+async function runServerRepair(server, software) {
+  const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  const actions = [];
+  const warnings = [];
+  const checks = [];
+
+  const repair = await repairMissingExecutable(server, software);
+  actions.push(repair.message);
+  checks.push({ name: 'Executable', ok: true, detail: displayPath(repair.path) });
+
+  const queue = [root];
+  const staleTransfers = [];
+  let scanned = 0;
+  while (queue.length && scanned < 10000) {
+    const directory = queue.shift();
+    const entries = await fs.promises.readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      scanned += 1;
+      const absolute = assertInside(root, path.join(directory, entry.name));
+      if (entry.isDirectory()) {
+        if (!['backups', 'archives'].includes(entry.name.toLowerCase())) queue.push(absolute);
+      } else if (/\.(?:download|uploading)$/i.test(entry.name)) {
+        const stats = await fs.promises.stat(absolute).catch(() => null);
+        if (stats && Date.now() - stats.mtimeMs > 60 * 60 * 1000) staleTransfers.push(absolute);
+      }
+      if (scanned >= 10000) break;
+    }
+  }
+  for (const file of staleTransfers) await fs.promises.rm(file, { force: true });
+  actions.push(`Removed ${staleTransfers.length} stale partial transfer(s).`);
+  checks.push({ name: 'Path boundary', ok: true, detail: displayPath(root) });
+
+  const likelyWorlds = server.type === 'java'
+    ? [path.join(root, 'world', 'level.dat')]
+    : [path.join(root, 'worlds')];
+  const worldFound = likelyWorlds.some((candidate) => fs.existsSync(candidate));
+  checks.push({ name: 'World data', ok: worldFound, detail: worldFound ? 'World storage detected.' : 'No standard world data detected yet.' });
+  if (!worldFound) {
+    const backups = await backupRows(server);
+    warnings.push(backups.length
+      ? `World data was not detected. ${backups.length} backup(s) are available for a confirmed restore.`
+      : 'World data was not detected and no backup is available.');
+  }
+
+  const profile = writeProfile(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), root, parseJsonObject(server.nexu_payload));
+  db.prepare("UPDATE servers SET status = 'offline', nexus_mark_profile = ? WHERE id = ?")
+    .run(JSON.stringify(profile), server.id);
+  actions.push('Rebuilt the Nexus-Mark resource profile and cleared stale runtime status.');
+
+  if (typeof fs.statfsSync === 'function') {
+    try {
+      const disk = fs.statfsSync(root);
+      const freeBytes = Number(disk.bavail) * Number(disk.bsize);
+      checks.push({ name: 'Free disk', ok: freeBytes >= 1024 * 1024 * 1024, detail: `${Math.round(freeBytes / 1024 / 1024)} MB free` });
+      if (freeBytes < 1024 * 1024 * 1024) warnings.push('Less than 1 GB of disk space is free.');
+    } catch (error) {
+      warnings.push(`Disk check failed: ${error.message}`);
+    }
+  }
+
+  return {
+    repair,
+    checks,
+    actions,
+    warnings,
+    summary: `${checks.filter((check) => check.ok).length}/${checks.length} checks passed, ${actions.length} repair action(s), ${warnings.length} warning(s).`,
+  };
 }
 
 async function restoreServerBackup(server, backupName) {
@@ -1390,7 +1542,7 @@ app.get('/api/overview', (req, res) => {
 
 app.get('/api/user/timezone', requireAuth, (req, res) => {
   try {
-    const timezone = settingValue('time_zone', 'UTC');
+    const timezone = getUserTimezone(req.user.id);
     res.json({ timezone });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1407,7 +1559,7 @@ app.post('/api/user/timezone', requireAuth, (req, res) => {
     } catch {
       return res.status(400).json({ error: 'Invalid timezone' });
     }
-    setSettingValue('time_zone', timezone);
+    setUserTimezone(req.user.id, timezone);
     res.json({ success: true, timezone });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1416,7 +1568,7 @@ app.post('/api/user/timezone', requireAuth, (req, res) => {
 
 app.get('/api/timezones', requireAuth, (req, res) => {
   try {
-    const timezones = Intl.supportedValuesOf('timeZone');
+    const timezones = [...new Set([...getAllTimezones(), 'Asia/Kolkata', 'Asia/Calcutta'])].sort();
     res.json({ timezones });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1512,6 +1664,12 @@ app.post('/api/password/forgot', asyncRoute(async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
   if (!email.includes('@')) return res.status(400).json({ error: 'Enter a valid email.' });
+  const requestKey = `${clientIp(req)}:${email}`;
+  const lastRequest = passwordResetRequests.get(requestKey) || 0;
+  if (Date.now() - lastRequest < 60 * 1000) {
+    return res.status(429).json({ error: 'Wait one minute before requesting another code.' });
+  }
+  passwordResetRequests.set(requestKey, Date.now());
   if (user) {
     const code = String(crypto.randomInt(100000, 1000000));
     db.prepare(`
@@ -1546,6 +1704,7 @@ app.post('/api/password/reset', (req, res) => {
     return res.status(401).json({ error: 'Invalid OTP.' });
   }
   db.prepare('UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?').run(hashPassword(password), email);
+  db.prepare('DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE email = ?)').run(email);
   db.prepare('DELETE FROM password_reset_otps WHERE email = ?').run(email);
   res.json({ ok: true, message: 'Password reset. You can log in now.' });
 });
@@ -1702,11 +1861,11 @@ app.get('/api/servers', requireAuth, (req, res) => {
 app.get('/api/servers/:id', requireAuth, (req, res) => {
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.params.id));
   if (!server) return res.status(404).json({ error: 'Server not found.' });
-  
+
   const minutes = backupIntervalMinutesFrom(server);
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
-  
+
   res.json({
     ...serverPayload(server, req),
     backup_interval_hours: hours,
@@ -1767,8 +1926,7 @@ app.get('/api/servers/:id/nexus-mark', requireAccess(permissions.MANAGE_SERVERS)
 app.put('/api/settings', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
   setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
-  const timeZone = String(req.body.timeZone || 'UTC').replace(/[^A-Za-z0-9_+\-\/]/g, '').slice(0, 80) || 'UTC';
-  setSettingValue('time_zone', timeZone);
+  if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const updateTag = String(req.body.updateTargetTag || req.body.updateTag || panelSettingsPayload(req.user).updateTag).trim();
   if (/^(normal|host)-v\d+\.\d+(?:\.\d+)?$/.test(updateTag)) setSettingValue('update_target_tag', updateTag);
   setSettingValue('update_repo', FIXED_UPDATE_REPO);
@@ -1806,9 +1964,12 @@ app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), async
     const text = String(chunk);
     output = `${output}${text}`.slice(-12000);
     const lastLine = text.trim().split(/\r?\n/).filter(Boolean).at(-1);
+    const reportedProgress = [...text.matchAll(/\[(\d{1,3})%\]/g)].at(-1);
     updateStatus = {
       ...updateStatus,
-      progress: Math.min(95, Math.max(updateStatus.progress + 5, updateStatus.progress)),
+      progress: reportedProgress
+        ? Math.max(0, Math.min(100, Number(reportedProgress[1])))
+        : Math.min(95, updateStatus.progress + 2),
       message: lastLine ? lastLine.slice(-220) : updateStatus.message,
     };
   };
@@ -1870,7 +2031,7 @@ function closeWakeWatcher(serverId) {
 }
 
 function refreshWakeWatchers() {
-  const servers = db.prepare('SELECT * FROM servers WHERE wake_on_join = 1').all();
+  const servers = db.prepare('SELECT * FROM servers WHERE wake_on_join = 1 AND auto_start = 0').all();
   const wanted = new Set();
   for (const server of servers) {
     wanted.add(server.id);
@@ -1894,7 +2055,10 @@ function refreshWakeWatchers() {
     if (protocol === 'udp') {
       const socket = require('node:dgram').createSocket('udp4');
       socket.once('message', start);
-      socket.on('error', (error) => appendLog(server.id, `[NexusPanel] Wake UDP listener failed: ${error.message}`));
+      socket.on('error', (error) => {
+        appendLog(server.id, `[NexusPanel] Wake UDP listener failed: ${error.message}`);
+        closeWakeWatcher(server.id);
+      });
       socket.bind(server.port, '0.0.0.0');
       wakeWatchers.set(server.id, socket);
     } else {
@@ -1902,7 +2066,10 @@ function refreshWakeWatchers() {
         socket.destroy();
         start();
       });
-      listener.on('error', (error) => appendLog(server.id, `[NexusPanel] Wake TCP listener failed: ${error.message}`));
+      listener.on('error', (error) => {
+        appendLog(server.id, `[NexusPanel] Wake TCP listener failed: ${error.message}`);
+        closeWakeWatcher(server.id);
+      });
       listener.listen(server.port, '0.0.0.0');
       wakeWatchers.set(server.id, listener);
     }
@@ -2537,9 +2704,9 @@ app.post('/api/servers/:id/fix', requireAccess(permissions.MANAGE_SERVERS), asyn
   if (runtimeStatus(server.id) === 'online') return res.status(409).json({ error: 'Stop the server before running Fix Server.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This server has no repairable software runtime.' });
-  const repair = await repairMissingExecutable(server, software);
-  appendLog(server.id, `[NexusPanel] Fix Server completed: ${repair.message}`);
-  res.json({ ok: true, repair, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
+  const report = await runServerRepair(server, software);
+  appendLog(server.id, `[NexusPanel] Repair & Diagnose completed: ${report.summary}`);
+  res.json({ ok: true, ...report, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
 }));
 
 app.post('/api/servers/:id/eula', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
@@ -2666,6 +2833,78 @@ app.get('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), asy
     });
   }
   res.json({ backups: await backupRows(server), canManageShare: canShareOwner, shareCode: code || null, shareRequests: incoming, sharedBackups });
+}));
+
+app.post('/api/servers/:id/backups/public-link', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id);
+  if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the server owner can publish backup links.' });
+  const expiresAt = Date.now() + durationMs(req.body || {}, 60, 24 * 60);
+  const token = crypto.randomBytes(32).toString('base64url');
+  db.prepare('UPDATE backup_public_links SET revoked_at = ? WHERE server_id = ? AND revoked_at = 0').run(Date.now(), server.id);
+  db.prepare('INSERT INTO backup_public_links (server_id, token_hash, expires_at) VALUES (?, ?, ?)')
+    .run(server.id, tokenHash(token), expiresAt);
+  const configuredBase = String(process.env.NEXUSPANEL_PUBLIC_URL || '').replace(/\/+$/, '');
+  const base = configuredBase || `${req.protocol}://${req.get('host')}`;
+  const archives = (await backupRows(server)).map((backup) => ({
+    ...backup,
+    url: `${base}/api/public/backups/${encodeURIComponent(token)}/${encodeURIComponent(backup.name)}`,
+  }));
+  res.status(201).json({ expiresAt, archives });
+}));
+
+app.delete('/api/servers/:id/backups/public-link', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the server owner can revoke backup links.' });
+  db.prepare('UPDATE backup_public_links SET revoked_at = ? WHERE server_id = ? AND revoked_at = 0').run(Date.now(), server.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/public/backups/:token/:name', asyncRoute(async (req, res) => {
+  const share = db.prepare(`
+    SELECT * FROM backup_public_links
+    WHERE token_hash = ? AND revoked_at = 0 AND expires_at > ?
+  `).get(tokenHash(req.params.token), Date.now());
+  if (!share) return res.status(404).json({ error: 'Public backup link is invalid, expired, or revoked.' });
+  const name = String(req.params.name || '').replaceAll('\\', '/');
+  if (!name.endsWith('.zip') || name.includes('/')) return res.status(400).json({ error: 'Choose a backup archive.' });
+  const target = assertInside(backupsRoot, path.join(backupsRoot, String(share.server_id), name));
+  res.setHeader('Cache-Control', 'private, no-store');
+  return streamDownload(req, res, target, name);
+}));
+
+app.post('/api/servers/:id/backups/import-url', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const url = await validatePublicBackupUrl(req.body.url);
+  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(30 * 60 * 1000) });
+  if (!response.ok || !response.body) throw new Error(`Remote panel returned HTTP ${response.status}.`);
+  const maxBytes = Math.max(1, Number(process.env.NEXUSPANEL_MAX_REMOTE_BACKUP_GB || 20)) * 1024 * 1024 * 1024;
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (contentLength > maxBytes) throw new Error('Remote backup is larger than the configured import limit.');
+  const rawName = decodeURIComponent(url.pathname.split('/').pop() || 'shared-backup.zip');
+  let name = safeAttachmentName(rawName).endsWith('.zip') ? safeAttachmentName(rawName) : `${safeAttachmentName(rawName)}.zip`;
+  const backupsDir = assertInside(backupsRoot, path.join(backupsRoot, String(server.id)));
+  await fs.promises.mkdir(backupsDir, { recursive: true });
+  if (fs.existsSync(path.join(backupsDir, name))) {
+    name = `${name.slice(0, -4)}-import-${Date.now()}.zip`;
+  }
+  const target = assertInside(backupsDir, path.join(backupsDir, name));
+  const temporary = `${target}.${crypto.randomBytes(6).toString('hex')}.download`;
+  let received = 0;
+  const source = Readable.fromWeb(response.body);
+  source.on('data', (chunk) => {
+    received += chunk.length;
+    if (received > maxBytes) source.destroy(new Error('Remote backup exceeded the configured import limit.'));
+  });
+  try {
+    await pipeline(source, fs.createWriteStream(temporary, { flags: 'wx', mode: 0o600 }));
+    if (!isZipFile(temporary)) throw new Error('Remote file is not a valid ZIP backup.');
+    await fs.promises.rename(temporary, target);
+  } catch (error) {
+    await fs.promises.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+  appendLog(server.id, `[NexusPanel] Imported public backup: ${name}`);
+  res.status(201).json({ ok: true, name, size: received, backups: await backupRows(server) });
 }));
 
 app.post('/api/servers/:id/backups/share-code', requireAccess(permissions.MANAGE_FILES), (req, res) => {
@@ -3110,6 +3349,46 @@ function startSchedulers() {
   runHealthCheck(false).catch(() => {});
 }
 
+function startConfiguredServers() {
+  const servers = db.prepare('SELECT * FROM servers WHERE auto_start = 1').all();
+  for (const server of servers) {
+    const delayMs = Math.max(0, Number(server.startup_delay_sec || 0)) * 1000;
+    const timer = setTimeout(() => {
+      try {
+        if (runtimeStatus(server.id) === 'online') return;
+        if (!hasJavaEula(server)) throw new Error('Minecraft EULA has not been accepted.');
+        const software = softwareForServer(server);
+        if (!software) throw new Error('No installed runtime is configured.');
+        startServer(resolveInstalledExecutable(server, software), software);
+        appendLog(server.id, '[NexusPanel] Auto-start completed.');
+      } catch (error) {
+        appendLog(server.id, `[NexusPanel] Auto-start failed: ${error.message}`);
+      }
+    }, delayMs);
+    timer.unref();
+  }
+}
+
+setExitHandler(async ({ server, software, intentional }) => {
+  if (intentional) return;
+  const current = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
+  if (!current) return;
+  if (current.crash_backup) {
+    await createServerBackup(current, 'crash')
+      .catch((error) => appendLog(current.id, `[NexusPanel] Crash backup failed: ${error.message}`));
+  }
+  if (!current.auto_restart) return;
+  appendLog(current.id, '[NexusPanel] Unexpected exit detected. Restarting in 5 seconds...');
+  const timer = setTimeout(() => {
+    try {
+      if (runtimeStatus(current.id) === 'offline') startServer(resolveInstalledExecutable(current, software), software);
+    } catch (error) {
+      appendLog(current.id, `[NexusPanel] Auto-restart failed: ${error.message}`);
+    }
+  }, 5000);
+  timer.unref();
+});
+
 async function ensureInitialOwner() {
   if (getUserCount() > 0) return;
 
@@ -3157,6 +3436,7 @@ async function start() {
   const recovered = recoverServerFolders();
   if (recovered.length) console.log(`Recovered ${recovered.length} server folder(s) into the database.`);
   startSchedulers();
+  startConfiguredServers();
   refreshWakeWatchers();
   setInterval(refreshWakeWatchers, 5000).unref();
   app.listen(port, () => {
