@@ -17,6 +17,12 @@ Linux/Ubuntu one-command installer:
 curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v1.2.0/nexuspanel-normal-v1.2.0-linux-installer.sh | sudo bash
 ```
 
+Host edition:
+
+```bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/host-v1.2.0/nexuspanel-host-v1.2.0-linux-installer.sh | sudo bash
+```
+
 ## VPS Background Service
 
 On Linux VPS hosts with systemd, `npm start` installs/starts NexusPanel as a background system service instead of keeping it attached to your terminal. The service restarts automatically if the panel crashes and starts again after the VPS reboots.
