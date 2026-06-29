@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Saved precision positions switch live between desktop and mobile breakpoints during resize or orientation changes.
 - Layout reordering preserves untouched form-control slots, so moving boxes cannot pull submit buttons or inputs into unintended positions.
 - Alpha UI editing now stays responsive on desktop and mobile without page overflow.
 - Hidden switch inputs no longer expand the Settings page beyond the viewport.
@@ -25,6 +26,8 @@
 
 ### Added
 
+- Bounded Free placement with exact X/Y inputs, 1px keyboard nudging, Shift+Arrow 10px movement, 1-16px mouse snapping, layer controls, and per-breakpoint coordinates.
+- A Flow/Free switch keeps responsive order editing available alongside cursor-precise placement.
 - Advanced Boxes mode for moving and resizing complete cards, forms, status blocks, field groups, and tool panels independently from Buttons mode.
 - Nested drop-zone matching lets large parent panels move correctly even when the pointer is over one of their child cards.
 - Free drag placement for panel command buttons and navigation, per-button widths, a floating editor toolbar, and permanent UI layout codes.

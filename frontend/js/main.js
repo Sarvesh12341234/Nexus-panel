@@ -102,6 +102,8 @@ let alphaDraft = structuredClone(uiPreferences);
 const layoutEditor = {
   active: false,
   mode: 'boxes',
+  precision: true,
+  snap: 1,
   dragging: null,
   pointerId: null,
   selectedKey: '',
@@ -166,8 +168,10 @@ function loadUiPreferences() {
     actionPriority: ['start-server', 'stop-server', 'restart-server', 'open-console', 'file-upload', 'manual-backup', 'fix-server', 'kill-server', 'delete-server'],
     buttonLayout: {},
     buttonWidths: {},
+    buttonPositions: {},
     componentLayout: {},
     componentWidths: {},
+    componentPositions: {},
     compact: false,
     reducedMotion: false,
     liveRefresh: true,
@@ -208,8 +212,10 @@ function loadUiPreferences() {
       actionPriority: Array.isArray(saved.actionPriority) ? saved.actionPriority : defaults.actionPriority,
       buttonLayout: saved.buttonLayout && typeof saved.buttonLayout === 'object' ? saved.buttonLayout : {},
       buttonWidths: saved.buttonWidths && typeof saved.buttonWidths === 'object' ? saved.buttonWidths : {},
+      buttonPositions: saved.buttonPositions && typeof saved.buttonPositions === 'object' ? saved.buttonPositions : {},
       componentLayout: saved.componentLayout && typeof saved.componentLayout === 'object' ? saved.componentLayout : {},
       componentWidths: saved.componentWidths && typeof saved.componentWidths === 'object' ? saved.componentWidths : {},
+      componentPositions: saved.componentPositions && typeof saved.componentPositions === 'object' ? saved.componentPositions : {},
     };
   } catch {
     return defaults;
@@ -340,10 +346,12 @@ function applyButtonLayout(preferences = uiPreferences) {
       reorderInExistingSlots(region, buttons, desired);
     }
     for (const button of buttons) {
-      const width = preferences.buttonWidths?.[`${region.dataset.uiRegion}/${button.dataset.uiButtonKey}`] || 'auto';
+      const fullKey = `${region.dataset.uiRegion}/${button.dataset.uiButtonKey}`;
+      const width = preferences.buttonWidths?.[fullKey] || 'auto';
       button.dataset.uiWidth = width;
       if (preferences.buttonLayout?.[region.dataset.uiRegion]) button.style.order = '';
       button.draggable = layoutEditor.active;
+      applyStoredPosition(button, preferences.buttonPositions?.[fullKey]);
     }
   }
 }
@@ -484,6 +492,7 @@ function applyComponentLayout(preferences = uiPreferences) {
     for (const component of components) {
       const fullKey = `${zoneKey}/${component.dataset.uiComponentKey}`;
       component.dataset.uiComponentWidth = preferences.componentWidths?.[fullKey] || 'auto';
+      applyStoredPosition(component, preferences.componentPositions?.[fullKey]);
     }
   }
 }
@@ -497,6 +506,109 @@ function captureComponentLayout() {
       .map((component) => component.dataset.uiComponentKey);
   }
   alphaDraft = { ...alphaDraft, componentLayout };
+}
+
+function positionBreakpoint() {
+  return window.innerWidth <= 760 ? 'mobile' : 'desktop';
+}
+
+function cleanPosition(position) {
+  return {
+    x: Number.isFinite(Number(position?.x)) ? Math.round(Number(position.x)) : 0,
+    y: Number.isFinite(Number(position?.y)) ? Math.round(Number(position.y)) : 0,
+    z: Number.isFinite(Number(position?.z)) ? Math.max(0, Math.min(50, Math.round(Number(position.z)))) : 0,
+  };
+}
+
+function applyStoredPosition(element, positions) {
+  const position = cleanPosition(positions?.[positionBreakpoint()]);
+  element.style.setProperty('--ui-position-x', `${position.x}px`);
+  element.style.setProperty('--ui-position-y', `${position.y}px`);
+  element.style.setProperty('--ui-position-z', String(position.z));
+  element.dataset.uiPositioned = position.x || position.y || position.z ? 'true' : 'false';
+}
+
+function selectedPosition() {
+  if (!layoutEditor.selectedKey || !layoutEditor.selectedType) return cleanPosition();
+  const positions = layoutEditor.selectedType === 'component'
+    ? alphaDraft.componentPositions
+    : alphaDraft.buttonPositions;
+  return cleanPosition(positions?.[layoutEditor.selectedKey]?.[positionBreakpoint()]);
+}
+
+function selectedLayoutItem() {
+  if (!layoutEditor.selectedKey || !layoutEditor.selectedType) return null;
+  if (layoutEditor.selectedType === 'component') {
+    return [...document.querySelectorAll('[data-ui-component-key]')].find((component) => {
+      const zone = component.parentElement?.closest('[data-ui-component-zone]');
+      return zone && `${zone.dataset.uiComponentZone}/${component.dataset.uiComponentKey}` === layoutEditor.selectedKey;
+    }) || null;
+  }
+  return [...document.querySelectorAll('[data-ui-region] [data-ui-button-key]')].find((button) => (
+    `${button.closest('[data-ui-region]').dataset.uiRegion}/${button.dataset.uiButtonKey}` === layoutEditor.selectedKey
+  )) || null;
+}
+
+function selectedLayoutZone(item = selectedLayoutItem()) {
+  if (!item) return null;
+  return layoutEditor.selectedType === 'component'
+    ? item.parentElement?.closest('[data-ui-component-zone]')
+    : item.closest('[data-ui-region]');
+}
+
+function constrainPosition(item, zone, desired, current = selectedPosition()) {
+  if (!item || !zone) return cleanPosition(desired);
+  const rect = item.getBoundingClientRect();
+  const zoneRect = zone.getBoundingClientRect();
+  const origin = {
+    left: rect.left - current.x,
+    right: rect.right - current.x,
+    top: rect.top - current.y,
+    bottom: rect.bottom - current.y,
+  };
+  let minX = Math.ceil(zoneRect.left - origin.left);
+  let maxX = Math.floor(zoneRect.right - origin.right);
+  let minY = Math.ceil(zoneRect.top - origin.top);
+  let maxY = Math.floor(zoneRect.bottom - origin.bottom);
+  if (minX > maxX) minX = maxX = 0;
+  if (minY > maxY) minY = maxY = 0;
+  return {
+    x: Math.max(minX, Math.min(maxX, Math.round(Number(desired.x) || 0))),
+    y: Math.max(minY, Math.min(maxY, Math.round(Number(desired.y) || 0))),
+    z: Math.max(0, Math.min(50, Math.round(Number(desired.z) || 0))),
+  };
+}
+
+function updateSelectedPosition(nextPosition, { constrain = true } = {}) {
+  const item = selectedLayoutItem();
+  const zone = selectedLayoutZone(item);
+  if (!item || !zone) return null;
+  const current = selectedPosition();
+  const next = constrain ? constrainPosition(item, zone, nextPosition, current) : cleanPosition(nextPosition);
+  const storeKey = layoutEditor.selectedType === 'component' ? 'componentPositions' : 'buttonPositions';
+  const store = alphaDraft[storeKey] || {};
+  alphaDraft = {
+    ...alphaDraft,
+    [storeKey]: {
+      ...store,
+      [layoutEditor.selectedKey]: {
+        ...(store[layoutEditor.selectedKey] || {}),
+        [positionBreakpoint()]: next,
+      },
+    },
+  };
+  applyStoredPosition(item, alphaDraft[storeKey][layoutEditor.selectedKey]);
+  updatePrecisionControls(next);
+  return next;
+}
+
+function updatePrecisionControls(position = selectedPosition()) {
+  const bar = document.querySelector('#layoutEditorBar');
+  if (!bar) return;
+  const x = bar.querySelector('[data-layout-coordinate="x"]');
+  const y = bar.querySelector('[data-layout-coordinate="y"]');
+  if (x) x.value = position.x;
+  if (y) y.value = position.y;
 }
 
 function encodeLayoutCode(preferences = uiPreferences) {
@@ -520,11 +632,23 @@ function renderLayoutEditorBar() {
   bar.id = 'layoutEditorBar';
   bar.className = 'layout-editor-bar';
   bar.setAttribute('aria-label', 'UI layout editor');
+  const position = selectedPosition();
   bar.innerHTML = `
     <strong>UI Editor</strong>
-    <span>${layoutEditor.mode === 'boxes' ? 'Drag boxes, cards, and panels.' : 'Drag buttons inside their functional area.'} Select one to change its width.</span>
+    <span>${layoutEditor.precision ? 'Free move: hold and place precisely inside the highlighted container.' : 'Flow move: drag to swap item order.'}</span>
     <button type="button" data-layout-command="mode-boxes" class="${layoutEditor.mode === 'boxes' ? '' : 'secondary'}" title="Move cards and panels">Boxes</button>
     <button type="button" data-layout-command="mode-buttons" class="${layoutEditor.mode === 'buttons' ? '' : 'secondary'}" title="Move command buttons">Buttons</button>
+    <button type="button" data-layout-command="move-free" class="${layoutEditor.precision ? '' : 'secondary'}" title="Place items at exact coordinates">Free</button>
+    <button type="button" data-layout-command="move-flow" class="${layoutEditor.precision ? 'secondary' : ''}" title="Reorder items in responsive flow">Flow</button>
+    <label class="precision-coordinate" title="Horizontal offset">X <input type="number" step="1" value="${position.x}" data-layout-coordinate="x"></label>
+    <label class="precision-coordinate" title="Vertical offset">Y <input type="number" step="1" value="${position.y}" data-layout-coordinate="y"></label>
+    <label class="precision-snap" title="Mouse movement snap">Snap
+      <select data-layout-snap>
+        ${[1, 2, 4, 8, 16].map((value) => `<option value="${value}" ${layoutEditor.snap === value ? 'selected' : ''}>${value}px</option>`).join('')}
+      </select>
+    </label>
+    <button type="button" data-layout-command="front" title="Bring selected item above nearby items">Front</button>
+    <button type="button" data-layout-command="reset-position" class="secondary" title="Reset selected item coordinates">Reset Pos</button>
     <button type="button" data-layout-command="width" title="Cycle selected box or button width">Width</button>
     <button type="button" data-layout-command="undo" title="Undo last saved layout">Undo</button>
     <button type="button" data-layout-command="redo" title="Redo saved layout">Redo</button>
@@ -543,6 +667,7 @@ function setLayoutEditor(active) {
   layoutEditor.selectedType = '';
   document.body.dataset.uiEditing = layoutEditor.active ? 'true' : 'false';
   document.body.dataset.uiEditMode = layoutEditor.mode;
+  document.body.dataset.uiMoveMode = layoutEditor.precision ? 'free' : 'flow';
   applyUiPreferences(layoutEditor.active ? alphaDraft : uiPreferences);
   renderLayoutEditorBar();
   if (layoutEditor.active) showToast('UI Editor active. Drag highlighted boxes or switch to Buttons mode.');
@@ -1502,7 +1627,7 @@ function renderSettings() {
     </details>` : ''}
     <details class="nexu-details alpha-lab" open>
       <summary>Alpha UI studio</summary>
-      <p class="help-text">The full layout editor has separate Boxes and Buttons modes. Boxes moves cards, forms, status blocks, field groups, and tool panels without moving the outer panel shell.</p>
+      <p class="help-text">Boxes and Buttons choose what to edit. Free mode gives bounded X/Y placement, 1px arrow-key nudging, snap control, and independent desktop/mobile coordinates; Flow mode reorders the responsive layout.</p>
       <form id="alphaUiForm">
         <div class="alpha-control-grid">
           <label>Button shape <select data-alpha-key="buttonShape">${[
@@ -2500,6 +2625,8 @@ document.addEventListener('pointerdown', (event) => {
   layoutEditor.selectedKey = type === 'component'
     ? `${zone.dataset.uiComponentZone}/${item.dataset.uiComponentKey}`
     : `${zone.dataset.uiRegion}/${item.dataset.uiButtonKey}`;
+  layoutEditor.dragging.basePosition = selectedPosition();
+  updatePrecisionControls(layoutEditor.dragging.basePosition);
   item.setPointerCapture?.(event.pointerId);
 }, true);
 
@@ -2509,6 +2636,17 @@ document.addEventListener('pointermove', (event) => {
   if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
   drag.moved = true;
   drag.item.classList.add('is-layout-dragging');
+  if (layoutEditor.precision) {
+    const snap = Math.max(1, Number(layoutEditor.snap) || 1);
+    const next = {
+      x: drag.basePosition.x + Math.round((event.clientX - drag.startX) / snap) * snap,
+      y: drag.basePosition.y + Math.round((event.clientY - drag.startY) / snap) * snap,
+      z: drag.basePosition.z,
+    };
+    updateSelectedPosition(next);
+    event.preventDefault();
+    return;
+  }
   const selector = drag.type === 'component' ? '[data-ui-component-key]' : '[data-ui-button-key]';
   let target = document.elementFromPoint(event.clientX, event.clientY);
   while (target && target !== document.body) {
@@ -2533,12 +2671,18 @@ document.addEventListener('pointerup', (event) => {
   if (!drag || event.pointerId !== layoutEditor.pointerId) return;
   drag.item.classList.remove('is-layout-dragging');
   if (drag.moved) {
-    if (drag.type === 'component') captureComponentLayout();
-    else captureButtonLayout();
-    showToast(`${drag.type === 'component' ? 'Box' : 'Button'} position updated in the layout draft.`);
+    if (layoutEditor.precision) {
+      const position = selectedPosition();
+      showToast(`${drag.type === 'component' ? 'Box' : 'Button'} positioned at X ${position.x}, Y ${position.y}.`);
+    } else {
+      if (drag.type === 'component') captureComponentLayout();
+      else captureButtonLayout();
+      showToast(`${drag.type === 'component' ? 'Box' : 'Button'} order updated in the layout draft.`);
+    }
   } else {
     document.querySelectorAll('.is-layout-selected').forEach((item) => item.classList.remove('is-layout-selected'));
     drag.item.classList.add('is-layout-selected');
+    updatePrecisionControls();
   }
   layoutEditor.dragging = null;
   layoutEditor.pointerId = null;
@@ -2565,6 +2709,26 @@ document.addEventListener('click', async (event) => {
     document.querySelectorAll('.is-layout-selected').forEach((item) => item.classList.remove('is-layout-selected'));
     renderLayoutEditorBar();
     showToast(`${layoutEditor.mode === 'boxes' ? 'Box' : 'Button'} placement mode active.`);
+    return;
+  }
+  if (command === 'move-free' || command === 'move-flow') {
+    layoutEditor.precision = command === 'move-free';
+    document.body.dataset.uiMoveMode = layoutEditor.precision ? 'free' : 'flow';
+    renderLayoutEditorBar();
+    showToast(layoutEditor.precision ? 'Free move active. Drag or use X/Y and arrow keys.' : 'Flow move active. Drag to reorder items.');
+    return;
+  }
+  if (command === 'reset-position') {
+    const position = updateSelectedPosition({ x: 0, y: 0, z: 0 }, { constrain: false });
+    if (!position) return showToast('Select a box or button first.');
+    showToast('Position reset.');
+    return;
+  }
+  if (command === 'front') {
+    const current = selectedPosition();
+    const position = updateSelectedPosition({ ...current, z: Math.min(50, current.z + 1) });
+    if (!position) return showToast('Select a box or button first.');
+    showToast(`Layer ${position.z}.`);
     return;
   }
   if (command === 'save') {
@@ -2634,6 +2798,50 @@ document.addEventListener('click', async (event) => {
     selected.classList.add('is-layout-selected');
     showToast(`${isComponent ? 'Box' : 'Button'} width: ${next}.`);
   }
+});
+
+document.addEventListener('input', (event) => {
+  const coordinate = event.target.closest('[data-layout-coordinate]')?.dataset.layoutCoordinate;
+  if (!coordinate || !layoutEditor.active) return;
+  const current = selectedPosition();
+  const next = { ...current, [coordinate]: Number(event.target.value) || 0 };
+  if (!updateSelectedPosition(next)) showToast('Select a box or button first.');
+});
+
+document.addEventListener('change', (event) => {
+  if (!event.target.matches('[data-layout-snap]')) return;
+  layoutEditor.snap = Math.max(1, Number(event.target.value) || 1);
+  showToast(`Mouse snap set to ${layoutEditor.snap}px.`);
+});
+
+document.addEventListener('keydown', (event) => {
+  if (
+    !layoutEditor.active
+    || !layoutEditor.precision
+    || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)
+    || event.target.matches('input, select, textarea')
+  ) return;
+  if (!selectedLayoutItem()) return;
+  event.preventDefault();
+  const step = event.shiftKey ? 10 : 1;
+  const current = selectedPosition();
+  const next = { ...current };
+  if (event.key === 'ArrowLeft') next.x -= step;
+  if (event.key === 'ArrowRight') next.x += step;
+  if (event.key === 'ArrowUp') next.y -= step;
+  if (event.key === 'ArrowDown') next.y += step;
+  updateSelectedPosition(next);
+});
+
+let layoutResizeFrame = 0;
+window.addEventListener('resize', () => {
+  window.cancelAnimationFrame(layoutResizeFrame);
+  layoutResizeFrame = window.requestAnimationFrame(() => {
+    const preferences = layoutEditor.active ? alphaDraft : uiPreferences;
+    applyButtonLayout(preferences);
+    applyComponentLayout(preferences);
+    updatePrecisionControls();
+  });
 });
 
 elements.adminForm.addEventListener('input', () => {

@@ -1893,6 +1893,12 @@ body[data-ui-editing="true"][data-ui-edit-mode="buttons"] [data-ui-button-key].i
   width: 100%;
 }
 
+[data-ui-positioned="true"] {
+  position: relative;
+  translate: var(--ui-position-x, 0) var(--ui-position-y, 0);
+  z-index: var(--ui-position-z, 0);
+}
+
 body[data-ui-editing="true"][data-ui-edit-mode="boxes"] [data-ui-component-key] {
   position: relative;
   cursor: grab;
@@ -1922,14 +1928,20 @@ body[data-ui-editing="true"][data-ui-edit-mode="boxes"] [data-ui-component-key].
   transform: scale(.985);
 }
 
+body[data-ui-editing="true"][data-ui-move-mode="free"] [data-ui-component-key],
+body[data-ui-editing="true"][data-ui-move-mode="free"] [data-ui-button-key] {
+  cursor: crosshair;
+}
+
 .layout-editor-bar {
   position: fixed;
   z-index: 1000;
   left: 50%;
   bottom: max(14px, env(safe-area-inset-bottom));
   transform: translateX(-50%);
-  width: min(940px, calc(100vw - 24px));
+  width: min(1240px, calc(100vw - 24px));
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 10px;
@@ -1948,6 +1960,28 @@ body[data-ui-editing="true"][data-ui-edit-mode="boxes"] [data-ui-component-key].
 
 .layout-editor-bar button {
   flex: 0 0 auto;
+}
+
+.precision-coordinate,
+.precision-snap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+  color: var(--muted);
+  font-size: .72rem;
+}
+
+.precision-coordinate input {
+  width: 64px;
+  min-width: 0;
+  padding: .42rem .5rem;
+}
+
+.precision-snap select {
+  width: 76px;
+  min-width: 0;
+  padding: .42rem .5rem;
 }
 
 .password-input {
@@ -2016,6 +2050,18 @@ body[data-ui-editing="true"][data-ui-edit-mode="boxes"] [data-ui-component-key].
     min-height: 36px;
     padding: .45rem .55rem;
     font-size: .76rem;
+  }
+
+  .precision-coordinate,
+  .precision-snap {
+    width: auto;
+    min-width: 0;
+  }
+
+  .precision-coordinate input,
+  .precision-snap select {
+    width: 100%;
+    min-height: 36px;
   }
 }
 
