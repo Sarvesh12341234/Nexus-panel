@@ -103,7 +103,9 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Transfer URLs reject normal browser downloads and are consumed through NexusPanel's Import Backup workflow.
 - The Adaptive Engine learns baselines for servers, backups, uploads, CPU, and memory and performs non-destructive maintenance.
 - Alpha UI Studio provides 20 controls, draft previews, explicit save/cancel, undo/redo, navigation order, and command order.
-- Alpha Studio also includes 20 button silhouettes, 10 detail controls, and portable layout import/export codes.
+- Its visual editor supports mouse, pen, and touch drag placement, per-button widths, a floating save bar, and permanent portable UI codes.
+- Repair & Diagnose learns a redacted crash signature from successful fixes and safely repeats the same built-in repair workflow when that error returns.
+- Login, password reset, and protected owner-password fields include accessible password reveal controls.
 - Host Edition adds maintenance mode and configurable per-account server quotas.
 - Nexus-Mark uses transient systemd services; 1-3 core servers receive a temporary startup burst while allocations of 4+ cores stay at their configured steady limit.
 - Launch-failure restart storms stop automatically and do not create meaningless crash backups.

@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Alpha UI editing now stays responsive on desktop and mobile without page overflow.
+- Hidden switch inputs no longer expand the Settings page beyond the viewport.
 - Runtime now falls back to the verified server directory when a stored path is missing.
 - Software version selection no longer gets rebuilt by ordinary status polling.
 - Action groups wrap inside their containers on phone, tablet, and desktop layouts.
@@ -22,6 +24,10 @@
 
 ### Added
 
+- Free drag placement for panel command buttons and navigation, per-button widths, a floating editor toolbar, and permanent UI layout codes.
+- A repair playbook learner that fingerprints redacted crash output, learns from successful Repair & Diagnose runs, and repeats only the panel's safe repair routine.
+- Accessible show/hide password controls across login, reset, and owner-password fields.
+- Three additional panel utilities are included for discovery.
 - Alpha Studio now includes 20 button shapes, 10 additional sizing/detail controls, and portable non-expiring layout codes.
 - Start, stop, restart, and kill commands have responsive command animations.
 - Password reset email relays receive a styled NexusPanel HTML message as well as plain text.

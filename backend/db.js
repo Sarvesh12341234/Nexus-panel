@@ -174,6 +174,27 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS repair_crash_state (
+    server_id INTEGER PRIMARY KEY,
+    signature TEXT NOT NULL,
+    software_key TEXT NOT NULL DEFAULT '',
+    sample TEXT NOT NULL DEFAULT '',
+    last_seen_at INTEGER NOT NULL,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS repair_playbooks (
+    signature TEXT PRIMARY KEY,
+    software_key TEXT NOT NULL DEFAULT '',
+    sample TEXT NOT NULL DEFAULT '',
+    actions_json TEXT NOT NULL DEFAULT '[]',
+    learned_from_server_id INTEGER,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    replay_count INTEGER NOT NULL DEFAULT 0,
+    last_learned_at INTEGER NOT NULL DEFAULT 0,
+    last_replayed_at INTEGER NOT NULL DEFAULT 0
+  );
 `);
 
 // Insert default timezone

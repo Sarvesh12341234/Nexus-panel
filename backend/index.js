@@ -174,6 +174,82 @@ function panelSettingsPayload(user = null) {
   };
 }
 
+function normalizeCrashLine(line) {
+  return String(line || '')
+    .replace(/^\[[^\]]+\]\s*/, '')
+    .replace(/\b(password|token|secret|api[-_]?key)\s*[:=]\s*\S+/gi, '$1=<redacted>')
+    .replace(/https?:\/\/\S+/gi, '<url>')
+    .replace(/[A-Fa-f0-9]{8,}/g, '<hex>')
+    .replace(/\b\d+(?:\.\d+)?\b/g, '<n>')
+    .replace(/[A-Za-z]:\\[^\s]+|\/(?:[^\s/]+\/)+[^\s]+/g, '<path>')
+    .trim()
+    .slice(0, 240);
+}
+
+function crashSignature(server, software, code, signal) {
+  const lines = consoleLogs(server.id)
+    .slice(-24)
+    .map(normalizeCrashLine)
+    .filter((line) => line && !line.startsWith('[NexusPanel]'));
+  const sample = lines.slice(-6).join(' | ') || `exit=${code ?? 'none'} signal=${signal ?? 'none'}`;
+  const fingerprint = `${software?.key || server.software_key || server.type}|${code ?? 'none'}|${signal ?? 'none'}|${sample}`;
+  return {
+    signature: crypto.createHash('sha256').update(fingerprint).digest('hex'),
+    sample,
+  };
+}
+
+function rememberCrash(server, software, code, signal) {
+  const crash = crashSignature(server, software, code, signal);
+  db.prepare(`
+    INSERT INTO repair_crash_state (server_id, signature, software_key, sample, last_seen_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(server_id) DO UPDATE SET
+      signature = excluded.signature,
+      software_key = excluded.software_key,
+      sample = excluded.sample,
+      last_seen_at = excluded.last_seen_at
+  `).run(server.id, crash.signature, software?.key || server.software_key || '', crash.sample, Date.now());
+  return crash;
+}
+
+function learnRepairPlaybook(server, report) {
+  const crash = db.prepare('SELECT * FROM repair_crash_state WHERE server_id = ?').get(server.id);
+  if (!crash || Date.now() - Number(crash.last_seen_at) > 7 * 24 * 60 * 60 * 1000) return null;
+  const actions = Array.isArray(report.actions) ? report.actions.slice(0, 20) : [];
+  db.prepare(`
+    INSERT INTO repair_playbooks (
+      signature, software_key, sample, actions_json, learned_from_server_id,
+      success_count, last_learned_at
+    ) VALUES (?, ?, ?, ?, ?, 1, ?)
+    ON CONFLICT(signature) DO UPDATE SET
+      software_key = excluded.software_key,
+      sample = excluded.sample,
+      actions_json = excluded.actions_json,
+      learned_from_server_id = excluded.learned_from_server_id,
+      success_count = repair_playbooks.success_count + 1,
+      last_learned_at = excluded.last_learned_at
+  `).run(crash.signature, crash.software_key, crash.sample, JSON.stringify(actions), server.id, Date.now());
+  return { signature: crash.signature.slice(0, 12), actions: actions.length };
+}
+
+async function replayLearnedRepair(server, software, crash) {
+  const playbook = db.prepare(`
+    SELECT * FROM repair_playbooks
+    WHERE signature = ? AND software_key = ? AND success_count > 0
+  `).get(crash.signature, software?.key || server.software_key || '');
+  if (!playbook) return null;
+  appendLog(server.id, `[NexusPanel] Learned recovery matched ${crash.signature.slice(0, 12)}. Replaying the previously successful safe repair.`);
+  const report = await runServerRepair(server, software);
+  db.prepare(`
+    UPDATE repair_playbooks
+    SET replay_count = replay_count + 1, last_replayed_at = ?
+    WHERE signature = ?
+  `).run(Date.now(), crash.signature);
+  appendLog(server.id, `[NexusPanel] Learned recovery completed: ${report.summary}`);
+  return report;
+}
+
 function backupIntervalMinutesFrom(server) {
   const minutes = Number(server.backup_interval_minutes || 0);
   if (Number.isFinite(minutes) && minutes > 0) return Math.round(minutes);
@@ -2819,8 +2895,10 @@ app.post('/api/servers/:id/fix', requireAccess(permissions.MANAGE_SERVERS), asyn
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This server has no repairable software runtime.' });
   const report = await runServerRepair(server, software);
+  const learned = learnRepairPlaybook(server, report);
   appendLog(server.id, `[NexusPanel] Repair & Diagnose completed: ${report.summary}`);
-  res.json({ ok: true, ...report, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
+  if (learned) appendLog(server.id, `[NexusPanel] Learned repair playbook ${learned.signature} from this successful fix.`);
+  res.json({ ok: true, ...report, learned, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
 }));
 
 app.post('/api/servers/:id/eula', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
@@ -3557,7 +3635,7 @@ function startConfiguredServers() {
   }
 }
 
-setExitHandler(async ({ server, software, intentional, uptimeMs = 0 }) => {
+setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 0 }) => {
   if (intentional) {
     crashHistory.delete(server.id);
     return;
@@ -3569,6 +3647,7 @@ setExitHandler(async ({ server, software, intentional, uptimeMs = 0 }) => {
   recent.push(now);
   crashHistory.set(server.id, recent);
   const launchFailure = uptimeMs < 10 * 1000;
+  const crash = rememberCrash(current, software, code, signal);
   if (current.crash_backup && !launchFailure) {
     await createServerBackup(current, 'crash')
       .catch((error) => appendLog(current.id, `[NexusPanel] Crash backup failed: ${error.message}`));
@@ -3580,6 +3659,8 @@ setExitHandler(async ({ server, software, intentional, uptimeMs = 0 }) => {
     appendLog(current.id, '[NexusPanel] Restart storm stopped after 3 failures in 2 minutes. Run Repair & Diagnose, then start manually.');
     return;
   }
+  await replayLearnedRepair(current, software, crash)
+    .catch((error) => appendLog(current.id, `[NexusPanel] Learned recovery could not complete: ${error.message}`));
   const restartDelaySeconds = launchFailure ? 10 * recent.length : 5;
   appendLog(current.id, `[NexusPanel] Unexpected exit detected. Restarting in ${restartDelaySeconds} seconds...`);
   const timer = setTimeout(() => {

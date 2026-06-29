@@ -99,6 +99,12 @@ const uiHistory = [];
 const uiRedo = [];
 let uiPreferences = loadUiPreferences();
 let alphaDraft = structuredClone(uiPreferences);
+const layoutEditor = {
+  active: false,
+  dragging: null,
+  pointerId: null,
+  selectedKey: '',
+};
 let lastCreateSoftwareKey = '';
 const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_PARALLELISM = 3;
@@ -156,6 +162,8 @@ function loadUiPreferences() {
   const defaults = {
     navOrder: [],
     actionPriority: ['start-server', 'stop-server', 'restart-server', 'open-console', 'file-upload', 'manual-backup', 'fix-server', 'kill-server', 'delete-server'],
+    buttonLayout: {},
+    buttonWidths: {},
     compact: false,
     reducedMotion: false,
     liveRefresh: true,
@@ -189,7 +197,14 @@ function loadUiPreferences() {
   };
   try {
     const saved = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) || '{}');
-    return { ...defaults, ...saved, navOrder: Array.isArray(saved.navOrder) ? saved.navOrder : [], actionPriority: Array.isArray(saved.actionPriority) ? saved.actionPriority : defaults.actionPriority };
+    return {
+      ...defaults,
+      ...saved,
+      navOrder: Array.isArray(saved.navOrder) ? saved.navOrder : [],
+      actionPriority: Array.isArray(saved.actionPriority) ? saved.actionPriority : defaults.actionPriority,
+      buttonLayout: saved.buttonLayout && typeof saved.buttonLayout === 'object' ? saved.buttonLayout : {},
+      buttonWidths: saved.buttonWidths && typeof saved.buttonWidths === 'object' ? saved.buttonWidths : {},
+    };
   } catch {
     return defaults;
   }
@@ -234,7 +249,228 @@ function applyUiPreferences(preferences = uiPreferences) {
   document.querySelectorAll('.server-actions [data-action], .file-toolbar [data-action], .row-actions [data-action]').forEach((button) => {
     button.style.order = String(priority.has(button.dataset.action) ? priority.get(button.dataset.action) : priority.size + 100);
   });
+  applyButtonLayout(preferences);
 }
+
+function layoutRegionElements() {
+  const parents = new Set();
+  for (const button of document.querySelectorAll('button, .button-link')) {
+    if (
+      button.closest('.alpha-lab')
+      || button.closest('#layoutEditorBar')
+      || button.closest('#powerPalette')
+      || button.closest('[hidden]')
+    ) continue;
+    if (button.parentElement) parents.add(button.parentElement);
+  }
+  return [...parents];
+}
+
+function regionBaseName(region) {
+  if (region.classList.contains('nav-list')) return 'navigation';
+  if (region.id) return `${state.activeView}:id:${region.id}`;
+  const identity = `${region.tagName.toLowerCase()}.${[...region.classList].slice(0, 2).join('.') || 'plain'}`;
+  const peers = layoutRegionElements().filter((item) => (
+    !item.id
+    && `${item.tagName.toLowerCase()}.${[...item.classList].slice(0, 2).join('.') || 'plain'}` === identity
+  ));
+  return `${state.activeView}:${identity}:${Math.max(0, peers.indexOf(region))}`;
+}
+
+function buttonBaseKey(button) {
+  if (button.dataset.view) return `view:${button.dataset.view}`;
+  if (button.dataset.action) {
+    const qualifier = button.dataset.softwareKey || button.dataset.templateKey || button.dataset.filePath || '';
+    return `action:${button.dataset.action}:${qualifier}`;
+  }
+  if (button.id) return `id:${button.id}`;
+  return `label:${String(button.textContent || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+}
+
+function prepareLayoutRegions() {
+  for (const region of layoutRegionElements()) {
+    const regionKey = regionBaseName(region);
+    region.dataset.uiRegion = regionKey;
+    const seen = new Map();
+    for (const button of region.querySelectorAll(':scope > button, :scope > .button-link')) {
+      const base = buttonBaseKey(button);
+      const occurrence = seen.get(base) || 0;
+      seen.set(base, occurrence + 1);
+      button.dataset.uiButtonKey = `${base}#${occurrence}`;
+    }
+  }
+}
+
+function applyButtonLayout(preferences = uiPreferences) {
+  prepareLayoutRegions();
+  for (const region of layoutRegionElements()) {
+    const savedOrder = preferences.buttonLayout?.[region.dataset.uiRegion];
+    const buttons = [...region.querySelectorAll(':scope > button, :scope > .button-link')];
+    const byKey = new Map(buttons.map((button) => [button.dataset.uiButtonKey, button]));
+    if (Array.isArray(savedOrder)) {
+      for (const key of savedOrder) {
+        const button = byKey.get(key);
+        if (button) region.appendChild(button);
+      }
+    }
+    for (const button of buttons) {
+      const width = preferences.buttonWidths?.[`${region.dataset.uiRegion}/${button.dataset.uiButtonKey}`] || 'auto';
+      button.dataset.uiWidth = width;
+      if (preferences.buttonLayout?.[region.dataset.uiRegion]) button.style.order = '';
+      button.draggable = layoutEditor.active;
+    }
+  }
+}
+
+function captureButtonLayout() {
+  prepareLayoutRegions();
+  const buttonLayout = { ...(alphaDraft.buttonLayout || {}) };
+  for (const region of layoutRegionElements()) {
+    buttonLayout[region.dataset.uiRegion] = [...region.querySelectorAll(':scope > button, :scope > .button-link')]
+      .map((button) => button.dataset.uiButtonKey);
+  }
+  alphaDraft = { ...alphaDraft, buttonLayout };
+}
+
+function encodeLayoutCode(preferences = uiPreferences) {
+  const payload = JSON.stringify({ version: 2, preferences });
+  return btoa(unescape(encodeURIComponent(payload))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+}
+
+function decodeLayoutCode(code) {
+  const normalized = String(code || '').trim().replaceAll('-', '+').replaceAll('_', '/');
+  const payload = JSON.parse(decodeURIComponent(escape(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))));
+  if (![1, 2].includes(payload.version) || !payload.preferences || typeof payload.preferences !== 'object') {
+    throw new Error('Unsupported layout code.');
+  }
+  return payload.preferences;
+}
+
+function renderLayoutEditorBar() {
+  document.querySelector('#layoutEditorBar')?.remove();
+  if (!layoutEditor.active) return;
+  const bar = document.createElement('aside');
+  bar.id = 'layoutEditorBar';
+  bar.className = 'layout-editor-bar';
+  bar.setAttribute('aria-label', 'UI layout editor');
+  bar.innerHTML = `
+    <strong>UI Editor</strong>
+    <span>Drag buttons to place them. Select one to change its width.</span>
+    <button type="button" data-layout-command="width" title="Cycle selected button width">Width</button>
+    <button type="button" data-layout-command="undo" title="Undo last saved layout">Undo</button>
+    <button type="button" data-layout-command="redo" title="Redo saved layout">Redo</button>
+    <button type="button" data-layout-command="copy" title="Copy permanent UI code">Copy UI Code</button>
+    <button type="button" data-layout-command="cancel" class="secondary">Cancel</button>
+    <button type="button" data-layout-command="save">Save</button>
+  `;
+  document.body.appendChild(bar);
+}
+
+function setLayoutEditor(active) {
+  layoutEditor.active = Boolean(active);
+  layoutEditor.dragging = null;
+  layoutEditor.pointerId = null;
+  layoutEditor.selectedKey = '';
+  document.body.dataset.uiEditing = layoutEditor.active ? 'true' : 'false';
+  applyUiPreferences(layoutEditor.active ? alphaDraft : uiPreferences);
+  renderLayoutEditorBar();
+  if (layoutEditor.active) showToast('UI Editor active. Drag any highlighted button.');
+}
+
+function closePowerPalette() {
+  document.querySelector('#powerPalette')?.remove();
+}
+
+function openPowerPalette() {
+  closePowerPalette();
+  const palette = document.createElement('div');
+  palette.id = 'powerPalette';
+  palette.className = 'power-palette-backdrop';
+  palette.innerHTML = `
+    <section class="power-palette" role="dialog" aria-modal="true" aria-label="Panel command palette">
+      <input type="search" placeholder="Search views, servers, or actions" aria-label="Search panel commands" autofocus>
+      <div class="power-palette-results"></div>
+    </section>
+  `;
+  document.body.appendChild(palette);
+  const input = palette.querySelector('input');
+  const results = palette.querySelector('.power-palette-results');
+  const render = () => {
+    const query = input.value.trim().toLowerCase();
+    const commands = [
+      ...Object.entries(viewTitles).map(([key, labels]) => ({ key: `view:${key}`, label: `Open ${labels[1]}`, type: 'View' })),
+      ...state.servers.map((server) => ({ key: `server:${server.id}`, label: `Switch to ${server.name}`, type: server.status })),
+      { key: 'utility:privacy', label: 'Toggle privacy shield', type: 'Utility' },
+      { key: 'utility:snapshot', label: 'Copy live panel snapshot', type: 'Utility' },
+    ].filter((item) => !query || `${item.label} ${item.type}`.toLowerCase().includes(query));
+    results.innerHTML = commands.slice(0, 30).map((item, index) => `
+      <button type="button" data-power-command="${escapeHtml(item.key)}" class="${index === 0 ? 'is-selected' : ''}">
+        <span>${escapeHtml(item.label)}</span><small>${escapeHtml(item.type)}</small>
+      </button>
+    `).join('') || '<p class="empty-state">No matching command.</p>';
+  };
+  input.addEventListener('input', render);
+  input.addEventListener('keydown', (event) => {
+    const buttons = [...results.querySelectorAll('button')];
+    let index = buttons.findIndex((button) => button.classList.contains('is-selected'));
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      buttons[index]?.classList.remove('is-selected');
+      index = (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[index]?.classList.add('is-selected');
+      buttons[index]?.scrollIntoView({ block: 'nearest' });
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      buttons[Math.max(0, index)]?.click();
+    }
+  });
+  render();
+  input.focus();
+}
+
+document.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    document.querySelector('#powerPalette') ? closePowerPalette() : openPowerPalette();
+    return;
+  }
+  if (event.key === 'Escape') closePowerPalette();
+  if (event.altKey && event.key.toLowerCase() === 's' && state.servers.length) {
+    event.preventDefault();
+    const index = state.servers.findIndex((server) => server.id === state.activeServerId);
+    state.activeServerId = state.servers[(index + 1) % state.servers.length].id;
+    renderServerSwitcher();
+    renderActiveView();
+  }
+});
+
+document.addEventListener('click', async (event) => {
+  if (event.target.id === 'powerPalette') return closePowerPalette();
+  const key = event.target.closest('[data-power-command]')?.dataset.powerCommand;
+  if (!key) return;
+  closePowerPalette();
+  if (key.startsWith('view:')) return setView(key.slice(5));
+  if (key.startsWith('server:')) {
+    state.activeServerId = Number(key.slice(7));
+    renderServerSwitcher();
+    return renderActiveView();
+  }
+  if (key === 'utility:privacy') {
+    document.body.dataset.privacyShield = document.body.dataset.privacyShield === 'true' ? 'false' : 'true';
+    return showToast(document.body.dataset.privacyShield === 'true' ? 'Privacy shield enabled.' : 'Privacy shield disabled.');
+  }
+  if (key === 'utility:snapshot') {
+    const snapshot = {
+      generatedAt: new Date().toISOString(),
+      activeView: state.activeView,
+      servers: state.servers.map(({ id, name, status, type, port }) => ({ id, name, status, type, port })),
+      health: state.health?.score ?? null,
+    };
+    await copyText(JSON.stringify(snapshot, null, 2));
+    showToast('Live panel snapshot copied.');
+  }
+});
 
 function commitUiPreferences(next) {
   uiHistory.push(structuredClone(uiPreferences));
@@ -1134,6 +1370,7 @@ function renderSettings() {
         </div>
         <div class="backup-settings">
           <button type="submit">Save Alpha layout</button>
+          <button type="button" data-action="alpha-open-editor">Open drag-and-drop editor</button>
           <button class="secondary" type="button" data-action="alpha-cancel">Cancel preview</button>
           <button class="secondary" type="button" data-action="alpha-undo" ${uiHistory.length ? '' : 'disabled'}>Undo saved</button>
           <button class="secondary" type="button" data-action="alpha-redo" ${uiRedo.length ? '' : 'disabled'}>Redo saved</button>
@@ -2063,6 +2300,120 @@ document.addEventListener('submit', async (event) => {
   }
 });
 
+document.addEventListener('dragstart', (event) => {
+  if (layoutEditor.active && event.target.closest('[data-ui-button-key]')) event.preventDefault();
+});
+
+document.addEventListener('pointerdown', (event) => {
+  if (!layoutEditor.active || event.button !== 0) return;
+  const button = event.target.closest('[data-ui-button-key]');
+  if (!button || button.closest('#layoutEditorBar')) return;
+  const region = button.closest('[data-ui-region]');
+  if (!region) return;
+  layoutEditor.dragging = {
+    button,
+    region,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
+  };
+  layoutEditor.pointerId = event.pointerId;
+  layoutEditor.selectedKey = `${region.dataset.uiRegion}/${button.dataset.uiButtonKey}`;
+  button.setPointerCapture?.(event.pointerId);
+}, true);
+
+document.addEventListener('pointermove', (event) => {
+  const drag = layoutEditor.dragging;
+  if (!layoutEditor.active || !drag || event.pointerId !== layoutEditor.pointerId) return;
+  if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+  drag.moved = true;
+  drag.button.classList.add('is-layout-dragging');
+  const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-ui-button-key]');
+  if (!target || target === drag.button || target.closest('[data-ui-region]') !== drag.region) return;
+  const rect = target.getBoundingClientRect();
+  const before = event.clientY < rect.top + rect.height / 2
+    || (Math.abs(event.clientY - (rect.top + rect.height / 2)) < rect.height / 3 && event.clientX < rect.left + rect.width / 2);
+  drag.region.insertBefore(drag.button, before ? target : target.nextSibling);
+  event.preventDefault();
+}, { passive: false, capture: true });
+
+document.addEventListener('pointerup', (event) => {
+  const drag = layoutEditor.dragging;
+  if (!drag || event.pointerId !== layoutEditor.pointerId) return;
+  drag.button.classList.remove('is-layout-dragging');
+  if (drag.moved) {
+    captureButtonLayout();
+    showToast('Position updated in the layout draft.');
+  } else {
+    document.querySelectorAll('.is-layout-selected').forEach((item) => item.classList.remove('is-layout-selected'));
+    drag.button.classList.add('is-layout-selected');
+  }
+  layoutEditor.dragging = null;
+  layoutEditor.pointerId = null;
+}, true);
+
+document.addEventListener('click', (event) => {
+  if (!layoutEditor.active || event.target.closest('#layoutEditorBar')) return;
+  const button = event.target.closest('[data-ui-button-key]');
+  if (!button || button.dataset.view) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
+
+document.addEventListener('click', async (event) => {
+  const command = event.target.closest('[data-layout-command]')?.dataset.layoutCommand;
+  if (!command) return;
+  if (command === 'save') {
+    captureButtonLayout();
+    commitUiPreferences(alphaDraft);
+    setLayoutEditor(false);
+    showToast('Custom UI saved. Its layout code does not expire.');
+    return;
+  }
+  if (command === 'cancel') {
+    alphaDraft = structuredClone(uiPreferences);
+    setLayoutEditor(false);
+    return;
+  }
+  if (command === 'copy') {
+    captureButtonLayout();
+    const code = encodeLayoutCode(alphaDraft);
+    await copyText(code);
+    showToast('Permanent UI code copied.');
+    return;
+  }
+  if (command === 'undo' && uiHistory.length) {
+    uiRedo.push(structuredClone(uiPreferences));
+    uiPreferences = uiHistory.pop();
+    alphaDraft = structuredClone(uiPreferences);
+    localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
+    applyUiPreferences(alphaDraft);
+    return;
+  }
+  if (command === 'redo' && uiRedo.length) {
+    uiHistory.push(structuredClone(uiPreferences));
+    uiPreferences = uiRedo.pop();
+    alphaDraft = structuredClone(uiPreferences);
+    localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
+    applyUiPreferences(alphaDraft);
+    return;
+  }
+  if (command === 'width') {
+    const selected = [...document.querySelectorAll('[data-ui-region] [data-ui-button-key]')]
+      .find((button) => `${button.closest('[data-ui-region]').dataset.uiRegion}/${button.dataset.uiButtonKey}` === layoutEditor.selectedKey);
+    if (!selected) return showToast('Select a button first.');
+    const current = alphaDraft.buttonWidths?.[layoutEditor.selectedKey] || 'auto';
+    const next = current === 'auto' ? 'half' : current === 'half' ? 'full' : 'auto';
+    alphaDraft = {
+      ...alphaDraft,
+      buttonWidths: { ...(alphaDraft.buttonWidths || {}), [layoutEditor.selectedKey]: next },
+    };
+    applyButtonLayout(alphaDraft);
+    selected.classList.add('is-layout-selected');
+    showToast(`Button width: ${next}.`);
+  }
+});
+
 elements.adminForm.addEventListener('input', () => {
   elements.accessOutput.value = elements.adminForm.accessLevel.value;
 });
@@ -2160,6 +2511,11 @@ document.addEventListener('click', async (event) => {
       renderSettings();
       return;
     }
+    if (action === 'alpha-open-editor') {
+      alphaDraft = structuredClone(uiPreferences);
+      setLayoutEditor(true);
+      return;
+    }
     if (action === 'alpha-undo' && uiHistory.length) {
       uiRedo.push(structuredClone(uiPreferences));
       uiPreferences = uiHistory.pop();
@@ -2188,8 +2544,7 @@ document.addEventListener('click', async (event) => {
       return;
     }
     if (action === 'alpha-export') {
-      const payload = JSON.stringify({ version: 1, nonce: crypto.randomUUID(), preferences: uiPreferences });
-      const code = btoa(unescape(encodeURIComponent(payload))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+      const code = encodeLayoutCode(uiPreferences);
       await copyText(code);
       prompt('Alpha layout code copied:', code);
       return;
@@ -2198,10 +2553,7 @@ document.addEventListener('click', async (event) => {
       const code = prompt('Paste an Alpha layout code:');
       if (!code) return;
       try {
-        const normalized = code.replaceAll('-', '+').replaceAll('_', '/');
-        const payload = JSON.parse(decodeURIComponent(escape(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))));
-        if (payload.version !== 1 || !payload.preferences || typeof payload.preferences !== 'object') throw new Error('Unsupported layout code.');
-        alphaDraft = { ...loadUiPreferences(), ...payload.preferences };
+        alphaDraft = { ...loadUiPreferences(), ...decodeLayoutCode(code) };
         applyUiPreferences(alphaDraft);
         renderSettings();
         showToast('Layout code loaded as a preview. Save to keep it.');
@@ -2631,7 +2983,8 @@ document.addEventListener('click', async (event) => {
       if (server.status === 'online') return showToast('Stop the server before running Repair & Diagnose.');
       if (!confirm(`Repair and diagnose "${server.name}"? This validates its runtime, cleans stale transfers, checks world storage and disk space, and rebuilds isolation metadata.`)) return;
       const result = await api(`/api/servers/${server.id}/fix`, { method: 'POST' });
-      showToast(result.summary || result.repair?.message || 'Repair & Diagnose completed.');
+      const learned = result.learned ? ` Learned playbook ${result.learned.signature}.` : '';
+      showToast(`${result.summary || result.repair?.message || 'Repair & Diagnose completed.'}${learned}`);
       await refresh();
       return;
     }

@@ -585,7 +585,11 @@ code {
 
 .switch input {
   position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
   opacity: 0;
+  overflow: hidden;
 }
 
 .switch span {
@@ -1844,3 +1848,209 @@ body[data-button-shape="glass"] button { border-radius: 10px; background: rgba(2
 }
 
 button.is-commanding { animation: nexus-command-pulse .55s ease; }
+
+[data-ui-width="half"] {
+  flex: 1 1 min(46%, 260px) !important;
+}
+
+[data-ui-width="full"] {
+  flex: 1 1 100% !important;
+}
+
+body[data-ui-editing="true"] [data-ui-button-key] {
+  cursor: grab;
+  outline: 2px dashed color-mix(in srgb, var(--cyan), transparent 30%);
+  outline-offset: 2px;
+  touch-action: none;
+  user-select: none;
+}
+
+body[data-ui-editing="true"] [data-ui-region] {
+  min-height: 46px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--cyan), transparent 94%);
+}
+
+body[data-ui-editing="true"] [data-ui-button-key].is-layout-selected {
+  outline: 3px solid var(--yellow);
+}
+
+body[data-ui-editing="true"] [data-ui-button-key].is-layout-dragging {
+  cursor: grabbing;
+  opacity: 0.58;
+  transform: scale(.97);
+}
+
+.layout-editor-bar {
+  position: fixed;
+  z-index: 1000;
+  left: 50%;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  width: min(940px, calc(100vw - 24px));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--cyan);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sidebar) 96%, transparent);
+  box-shadow: 0 20px 70px rgba(0, 0, 0, .56);
+  backdrop-filter: blur(18px);
+}
+
+.layout-editor-bar > span {
+  color: var(--muted);
+  font-size: .78rem;
+  flex: 1 1 220px;
+}
+
+.layout-editor-bar button {
+  flex: 0 0 auto;
+}
+
+.password-input {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+
+.password-input > input {
+  width: 100%;
+  padding-right: 46px;
+}
+
+.password-eye {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  width: 36px;
+  min-width: 36px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.password-eye-icon {
+  display: block;
+  width: 18px;
+  height: 12px;
+  margin: auto;
+  border: 2px solid currentColor;
+  border-radius: 70% 15%;
+  transform: rotate(45deg);
+}
+
+.password-eye-icon::after {
+  content: "";
+  display: block;
+  width: 4px;
+  height: 4px;
+  margin: 2px auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+@media (max-width: 760px) {
+  .layout-editor-bar {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .layout-editor-bar > strong,
+  .layout-editor-bar > span {
+    grid-column: 1 / -1;
+  }
+
+  .layout-editor-bar > span {
+    order: 10;
+  }
+
+  .layout-editor-bar button {
+    width: auto;
+    min-height: 36px;
+    padding: .45rem .55rem;
+    font-size: .76rem;
+  }
+}
+
+.power-palette-backdrop {
+  position: fixed;
+  z-index: 1100;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding: min(14vh, 120px) 16px 16px;
+  background: rgba(0, 0, 0, .64);
+  backdrop-filter: blur(8px);
+}
+
+.power-palette {
+  width: min(680px, 100%);
+  max-height: min(70vh, 620px);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--sidebar);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, .68);
+}
+
+.power-palette > input {
+  width: calc(100% - 24px);
+  margin: 12px;
+}
+
+.power-palette-results {
+  display: grid;
+  max-height: min(58vh, 510px);
+  overflow: auto;
+  padding: 0 8px 8px;
+}
+
+.power-palette-results button {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.power-palette-results button.is-selected {
+  background: color-mix(in srgb, var(--green), transparent 82%);
+}
+
+.power-palette-results small {
+  color: var(--muted);
+}
+
+body[data-privacy-shield="true"] .server-list,
+body[data-privacy-shield="true"] .account,
+body[data-privacy-shield="true"] .console-box,
+body[data-privacy-shield="true"] .terminal-output,
+body[data-privacy-shield="true"] input {
+  filter: blur(7px);
+}
+
+@media (min-width: 961px) {
+  .sidebar > .nav-list {
+    min-height: 0;
+    overflow-y: auto;
+    align-content: start;
+  }
+}
+
+@media (max-width: 960px) {
+  .panel-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    height: auto;
+  }
+}
