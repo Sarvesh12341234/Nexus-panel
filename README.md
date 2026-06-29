@@ -97,6 +97,12 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 ## v1.2.0 Fixes
 
 - Settings updater shows live progress, status text, and final exit state.
+- Backup scheduling has 30-second resolution, per-server owner timezones, visible next-run timing, and offset-stamped archive names.
+- Uploads use server-authoritative ranges, per-file locks, 8 MB chunks, and one-second cross-client progress refresh.
+- Public backup links support a configurable public panel URL and eligible Normal/Host account ownership.
+- The Adaptive Engine learns baselines for servers, backups, uploads, CPU, and memory and performs non-destructive maintenance.
+- Alpha UI Studio provides 20 controls, draft previews, explicit save/cancel, undo/redo, navigation order, and command order.
+- Host Edition adds maintenance mode and configurable per-account server quotas.
 - Server settings now expose per-server auto start, auto restart, wake on join, crash backup, startup delay, RAM, port, and a confirmed Fix Server action after creation.
 - Backups include minute/hour scheduling, 6-digit share-code requests, owner approval, timed access, revoke, and a separate shared-backup restore section.
 - Cross-panel backup transfer uses revocable public archive links with 256-bit random tokens, hashed token storage, expiry, ranged downloads, remote ZIP validation, and private-network import blocking.

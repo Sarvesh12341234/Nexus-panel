@@ -43,16 +43,20 @@ function windowsCpuCount() {
   ]);
 }
 
+let cachedCpuCount = 0;
+
 function hostCpuCount() {
   const override = Number(process.env.NEXUSPANEL_CPU_CORES || 0);
   if (Number.isFinite(override) && override > 0) return Math.floor(override);
+  if (cachedCpuCount > 0) return cachedCpuCount;
   const detected = process.platform === 'linux'
     ? linuxCpuCount()
     : process.platform === 'win32'
       ? windowsCpuCount()
       : 0;
   const nodeDetected = Number(os.availableParallelism?.() || os.cpus()?.length || 1);
-  return Math.max(1, detected || nodeDetected || 1);
+  cachedCpuCount = Math.max(1, detected || nodeDetected || 1);
+  return cachedCpuCount;
 }
 
 function hostMemoryStats() {

@@ -12,6 +12,7 @@ const state = {
   settings: null,
   loginEvents: [],
   health: null,
+  adaptiveInsights: [],
   metricHistory: {},
   activeView: 'dashboard',
   activeServerId: null,
@@ -97,11 +98,13 @@ const UI_PREFERENCES_KEY = 'nexusUiPreferences';
 const uiHistory = [];
 const uiRedo = [];
 let uiPreferences = loadUiPreferences();
+let alphaDraft = structuredClone(uiPreferences);
 let lastCreateSoftwareKey = '';
-const UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024;
-const UPLOAD_PARALLELISM = 4;
+const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
+const UPLOAD_PARALLELISM = 3;
 const timeZones = [...new Set([
   ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : ['UTC']),
+  'UTC',
   'Asia/Kolkata',
   'Asia/Calcutta',
 ])].sort();
@@ -116,6 +119,7 @@ const themes = [
   { key: 'forest', name: 'Plain · Emerald Forest', mode: 'plain' },
   { key: 'ice', name: 'Plain · Ice Prism', mode: 'plain' },
   { key: 'candy', name: 'Plain · Candy Pop', mode: 'plain' },
+  { key: 'forge-ui', name: 'Plain - Forge Geometry', mode: 'plain' },
   { key: 'blackhole-pic', name: 'blackhole', mode: 'picture' },
   { key: 'whitehole-pic', name: 'whitehole', mode: 'picture' },
   { key: 'moon-pic', name: 'moon', mode: 'picture' },
@@ -149,27 +153,67 @@ const viewTitles = {
 const defaultNavOrder = Object.keys(viewTitles);
 
 function loadUiPreferences() {
+  const defaults = {
+    navOrder: [],
+    actionPriority: ['start-server', 'stop-server', 'restart-server', 'open-console', 'file-upload', 'manual-backup', 'fix-server', 'kill-server', 'delete-server'],
+    compact: false,
+    reducedMotion: false,
+    liveRefresh: true,
+    buttonShape: 'soft',
+    buttonSize: 'medium',
+    sidebarWidth: 270,
+    fontScale: 100,
+    accentHue: 155,
+    surfaceOpacity: 86,
+    contentWidth: 1600,
+    rowGap: 12,
+    borderWidth: 1,
+    shadowStrength: 35,
+    stickyTopbar: true,
+    showQuickStats: true,
+    showEyebrows: true,
+    uppercaseButtons: false,
+    highContrast: false,
+    focusBoost: true,
+    denseForms: false,
+  };
   try {
     const saved = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) || '{}');
-    return {
-      navOrder: Array.isArray(saved.navOrder) ? saved.navOrder : [],
-      compact: Boolean(saved.compact),
-      reducedMotion: Boolean(saved.reducedMotion),
-      liveRefresh: saved.liveRefresh !== false,
-    };
+    return { ...defaults, ...saved, navOrder: Array.isArray(saved.navOrder) ? saved.navOrder : [], actionPriority: Array.isArray(saved.actionPriority) ? saved.actionPriority : defaults.actionPriority };
   } catch {
-    return { navOrder: [], compact: false, reducedMotion: false, liveRefresh: true };
+    return defaults;
   }
 }
 
-function applyUiPreferences() {
-  document.body.dataset.density = uiPreferences.compact ? 'compact' : 'comfortable';
-  document.body.dataset.reducedMotion = uiPreferences.reducedMotion ? 'true' : 'false';
+function applyUiPreferences(preferences = uiPreferences) {
+  document.body.dataset.density = preferences.compact ? 'compact' : 'comfortable';
+  document.body.dataset.reducedMotion = preferences.reducedMotion ? 'true' : 'false';
+  document.body.dataset.buttonShape = preferences.buttonShape;
+  document.body.dataset.buttonSize = preferences.buttonSize;
+  document.body.dataset.highContrast = preferences.highContrast ? 'true' : 'false';
+  document.body.dataset.uppercaseButtons = preferences.uppercaseButtons ? 'true' : 'false';
+  document.body.dataset.denseForms = preferences.denseForms ? 'true' : 'false';
+  document.body.dataset.hideQuickStats = preferences.showQuickStats ? 'false' : 'true';
+  document.body.dataset.hideEyebrows = preferences.showEyebrows ? 'false' : 'true';
+  document.body.dataset.stickyTopbar = preferences.stickyTopbar ? 'true' : 'false';
+  document.body.dataset.focusBoost = preferences.focusBoost ? 'true' : 'false';
+  document.documentElement.style.setProperty('--alpha-sidebar-width', `${Number(preferences.sidebarWidth)}px`);
+  document.documentElement.style.setProperty('--alpha-font-scale', `${Number(preferences.fontScale) / 100}`);
+  document.documentElement.style.setProperty('--alpha-accent-hue', Number(preferences.accentHue));
+  document.documentElement.style.setProperty('--alpha-surface-opacity', `${Number(preferences.surfaceOpacity)}%`);
+  document.documentElement.style.setProperty('--alpha-content-width', `${Number(preferences.contentWidth)}px`);
+  document.documentElement.style.setProperty('--alpha-row-gap', `${Number(preferences.rowGap)}px`);
+  document.documentElement.style.setProperty('--alpha-border-width', `${Number(preferences.borderWidth)}px`);
+  document.documentElement.style.setProperty('--alpha-shadow-strength', Number(preferences.shadowStrength) / 100);
   const nav = document.querySelector('.nav-list');
   if (!nav) return;
   const buttons = new Map([...nav.querySelectorAll('[data-view]')].map((button) => [button.dataset.view, button]));
-  const order = [...uiPreferences.navOrder, ...defaultNavOrder].filter((key, index, list) => buttons.has(key) && list.indexOf(key) === index);
+  const order = [...preferences.navOrder, ...defaultNavOrder].filter((key, index, list) => buttons.has(key) && list.indexOf(key) === index);
   for (const key of order) nav.appendChild(buttons.get(key));
+  const priority = new Map((preferences.actionPriority || []).map((action, index) => [action, index]));
+  document.querySelectorAll('.server-actions [data-action], .file-toolbar [data-action], .row-actions [data-action]').forEach((button) => {
+    button.style.order = String(priority.has(button.dataset.action) ? priority.get(button.dataset.action) : priority.size + 100);
+  });
 }
 
 function commitUiPreferences(next) {
@@ -177,9 +221,14 @@ function commitUiPreferences(next) {
   if (uiHistory.length > 30) uiHistory.shift();
   uiRedo.length = 0;
   uiPreferences = { ...uiPreferences, ...next };
+  alphaDraft = structuredClone(uiPreferences);
   localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
   applyUiPreferences();
   if (state.activeView === 'settings') renderSettings();
+}
+
+function alphaOption(value, current, label = value) {
+  return `<option value="${escapeHtml(value)}" ${value === current ? 'selected' : ''}>${escapeHtml(label)}</option>`;
 }
 
 function showToast(message) {
@@ -402,7 +451,7 @@ function uploadChunk(server, chunk, destinationPath, offset, totalSize, fileSha2
 
 async function uploadFile(server, file, destinationPath, onProgress) {
   onProgress(0, 'hashing');
-  const fileSha256 = await digestHex(file);
+  const fileSha256 = file.size <= 512 * 1024 * 1024 ? await digestHex(file) : '';
   const status = await api(`/api/servers/${server.id}/files/upload-status?path=${encodeURIComponent(destinationPath)}&size=${file.size}&sha256=${fileSha256}`);
   if (status.complete) {
     onProgress(100, 'already uploaded');
@@ -759,6 +808,7 @@ async function renderActiveView() {
   if (state.activeView === 'security') await renderSecurity();
   if (state.activeView === 'settings') renderSettings();
   if (state.activeView === 'terminal') renderTerminal();
+  applyUiPreferences(alphaDraft);
 }
 
 function renderPlugins() {
@@ -983,9 +1033,12 @@ function renderSettings() {
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.2.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v1.2.0"></label>
+      <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
       <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
       <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
+      ${isHost ? `<label class="switch"><input name="hostMaintenanceMode" type="checkbox" ${settings.hostMaintenanceMode ? 'checked' : ''}><span></span>Host maintenance mode</label>
+      <label>Servers per hosted account <input name="hostServerQuota" type="number" min="1" max="500" value="${Number(settings.hostServerQuota || 10)}"></label>` : ''}
 
       <!-- Timezone with Save Button -->
       <div class="settings-group">
@@ -1012,18 +1065,48 @@ function renderSettings() {
       <summary>Example Template JSON</summary>
       <pre>${escapeHtml(JSON.stringify(settings.nexuExample || {}, null, 2))}</pre>
     </details>` : ''}
-    <details class="nexu-details">
-      <summary>Beta UI lab</summary>
-      <div class="backup-settings">
-        <label class="switch"><input type="checkbox" data-action="beta-compact" ${uiPreferences.compact ? 'checked' : ''}><span></span>Compact density</label>
-        <label class="switch"><input type="checkbox" data-action="beta-reduced-motion" ${uiPreferences.reducedMotion ? 'checked' : ''}><span></span>Reduced motion</label>
-        <label class="switch"><input type="checkbox" data-action="beta-live-refresh" ${uiPreferences.liveRefresh ? 'checked' : ''}><span></span>Live polling</label>
-        <button class="secondary" type="button" data-action="beta-undo" ${uiHistory.length ? '' : 'disabled'}>Undo</button>
-        <button class="secondary" type="button" data-action="beta-redo" ${uiRedo.length ? '' : 'disabled'}>Redo</button>
-        <button class="danger" type="button" data-action="beta-reset">Reset UI</button>
-      </div>
+    <details class="nexu-details alpha-lab" open>
+      <summary>Alpha UI studio</summary>
+      <form id="alphaUiForm">
+        <div class="alpha-control-grid">
+          <label>Button shape <select data-alpha-key="buttonShape">${alphaOption('soft', alphaDraft.buttonShape, 'Soft')}${alphaOption('angular', alphaDraft.buttonShape, 'Angular')}${alphaOption('pill', alphaDraft.buttonShape, 'Pill')}${alphaOption('tech', alphaDraft.buttonShape, 'Tech cut')}</select></label>
+          <label>Button size <select data-alpha-key="buttonSize">${alphaOption('small', alphaDraft.buttonSize, 'Small')}${alphaOption('medium', alphaDraft.buttonSize, 'Medium')}${alphaOption('large', alphaDraft.buttonSize, 'Large')}</select></label>
+          <label>Sidebar width <input data-alpha-key="sidebarWidth" type="range" min="220" max="380" value="${alphaDraft.sidebarWidth}"></label>
+          <label>Font scale <input data-alpha-key="fontScale" type="range" min="85" max="120" value="${alphaDraft.fontScale}"></label>
+          <label>Accent hue <input data-alpha-key="accentHue" type="range" min="0" max="360" value="${alphaDraft.accentHue}"></label>
+          <label>Surface opacity <input data-alpha-key="surfaceOpacity" type="range" min="55" max="100" value="${alphaDraft.surfaceOpacity}"></label>
+          <label>Content width <input data-alpha-key="contentWidth" type="range" min="1100" max="2200" step="50" value="${alphaDraft.contentWidth}"></label>
+          <label>Row gap <input data-alpha-key="rowGap" type="range" min="4" max="24" value="${alphaDraft.rowGap}"></label>
+          <label>Border width <input data-alpha-key="borderWidth" type="range" min="0" max="3" value="${alphaDraft.borderWidth}"></label>
+          <label>Shadow strength <input data-alpha-key="shadowStrength" type="range" min="0" max="100" value="${alphaDraft.shadowStrength}"></label>
+          ${[
+            ['compact', 'Compact density'],
+            ['reducedMotion', 'Reduced motion'],
+            ['liveRefresh', 'Live refresh'],
+            ['stickyTopbar', 'Sticky top bar'],
+            ['showQuickStats', 'Show quick stats'],
+            ['showEyebrows', 'Show section labels'],
+            ['uppercaseButtons', 'Uppercase commands'],
+            ['highContrast', 'High contrast'],
+            ['focusBoost', 'Strong keyboard focus'],
+            ['denseForms', 'Dense forms'],
+          ].map(([key, label]) => `<label class="switch"><input type="checkbox" data-alpha-key="${key}" ${alphaDraft[key] ? 'checked' : ''}><span></span>${label}</label>`).join('')}
+        </div>
+        <div class="backup-settings">
+          <button type="submit">Save Alpha layout</button>
+          <button class="secondary" type="button" data-action="alpha-cancel">Cancel preview</button>
+          <button class="secondary" type="button" data-action="alpha-undo" ${uiHistory.length ? '' : 'disabled'}>Undo saved</button>
+          <button class="secondary" type="button" data-action="alpha-redo" ${uiRedo.length ? '' : 'disabled'}>Redo saved</button>
+          <button class="danger" type="button" data-action="alpha-reset">Reset draft</button>
+        </div>
+      </form>
+      <h3>Navigation order</h3>
       <div class="plugin-list">
-        ${visibleNavOrder.map((item, index) => `<div class="plugin-row"><strong>${escapeHtml(item.label)}</strong><div class="row-actions"><button class="secondary" type="button" data-action="beta-nav-move" data-nav-key="${escapeHtml(item.key)}" data-direction="-1" ${index === 0 ? 'disabled' : ''}>Move up</button><button class="secondary" type="button" data-action="beta-nav-move" data-nav-key="${escapeHtml(item.key)}" data-direction="1" ${index === visibleNavOrder.length - 1 ? 'disabled' : ''}>Move down</button></div></div>`).join('')}
+        ${visibleNavOrder.map((item, index) => `<div class="plugin-row"><strong>${escapeHtml(item.label)}</strong><div class="row-actions"><button class="secondary" type="button" data-action="alpha-nav-move" data-nav-key="${escapeHtml(item.key)}" data-direction="-1" ${index === 0 ? 'disabled' : ''}>Move up</button><button class="secondary" type="button" data-action="alpha-nav-move" data-nav-key="${escapeHtml(item.key)}" data-direction="1" ${index === visibleNavOrder.length - 1 ? 'disabled' : ''}>Move down</button></div></div>`).join('')}
+      </div>
+      <h3>Section command order</h3>
+      <div class="plugin-list">
+        ${(alphaDraft.actionPriority || []).map((key, index, list) => `<div class="plugin-row"><strong>${escapeHtml(key.replaceAll('-', ' '))}</strong><div class="row-actions"><button class="secondary" type="button" data-action="alpha-action-move" data-command-key="${escapeHtml(key)}" data-direction="-1" ${index === 0 ? 'disabled' : ''}>Move up</button><button class="secondary" type="button" data-action="alpha-action-move" data-command-key="${escapeHtml(key)}" data-direction="1" ${index === list.length - 1 ? 'disabled' : ''}>Move down</button></div></div>`).join('')}
       </div>
     </details>
   `;
@@ -1183,6 +1266,11 @@ function renderBackups() {
         <label>Add code <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456"></label>
         <button type="submit">Request shared backup</button>
       </form>
+      <div class="quick-stats">
+        <article><span>Filename timezone</span><strong>${escapeHtml(data.schedule?.fileNameTimeZone || 'UTC')}</strong></article>
+        <article><span>Next automatic backup</span><strong>${data.schedule?.nextBackupAt ? escapeHtml(formatBackupDate(data.schedule.nextBackupAt)) : 'Disabled'}</strong></article>
+        <article><span>Scheduler accuracy</span><strong>within ${Number(data.schedule?.schedulerResolutionSeconds || 30)} sec</strong></article>
+      </div>
       <form class="backup-settings" id="publicBackupImportForm">
         <label>Public backup URL <input name="url" type="url" placeholder="https://panel.example/api/public/backups/..." required></label>
         <button type="submit">Import backup</button>
@@ -1313,11 +1401,15 @@ async function renderSecurity(forceHealth = false) {
     elements.healthPanel.innerHTML = `
       <div class="section-head">
         <div><p class="eyebrow">Smart Check</p><h2>${escapeHtml(state.health?.summary || 'No check yet')}</h2></div>
-        <button type="button" data-action="run-health-check">Run check now</button>
+        <div class="row-actions"><button class="secondary" type="button" data-action="adaptive-heal">Adaptive heal</button><button type="button" data-action="run-health-check">Run check now</button></div>
       </div>
       <p class="muted">Last checked: ${escapeHtml(state.health?.checkedAtText ? new Date(state.health.checkedAtText).toLocaleString() : 'never')}</p>
       <div class="health-grid">
         ${checks.map((check) => `<article class="${check.ok ? 'is-ok' : 'is-bad'}"><strong>${escapeHtml(check.name)}</strong><span>${escapeHtml(check.message)}</span></article>`).join('') || '<p class="empty-state">Run a health check to verify panel folders, database, software, and Java.</p>'}
+      </div>
+      <h3>Adaptive engine</h3>
+      <div class="health-grid">
+        ${(state.adaptiveInsights || []).map((insight) => `<article class="${insight.anomalies?.length ? 'is-bad' : 'is-ok'}"><strong>${escapeHtml(insight.section)} ${insight.health}%</strong><span>${insight.learnedSamples < 5 ? `Learning baseline (${insight.learnedSamples}/5)` : insight.anomalies?.length ? `${insight.anomalies.length} learned anomaly signal(s)` : 'Operating inside its learned baseline'}</span></article>`).join('')}
       </div>
     `;
   }
@@ -1386,6 +1478,7 @@ async function refresh({ keepView = true } = {}) {
     state.settings = overview.settings || null;
     state.loginEvents = overview.loginEvents || [];
     state.health = overview.health || null;
+    state.adaptiveInsights = overview.adaptiveInsights || [];
 
     if (state.activeServerId && !state.servers.some((server) => server.id === state.activeServerId)) {
       state.activeServerId = null;
@@ -1421,6 +1514,7 @@ async function refreshServerStatusOnly() {
   state.settings = overview.settings || state.settings;
   state.loginEvents = overview.loginEvents || state.loginEvents;
   state.health = overview.health || state.health;
+  state.adaptiveInsights = overview.adaptiveInsights || state.adaptiveInsights;
   if (state.activeServerId && !state.servers.some((server) => server.id === state.activeServerId)) {
     state.activeServerId = state.servers[0]?.id || null;
   }
@@ -1553,7 +1647,7 @@ function startRefreshLoop() {
       refreshServerStatusOnly().catch(() => {});
     }
     if (state.activeView === 'files') renderUploadSessions().catch(() => {});
-  }, 1500);
+  }, 1000);
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -1820,6 +1914,26 @@ document.addEventListener('submit', async (event) => {
   }
 });
 
+document.addEventListener('input', (event) => {
+  const control = event.target.closest('[data-alpha-key]');
+  if (!control) return;
+  const key = control.dataset.alphaKey;
+  const value = control.type === 'checkbox'
+    ? control.checked
+    : control.type === 'range'
+      ? Number(control.value)
+      : control.value;
+  alphaDraft = { ...alphaDraft, [key]: value };
+  applyUiPreferences(alphaDraft);
+});
+
+document.addEventListener('submit', (event) => {
+  if (event.target.id !== 'alphaUiForm') return;
+  event.preventDefault();
+  commitUiPreferences(alphaDraft);
+  showToast('Alpha layout saved.');
+});
+
 document.addEventListener('submit', async (event) => {
   if (event.target.id !== 'terminalUnlockForm') return;
   event.preventDefault();
@@ -1976,38 +2090,59 @@ document.addEventListener('click', async (event) => {
       await refresh();
       return;
     }
-    if (action === 'beta-compact' || action === 'beta-reduced-motion' || action === 'beta-live-refresh') {
-      const key = action === 'beta-compact' ? 'compact' : action === 'beta-reduced-motion' ? 'reducedMotion' : 'liveRefresh';
-      commitUiPreferences({ [key]: Boolean(actionTarget.checked) });
-      return;
-    }
-    if (action === 'beta-nav-move') {
+    if (action === 'alpha-nav-move') {
       const current = [...document.querySelectorAll('.nav-list [data-view]')].map((button) => button.dataset.view);
       const index = current.indexOf(actionTarget.dataset.navKey);
       const targetIndex = index + Number(actionTarget.dataset.direction || 0);
       if (index < 0 || targetIndex < 0 || targetIndex >= current.length) return;
       [current[index], current[targetIndex]] = [current[targetIndex], current[index]];
-      commitUiPreferences({ navOrder: current });
+      alphaDraft = { ...alphaDraft, navOrder: current };
+      applyUiPreferences(alphaDraft);
+      renderSettings();
       return;
     }
-    if (action === 'beta-undo' && uiHistory.length) {
+    if (action === 'alpha-action-move') {
+      const current = [...(alphaDraft.actionPriority || [])];
+      const index = current.indexOf(actionTarget.dataset.commandKey);
+      const targetIndex = index + Number(actionTarget.dataset.direction || 0);
+      if (index < 0 || targetIndex < 0 || targetIndex >= current.length) return;
+      [current[index], current[targetIndex]] = [current[targetIndex], current[index]];
+      alphaDraft = { ...alphaDraft, actionPriority: current };
+      applyUiPreferences(alphaDraft);
+      renderSettings();
+      return;
+    }
+    if (action === 'alpha-cancel') {
+      alphaDraft = structuredClone(uiPreferences);
+      applyUiPreferences();
+      renderSettings();
+      return;
+    }
+    if (action === 'alpha-undo' && uiHistory.length) {
       uiRedo.push(structuredClone(uiPreferences));
       uiPreferences = uiHistory.pop();
+      alphaDraft = structuredClone(uiPreferences);
       localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
       applyUiPreferences();
       renderSettings();
       return;
     }
-    if (action === 'beta-redo' && uiRedo.length) {
+    if (action === 'alpha-redo' && uiRedo.length) {
       uiHistory.push(structuredClone(uiPreferences));
       uiPreferences = uiRedo.pop();
+      alphaDraft = structuredClone(uiPreferences);
       localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
       applyUiPreferences();
       renderSettings();
       return;
     }
-    if (action === 'beta-reset') {
-      commitUiPreferences({ navOrder: [], compact: false, reducedMotion: false, liveRefresh: true });
+    if (action === 'alpha-reset') {
+      const saved = localStorage.getItem(UI_PREFERENCES_KEY);
+      localStorage.removeItem(UI_PREFERENCES_KEY);
+      alphaDraft = loadUiPreferences();
+      if (saved !== null) localStorage.setItem(UI_PREFERENCES_KEY, saved);
+      applyUiPreferences(alphaDraft);
+      renderSettings();
       return;
     }
     if (action === 'manage-server') {
@@ -2194,6 +2329,13 @@ document.addEventListener('click', async (event) => {
       showToast('Running panel health check...');
       await renderSecurity(true);
       showToast('Health check complete.');
+      return;
+    }
+    if (action === 'adaptive-heal') {
+      const result = await api('/api/adaptive/heal', { method: 'POST', body: '{}' });
+      showToast(result.actions?.length ? `Adaptive heal completed ${result.actions.length} action(s).` : 'Adaptive heal found no safe repairs.');
+      await refresh();
+      if (state.activeView === 'security') await renderSecurity();
       return;
     }
     if (action === 'delete-server') {

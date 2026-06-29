@@ -32,6 +32,8 @@ function serviceUser() {
 
 function serviceContent() {
   const user = serviceUser();
+  const editionPath = path.join(repoRoot, 'data', 'edition');
+  const edition = fs.existsSync(editionPath) ? fs.readFileSync(editionPath, 'utf8').trim() || 'normal' : 'normal';
   return `[Unit]
 Description=NexusPanel Minecraft Server Panel
 After=network-online.target
@@ -45,6 +47,7 @@ Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
 Environment=NEXUSPANEL_SERVICE=1
+Environment=NEXUSPANEL_EDITION=${edition}
 Environment=PORT=${Number(process.env.PORT || 3000)}
 Environment=NEXUSPANEL_BACKUP_ROOT=/var/lib/nexuspanel/backups
 Environment=NEXUSPANEL_X_ACCEL_ROOT=
@@ -96,7 +99,11 @@ function uninstall() {
 }
 
 function status({ quiet = false } = {}) {
-  if (!hasSystemd()) return { available: false, active: false, installed: false };
+  if (!hasSystemd()) {
+    const result = { available: false, active: false, installed: false, serviceName, servicePath };
+    if (!quiet) console.log(JSON.stringify(result, null, 2));
+    return result;
+  }
   const installed = fs.existsSync(servicePath);
   const active = spawnSync('systemctl', ['is-active', '--quiet', serviceName], { stdio: 'ignore' }).status === 0;
   const enabled = spawnSync('systemctl', ['is-enabled', '--quiet', serviceName], { stdio: 'ignore' }).status === 0;
@@ -108,7 +115,15 @@ function status({ quiet = false } = {}) {
 
 function startService() {
   requireLinuxSystemd();
+  if (!fs.existsSync(servicePath)) {
+    requireRoot();
+    return install({ start: true });
+  }
   runSystemctl(['start', serviceName]);
+  const result = status({ quiet: true });
+  if (!result.active) throw new Error(`${serviceName} did not become active. Run: journalctl -u ${serviceName} -n 100 --no-pager`);
+  console.log(`${serviceName} is running.`);
+  return result;
 }
 
 function stopService() {
@@ -118,7 +133,15 @@ function stopService() {
 
 function restartService() {
   requireLinuxSystemd();
+  if (!fs.existsSync(servicePath)) {
+    requireRoot();
+    return install({ start: true });
+  }
   runSystemctl(['restart', serviceName]);
+  const result = status({ quiet: true });
+  if (!result.active) throw new Error(`${serviceName} restart failed. Run: journalctl -u ${serviceName} -n 100 --no-pager`);
+  console.log(`${serviceName} restarted successfully.`);
+  return result;
 }
 
 function changePort(nextPort) {
@@ -172,5 +195,6 @@ module.exports = {
   restartService,
   logsService,
   changePort,
+  serviceContent,
   status,
 };

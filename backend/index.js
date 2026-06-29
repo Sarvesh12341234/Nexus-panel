@@ -12,6 +12,7 @@ const { pipeline } = require('node:stream/promises');
 const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
 const { db, getUserCount } = require('./db');
+const { AdaptiveEngine } = require('./adaptive_engine');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
 const { assertInside, backupsRoot, displayPath, ensureServerDirs, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
@@ -45,6 +46,9 @@ const editionPath = path.join(dataRoot, 'edition');
 const terminalSessions = new Map();
 const wakeWatchers = new Map();
 const passwordResetRequests = new Map();
+const keyedOperations = new Map();
+const adaptiveEngine = new AdaptiveEngine();
+let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
 const PANEL_VERSION = '1.2.0';
 let updateStatus = {
@@ -154,6 +158,7 @@ function panelSettingsPayload(user = null) {
     terminalEnabled: settingValue('terminal_enabled', '0') === '1',
     timeZone: user ? getUserTimezone(user.id) : 'UTC',
     updateRepo: FIXED_UPDATE_REPO,
+    publicBaseUrl: settingValue('public_base_url', process.env.NEXUSPANEL_PUBLIC_URL || ''),
     edition,
     updateTag: configuredTag,
     updateStatus,
@@ -163,6 +168,8 @@ function panelSettingsPayload(user = null) {
     maxCpuCores: hostCpuCount(),
     platform: process.platform,
     nexuExample: edition === 'host' ? nexuExample() : null,
+    hostMaintenanceMode: edition === 'host' && settingValue('host_maintenance_mode', '0') === '1',
+    hostServerQuota: edition === 'host' ? clampNumber(settingValue('host_server_quota', '10'), 1, 500, 10) : 0,
   };
 }
 
@@ -630,6 +637,21 @@ function randomSixDigitCode() {
   return String(crypto.randomInt(100000, 1000000));
 }
 
+async function withKeyedOperation(key, task) {
+  const previous = keyedOperations.get(key) || Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const queued = previous.catch(() => {}).then(() => gate);
+  keyedOperations.set(key, queued);
+  await previous.catch(() => {});
+  try {
+    return await task();
+  } finally {
+    release();
+    if (keyedOperations.get(key) === queued) keyedOperations.delete(key);
+  }
+}
+
 function tokenHash(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
@@ -827,7 +849,9 @@ function canUseServer(user, server) {
 
 function canOwnServerShare(user, server) {
   if (!user || !server) return false;
-  return user.role === 'owner' || Number(server.owner_user_id) === Number(user.id);
+  if (user.role === 'owner') return true;
+  if (!isHostEdition()) return canUseServer(user, server);
+  return Number(server.owner_user_id) === Number(user.id);
 }
 
 function resolveServerOwnerUserId(req, requestedValue, fallback = null) {
@@ -915,7 +939,8 @@ function uploadRows(serverId) {
 }
 
 function parseChunkRanges(value) {
-  const ranges = Array.isArray(value) ? value : parseJsonObject(value) || [];
+  const parsed = Array.isArray(value) ? value : parseJsonObject(value);
+  const ranges = Array.isArray(parsed) ? parsed : [];
   return ranges
     .map((range) => ({ start: Number(range.start), end: Number(range.end) }))
     .filter((range) => Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end) && range.start >= 0 && range.end > range.start)
@@ -1115,32 +1140,86 @@ function reloadWhitelistIfRunning(server, software) {
 }
 
 async function createServerBackup(server, reason = 'manual') {
+  return withKeyedOperation(`backup:${server.id}`, () => createServerBackupUnlocked(server, reason));
+}
+
+function assertHostServerQuota(ownerUserId) {
+  if (!isHostEdition() || !ownerUserId) return;
+  const quota = clampNumber(settingValue('host_server_quota', '10'), 1, 500, 10);
+  const count = db.prepare('SELECT COUNT(*) AS count FROM servers WHERE owner_user_id = ?').get(ownerUserId).count;
+  if (count >= quota) throw new Error(`This host account reached its ${quota}-server quota.`);
+}
+
+function adaptiveInsights(user, req) {
+  if (!user) return [];
+  const servers = serverRows(user, req);
+  const rawServers = servers.map((server) => db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id)).filter(Boolean);
+  const now = Date.now();
+  const activeUploads = rawServers.flatMap((server) => uploadRows(server.id)).filter((upload) => ['active', 'paused', 'waiting'].includes(upload.status));
+  const overdueRatios = rawServers.filter((server) => server.scheduled_backups).map((server) => {
+    const interval = backupIntervalMinutesFrom(server) * 60 * 1000;
+    return interval ? Math.max(0, now - Number(server.last_backup_at || now)) / interval : 0;
+  });
+  const memory = hostMemoryStats();
+  return [
+    adaptiveEngine.observe('servers', {
+      onlineRatio: servers.length ? servers.filter((server) => server.status === 'online').length / servers.length : 0,
+      averageInstallProgress: servers.length ? servers.reduce((sum, server) => sum + Number(server.installProgress || 0), 0) / servers.length : 100,
+    }),
+    adaptiveEngine.observe('backups', {
+      maximumOverdueRatio: overdueRatios.length ? Math.max(...overdueRatios) : 0,
+      scheduledServers: overdueRatios.length,
+    }),
+    adaptiveEngine.observe('uploads', {
+      activeUploads: activeUploads.length,
+      averageProgress: activeUploads.length ? activeUploads.reduce((sum, upload) => sum + upload.progress, 0) / activeUploads.length : 100,
+      stalledUploads: activeUploads.filter((upload) => now - new Date(`${upload.updatedAt}Z`).getTime() > 2 * 60 * 1000).length,
+    }),
+    adaptiveEngine.observe('resources', {
+      cpuPercent: hostCpuPercent(),
+      memoryPercent: Math.round((memory.used / Math.max(1, memory.total)) * 100),
+    }),
+  ];
+}
+
+function backupTimezone(server) {
+  const configured = settingValue(`server_backup_timezone_${server.id}`, '');
+  if (configured) return configured;
+  const assignedUserId = Number(server.owner_user_id || 0);
+  const owner = assignedUserId
+    ? db.prepare('SELECT id FROM users WHERE id = ?').get(assignedUserId)
+    : db.prepare("SELECT id FROM users WHERE role = 'owner' ORDER BY id ASC LIMIT 1").get();
+  return owner ? getUserTimezone(owner.id) : 'UTC';
+}
+
+function backupTimestamp(date, timeZone) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'shortOffset',
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  const zone = String(parts.timeZoneName || timeZone).replace(/^GMT/, 'UTC').replace(/[^A-Za-z0-9+-]/g, '-');
+  return `${parts.year}-${parts.month}-${parts.day}_${parts.hour}-${parts.minute}-${parts.second}_${zone}`;
+}
+
+async function createServerBackupUnlocked(server, reason = 'manual') {
   const root = ensureServerDirs(server);
   const backupsDir = assertInside(backupsRoot, path.join(backupsRoot, String(server.id)));
   await fs.promises.mkdir(backupsDir, { recursive: true });
-
-  // ===== NEW: 12-HOUR FORMAT FOR FILENAME =====
   const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-
-  let hours = now.getHours();
-  const minutes = String(now.getMinutes()).padStart(2, '0');
-  const ampm = hours >= 12 ? 'PM' : 'AM';
-  hours = hours % 12 || 12; // Convert to 12-hour format
-  const hourStr = String(hours).padStart(2, '0');
-
-  // Format: server-name-backup-reason-day-month-year || hour-minute-AM/PM
-  const dateStr = `${day}-${month}-${year}`;
-  const timeStr = `${hourStr}-${minutes}-${ampm}`;
-
+  const timeZone = backupTimezone(server);
   const serverName = server.name
     .replace(/[^a-z0-9]+/gi, '-')
     .replace(/^-+|-+$/g, '')
     .toLowerCase() || 'server';
-
-  const archiveName = `${serverName}-backup-${reason}-${dateStr}--${timeStr}.zip`;
+  const archiveName = `${serverName}-backup-${reason}-${backupTimestamp(now, timeZone)}.zip`;
   const archivePath = path.join(backupsDir, archiveName);
 
   // ===== EXISTING BACKUP LOGIC =====
@@ -1162,9 +1241,9 @@ async function createServerBackup(server, reason = 'manual') {
   for (const old of backups.slice(retention)) await fs.promises.rm(old.path, { force: true });
 
   db.prepare('UPDATE servers SET last_backup_at = ? WHERE id = ?').run(Date.now(), server.id);
-  appendLog(server.id, `[NexusPanel] Backup created: ${archiveName}`);
+  appendLog(server.id, `[NexusPanel] Backup created: ${archiveName} (${timeZone})`);
 
-  return { name: archiveName, path: archiveName, size: fs.statSync(archivePath).size };
+  return { name: archiveName, path: archiveName, size: fs.statSync(archivePath).size, createdAt: now.getTime(), timeZone };
 }
 
 async function backupRows(server) {
@@ -1535,6 +1614,7 @@ app.get('/api/overview', (req, res) => {
     loginEvents: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? loginEventRows(10) : [],
     health: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? (fs.existsSync(healthPath) ? readHealthFile() : null) : null,
     optimizer: req.user && req.user.access_level >= permissions.MANAGE_SERVERS ? optimizerStatus() : null,
+    adaptiveInsights: req.user ? adaptiveInsights(req.user, req) : [],
   };
 
   res.json(payload);
@@ -1560,6 +1640,10 @@ app.post('/api/user/timezone', requireAuth, (req, res) => {
       return res.status(400).json({ error: 'Invalid timezone' });
     }
     setUserTimezone(req.user.id, timezone);
+    const ownedServers = req.user.role === 'owner'
+      ? db.prepare('SELECT id FROM servers WHERE owner_user_id IS NULL OR owner_user_id = ?').all(req.user.id)
+      : db.prepare('SELECT id FROM servers WHERE owner_user_id = ?').all(req.user.id);
+    for (const server of ownedServers) setSettingValue(`server_backup_timezone_${server.id}`, timezone);
     res.json({ success: true, timezone });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1568,7 +1652,7 @@ app.post('/api/user/timezone', requireAuth, (req, res) => {
 
 app.get('/api/timezones', requireAuth, (req, res) => {
   try {
-    const timezones = [...new Set([...getAllTimezones(), 'Asia/Kolkata', 'Asia/Calcutta'])].sort();
+    const timezones = [...new Set([...getAllTimezones(), 'UTC', 'Asia/Kolkata', 'Asia/Calcutta'])].sort();
     res.json({ timezones });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1586,6 +1670,10 @@ app.use('/api/servers/:id', (req, res, next) => {
 app.get('/api/optimizer/status', requireAccess(permissions.MANAGE_SERVERS), (_req, res) => {
   res.json(optimizerStatus());
 });
+
+app.post('/api/adaptive/heal', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {
+  res.json(await runAdaptiveMaintenance());
+}));
 
 app.get('/api/optimizer/plan', requireAccess(permissions.MANAGE_SERVERS), (_req, res) => {
   res.json(planCommands());
@@ -1668,6 +1756,9 @@ app.post('/api/password/forgot', asyncRoute(async (req, res) => {
   const lastRequest = passwordResetRequests.get(requestKey) || 0;
   if (Date.now() - lastRequest < 60 * 1000) {
     return res.status(429).json({ error: 'Wait one minute before requesting another code.' });
+  }
+  if (isHostEdition() && user.role !== 'owner' && settingValue('host_maintenance_mode', '0') === '1') {
+    return res.status(503).json({ error: 'Host maintenance is active. Only the panel owner can sign in.' });
   }
   passwordResetRequests.set(requestKey, Date.now());
   if (user) {
@@ -1795,6 +1886,7 @@ app.post('/api/host/provision', asyncRoute(async (req, res) => {
     user.id,
   );
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
+  setSettingValue(`server_backup_timezone_${inserted.id}`, getUserTimezone(user.id));
   const root = ensureServerDirs({ ...inserted, server_path: serverPath(inserted.id, inserted.name) });
   const executablePath = path.join(root, 'software', selectedSoftware.executable);
   const mark = writeProfile({ ...inserted, server_path: root }, root, null);
@@ -1927,6 +2019,18 @@ app.put('/api/settings', requireAccess(permissions.MANAGE_ADMINS), (req, res) =>
   setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
+  const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
+  if (publicBaseUrl) {
+    const parsed = new URL(publicBaseUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+      return res.status(400).json({ error: 'Public panel URL must be HTTP or HTTPS without embedded credentials.' });
+    }
+  }
+  setSettingValue('public_base_url', publicBaseUrl);
+  if (isHostEdition()) {
+    setSettingValue('host_maintenance_mode', toBool(req.body.hostMaintenanceMode) ? '1' : '0');
+    setSettingValue('host_server_quota', clampNumber(req.body.hostServerQuota, 1, 500, 10));
+  }
   const updateTag = String(req.body.updateTargetTag || req.body.updateTag || panelSettingsPayload(req.user).updateTag).trim();
   if (/^(normal|host)-v\d+\.\d+(?:\.\d+)?$/.test(updateTag)) setSettingValue('update_target_tag', updateTag);
   setSettingValue('update_repo', FIXED_UPDATE_REPO);
@@ -2171,6 +2275,8 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
     return res.status(400).json({ error: 'Selected software is not compatible with this server type.' });
   }
 
+  const ownerUserId = ownerOnly(req) ? resolveServerOwnerUserId(req, req.body.ownerUserId, null) : req.user.id;
+  assertHostServerQuota(ownerUserId);
   const result = db.prepare(`
     INSERT INTO servers (
       name, type, port, max_memory_mb, auto_start, auto_restart, crash_backup,
@@ -2199,10 +2305,11 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
     String(req.body.softwareVersion || 'latest').trim().slice(0, 32) || 'latest',
     clampNumber(req.body.cpuCores, 1, hostCpuCount(), 1),
     0,
-    ownerOnly(req) ? resolveServerOwnerUserId(req, req.body.ownerUserId, null) : req.user.id,
+    ownerUserId,
   );
 
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
+  setSettingValue(`server_backup_timezone_${inserted.id}`, getUserTimezone(req.user.id));
   const root = ensureServerDirs({ ...inserted, server_path: serverPath(inserted.id, inserted.name) });
   const executablePath = path.join(root, 'software', selectedSoftware.executable);
   const mark = writeProfile({ ...inserted, server_path: root }, root, null);
@@ -2222,6 +2329,8 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
   const cpuCores = clampNumber(req.body.cpuCores || nexu.resources.cpuCores, 1, hostCpuCount(), nexu.resources.cpuCores || 1);
   const type = nexu.game.edition === 'java' || nexu.game.edition === 'bedrock' ? nexu.game.edition : 'custom';
   const selectedSoftware = findSoftware(nexu.runtime.softwareKey);
+  const ownerUserId = ownerOnly(req) ? resolveServerOwnerUserId(req, req.body.ownerUserId, null) : req.user.id;
+  assertHostServerQuota(ownerUserId);
 
   const result = db.prepare(`
     INSERT INTO servers (
@@ -2255,11 +2364,12 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
     nexu.key,
     JSON.stringify(nexu),
     '',
-    ownerOnly(req) ? resolveServerOwnerUserId(req, req.body.ownerUserId, null) : req.user.id,
+    ownerUserId,
   );
 
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
   const root = ensureServerDirs({ ...inserted, server_path: serverPath(inserted.id, inserted.name) });
+  setSettingValue(`server_backup_timezone_${inserted.id}`, getUserTimezone(req.user.id));
   const executablePath = selectedSoftware ? path.join(root, 'software', selectedSoftware.executable) : '';
   const mark = writeProfile({ ...inserted, server_path: root, max_memory_mb: memoryMb, cpu_cores: cpuCores, disk_limit_mb: nexu.resources.diskMb }, root, nexu);
   db.prepare('UPDATE servers SET server_path = ?, executable_path = ?, nexus_mark_profile = ? WHERE id = ?').run(root, executablePath, JSON.stringify(mark), inserted.id);
@@ -2325,6 +2435,7 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
     ownerUserId,
     id,
   );
+  setSettingValue(`server_backup_timezone_${id}`, getUserTimezone(ownerUserId || req.user.id));
 
   res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(id)) });
 });
@@ -2334,6 +2445,7 @@ app.delete('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), asyncR
   if (runtimeStatus(server.id) === 'online') return res.status(400).json({ error: 'Stop the server before deleting it.' });
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   await fs.promises.rm(assertInside(serversRoot, root), { recursive: true, force: true });
+  db.prepare('DELETE FROM panel_settings WHERE key = ?').run(`server_backup_timezone_${server.id}`);
   await fs.promises.rm(assertInside(backupsRoot, path.join(backupsRoot, String(server.id))), { recursive: true, force: true }).catch(() => {});
   db.prepare('DELETE FROM servers WHERE id = ?').run(server.id);
   appendLog(server.id, '[NexusPanel] Server deleted.');
@@ -2832,7 +2944,25 @@ app.get('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), asy
       backups: await backupRows(sourceServer),
     });
   }
-  res.json({ backups: await backupRows(server), canManageShare: canShareOwner, shareCode: code || null, shareRequests: incoming, sharedBackups });
+  const intervalMs = backupIntervalMinutesFrom(server) * 60 * 1000;
+  const nextBackupAt = server.scheduled_backups
+    ? Number(server.last_backup_at || 0) > 0 ? Number(server.last_backup_at) + intervalMs : Date.now()
+    : 0;
+  res.json({
+    backups: await backupRows(server),
+    canManageShare: canShareOwner,
+    shareCode: code || null,
+    shareRequests: incoming,
+    sharedBackups,
+    schedule: {
+      enabled: Boolean(server.scheduled_backups),
+      intervalMinutes: backupIntervalMinutesFrom(server),
+      lastBackupAt: Number(server.last_backup_at || 0),
+      nextBackupAt,
+      schedulerResolutionSeconds: 30,
+      fileNameTimeZone: backupTimezone(server),
+    },
+  });
 }));
 
 app.post('/api/servers/:id/backups/public-link', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
@@ -2843,9 +2973,14 @@ app.post('/api/servers/:id/backups/public-link', requireAccess(permissions.MANAG
   db.prepare('UPDATE backup_public_links SET revoked_at = ? WHERE server_id = ? AND revoked_at = 0').run(Date.now(), server.id);
   db.prepare('INSERT INTO backup_public_links (server_id, token_hash, expires_at) VALUES (?, ?, ?)')
     .run(server.id, tokenHash(token), expiresAt);
-  const configuredBase = String(process.env.NEXUSPANEL_PUBLIC_URL || '').replace(/\/+$/, '');
+  const configuredBase = settingValue('public_base_url', process.env.NEXUSPANEL_PUBLIC_URL || '').replace(/\/+$/, '');
   const base = configuredBase || `${req.protocol}://${req.get('host')}`;
-  const archives = (await backupRows(server)).map((backup) => ({
+  let backups = await backupRows(server);
+  if (!backups.length) {
+    await createServerBackup(server, 'share');
+    backups = await backupRows(server);
+  }
+  const archives = backups.map((backup) => ({
     ...backup,
     url: `${base}/api/public/backups/${encodeURIComponent(token)}/${encodeURIComponent(backup.name)}`,
   }));
@@ -3107,6 +3242,7 @@ app.post('/api/servers/:id/files/upload-chunk', requireAccess(permissions.MANAGE
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
+  return withKeyedOperation(`upload:${server.id}:${target.relative}`, async () => {
   if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Upload chunk body must be binary.' });
   const offset = Number(req.query.offset || 0);
   const totalSize = Number(req.query.size || 0);
@@ -3146,6 +3282,7 @@ app.post('/api/servers/:id/files/upload-chunk', requireAccess(permissions.MANAGE
   }
   upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, 'active', 'Uploading', chunks);
   res.json({ ok: true, path: target.relative, uploadedBytes, complete: false });
+  });
 }));
 
 app.post('/api/servers/:id/files/upload-complete', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
@@ -3342,10 +3479,44 @@ async function runAutoBackups() {
   }
 }
 
+async function runAdaptiveMaintenance() {
+  const actions = [];
+  const now = Date.now();
+  const uploads = db.prepare('SELECT * FROM upload_sessions').all();
+  for (const upload of uploads) {
+    const ranges = mergeChunkRanges(parseChunkRanges(upload.chunks_json));
+    const uploadedBytes = uploadedRangeBytes(ranges);
+    const normalized = JSON.stringify(ranges);
+    if (normalized !== upload.chunks_json || uploadedBytes !== upload.uploaded_bytes) {
+      db.prepare('UPDATE upload_sessions SET chunks_json = ?, uploaded_bytes = ?, message = ? WHERE server_id = ? AND relative_path = ?')
+        .run(normalized, uploadedBytes, 'Adaptive engine normalized upload ranges', upload.server_id, upload.relative_path);
+      actions.push(`Normalized upload ${upload.relative_path}`);
+    }
+    const updatedAt = new Date(`${upload.updated_at}Z`).getTime();
+    if (upload.status === 'active' && Number.isFinite(updatedAt) && now - updatedAt > 10 * 60 * 1000) {
+      db.prepare("UPDATE upload_sessions SET status = 'paused', message = 'Paused after inactivity' WHERE server_id = ? AND relative_path = ?")
+        .run(upload.server_id, upload.relative_path);
+      actions.push(`Paused stalled upload ${upload.relative_path}`);
+    }
+  }
+  const expiredSessions = db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now).changes;
+  const expiredOtps = db.prepare('DELETE FROM password_reset_otps WHERE expires_at <= ?').run(now).changes;
+  const expiredLinks = db.prepare('UPDATE backup_public_links SET revoked_at = ? WHERE revoked_at = 0 AND expires_at <= ?').run(now, now).changes;
+  if (expiredSessions) actions.push(`Removed ${expiredSessions} expired session(s)`);
+  if (expiredOtps) actions.push(`Removed ${expiredOtps} expired reset code(s)`);
+  if (expiredLinks) actions.push(`Revoked ${expiredLinks} expired public backup link(s)`);
+  await runAutoBackups();
+  refreshWakeWatchers();
+  adaptiveMaintenanceStatus = { lastRunAt: now, actions };
+  return { ok: true, ...adaptiveMaintenanceStatus };
+}
+
 function startSchedulers() {
-  setInterval(runAutoBackups, 5 * 60 * 1000).unref();
+  setInterval(runAutoBackups, 30 * 1000).unref();
+  setInterval(() => runAdaptiveMaintenance().catch(() => {}), 2 * 60 * 1000).unref();
   setInterval(() => runHealthCheck(false).catch(() => {}), 24 * 60 * 60 * 1000).unref();
   runAutoBackups().catch(() => {});
+  runAdaptiveMaintenance().catch(() => {});
   runHealthCheck(false).catch(() => {});
 }
 

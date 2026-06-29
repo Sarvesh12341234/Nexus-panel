@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.0 Reliability Revision - 2026-06-29
+
+### Fixed
+
+- Backup filenames use each server owner's IANA timezone and include a UTC offset.
+- Automatic backup checks run every 30 seconds and expose the calculated next run.
+- Eligible Normal Edition admins can create public backup links.
+- Legacy upload ranges no longer cause `ranges.map is not a function`.
+- Parallel chunks cannot overwrite shared cross-client progress.
+- `UTC`, `Asia/Kolkata`, and `Asia/Calcutta` are always selectable.
+- Linux CLI start/restart verifies the service became active.
+- CPU topology is cached instead of queried on every overview poll.
+
+### Added
+
+- Adaptive baseline monitoring and safe automatic maintenance.
+- Alpha UI Studio with 20 controls, drafts, save/cancel, undo/redo, and command ordering.
+- Forge Geometry theme with a distinct button silhouette.
+- Configurable public panel URL for reverse-proxied backup links.
+- Host maintenance mode and per-account server quotas.
+
 ## 1.2.0 - 2026-06-29
 
 ### Fixed
