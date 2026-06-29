@@ -47,6 +47,7 @@ const terminalSessions = new Map();
 const wakeWatchers = new Map();
 const passwordResetRequests = new Map();
 const keyedOperations = new Map();
+const crashHistory = new Map();
 const adaptiveEngine = new AdaptiveEngine();
 let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
@@ -3555,23 +3556,38 @@ function startConfiguredServers() {
   }
 }
 
-setExitHandler(async ({ server, software, intentional }) => {
-  if (intentional) return;
+setExitHandler(async ({ server, software, intentional, uptimeMs = 0 }) => {
+  if (intentional) {
+    crashHistory.delete(server.id);
+    return;
+  }
   const current = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
   if (!current) return;
-  if (current.crash_backup) {
+  const now = Date.now();
+  const recent = (crashHistory.get(server.id) || []).filter((time) => now - time < 2 * 60 * 1000);
+  recent.push(now);
+  crashHistory.set(server.id, recent);
+  const launchFailure = uptimeMs < 10 * 1000;
+  if (current.crash_backup && !launchFailure) {
     await createServerBackup(current, 'crash')
       .catch((error) => appendLog(current.id, `[NexusPanel] Crash backup failed: ${error.message}`));
+  } else if (launchFailure) {
+    appendLog(current.id, `[NexusPanel] Launch failed after ${Math.round(uptimeMs / 1000)}s; skipped crash backup because the game never became stable.`);
   }
   if (!current.auto_restart) return;
-  appendLog(current.id, '[NexusPanel] Unexpected exit detected. Restarting in 5 seconds...');
+  if (recent.length >= 3) {
+    appendLog(current.id, '[NexusPanel] Restart storm stopped after 3 failures in 2 minutes. Run Repair & Diagnose, then start manually.');
+    return;
+  }
+  const restartDelaySeconds = launchFailure ? 10 * recent.length : 5;
+  appendLog(current.id, `[NexusPanel] Unexpected exit detected. Restarting in ${restartDelaySeconds} seconds...`);
   const timer = setTimeout(() => {
     try {
       if (runtimeStatus(current.id) === 'offline') startServer(resolveInstalledExecutable(current, software), software);
     } catch (error) {
       appendLog(current.id, `[NexusPanel] Auto-restart failed: ${error.message}`);
     }
-  }, 5000);
+  }, restartDelaySeconds * 1000);
   timer.unref();
 });
 

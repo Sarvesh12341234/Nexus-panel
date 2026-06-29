@@ -115,7 +115,7 @@ function startServer(server, software) {
     serverId: server.id,
     cpuCores,
     cpuQuotaPercent: cpuCores * 100,
-    startupCpuQuotaPercent: Math.min(totalCpuCores, cpuCores * 4) * 100,
+    startupCpuQuotaPercent: cpuCores <= 3 ? Math.min(totalCpuCores, cpuCores * 4) * 100 : cpuCores * 100,
     memoryMaxMb: server.max_memory_mb || 1024,
     pathScope: storedProfile.pathScope || 'server-root-only',
   };
@@ -127,20 +127,25 @@ function startServer(server, software) {
   }, profile));
 
   processes.set(server.id, child);
+  child.startedAt = Date.now();
   child.stopCommand = software.stopCommand || 'stop';
   child.nexusUnit = wrapped.unit;
   if (wrapped.unit) {
-    appendLog(server.id, `[NexusPanel] Cgroup active: startup ${profile.startupCpuQuotaPercent}% CPU, then ${profile.cpuQuotaPercent}% CPU.`);
-    const throttleTimer = setTimeout(() => {
-      if (!processes.has(server.id)) return;
-      const result = spawnSync('systemctl', ['set-property', wrapped.unit, `CPUQuota=${profile.cpuQuotaPercent}%`], {
-        encoding: 'utf8',
-        windowsHide: true,
-      });
-      if (result.status === 0) appendLog(server.id, `[NexusPanel] Startup CPU burst ended. Limit is now ${profile.cpuCores} core(s).`);
-      else appendLog(server.id, `[NexusPanel] CPU throttle update failed: ${String(result.stderr || '').trim() || 'systemctl error'}`);
-    }, 90 * 1000);
-    throttleTimer.unref();
+    if (profile.startupCpuQuotaPercent > profile.cpuQuotaPercent) {
+      appendLog(server.id, `[NexusPanel] Cgroup active: startup ${profile.startupCpuQuotaPercent}% CPU, then ${profile.cpuQuotaPercent}% CPU.`);
+      const throttleTimer = setTimeout(() => {
+        if (!processes.has(server.id)) return;
+        const result = spawnSync('systemctl', ['set-property', wrapped.unit, `CPUQuota=${profile.cpuQuotaPercent}%`], {
+          encoding: 'utf8',
+          windowsHide: true,
+        });
+        if (result.status === 0) appendLog(server.id, `[NexusPanel] Startup CPU burst ended. Limit is now ${profile.cpuCores} core(s).`);
+        else appendLog(server.id, `[NexusPanel] CPU throttle update failed: ${String(result.stderr || '').trim() || 'systemctl error'}`);
+      }, 90 * 1000);
+      throttleTimer.unref();
+    } else {
+      appendLog(server.id, `[NexusPanel] Cgroup active: steady limit ${profile.cpuQuotaPercent}% CPU (${profile.cpuCores} cores); startup burst is disabled for allocations above 3 cores.`);
+    }
   }
   child.stdout.on('data', (chunk) => splitLines(server.id, chunk));
   child.stderr.on('data', (chunk) => splitLines(server.id, chunk));
@@ -154,7 +159,7 @@ function startServer(server, software) {
     processes.delete(server.id);
     players.delete(server.id);
     if (exitHandler) {
-      Promise.resolve(exitHandler({ server, software, code, signal, intentional }))
+      Promise.resolve(exitHandler({ server, software, code, signal, intentional, uptimeMs: Date.now() - child.startedAt }))
         .catch((error) => appendLog(server.id, `[NexusPanel] Exit recovery failed: ${error.message}`));
     }
   });
@@ -203,6 +208,9 @@ function killServer(serverId) {
   const child = processes.get(serverId);
   if (!child) return { ok: true, message: 'Server is already offline.' };
   intentionalStops.add(serverId);
+  if (child.nexusUnit && process.platform === 'linux') {
+    spawnSync('systemctl', ['kill', child.nexusUnit], { stdio: 'ignore' });
+  }
   child.kill('SIGTERM');
   appendLog(serverId, '[NexusPanel] Kill requested.');
   return { ok: true, message: 'Kill requested.' };

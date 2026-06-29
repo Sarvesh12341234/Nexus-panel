@@ -9,6 +9,12 @@ function cpuLimitPercent(cpuCores = 1) {
   return requested * 100;
 }
 
+function startupCpuLimitPercent(cpuCores = 1) {
+  const total = Math.max(1, hostCpuCount());
+  const requested = Math.max(1, Math.min(total, Number(cpuCores) || 1));
+  return requested <= 3 ? Math.min(total, requested * 4) * 100 : requested * 100;
+}
+
 function profileForServer(server, nexu = null) {
   const cpuCores = Math.max(1, Math.min(hostCpuCount(), Number(server.cpu_cores || nexu?.resources?.cpuCores || 1)));
   const ramMb = Math.max(256, Number(server.max_memory_mb || nexu?.resources?.ramMb || 1024));
@@ -20,7 +26,7 @@ function profileForServer(server, nexu = null) {
     serverId: server.id,
     cpuCores,
     cpuQuotaPercent: cpuLimitPercent(cpuCores),
-    startupCpuQuotaPercent: Math.min(hostCpuCount(), cpuCores * 4) * 100,
+    startupCpuQuotaPercent: startupCpuLimitPercent(cpuCores),
     memoryMaxMb: ramMb,
     diskLimitMb: Number(server.disk_limit_mb || nexu?.resources?.diskMb || 0),
     pathScope: 'server-root-only',
@@ -36,10 +42,10 @@ function profileForServer(server, nexu = null) {
     ],
     linuxPlan: process.platform === 'linux'
       ? {
-        systemdScope: `nexusmark-${server.id}.scope`,
+        systemdUnit: `nexusmark-${server.id}.service`,
         memoryMax: `${ramMb}M`,
         cpuQuota: `${cpuLimitPercent(cpuCores)}%`,
-        startupCpuQuota: `${Math.min(hostCpuCount(), cpuCores * 4) * 100}%`,
+        startupCpuQuota: `${startupCpuLimitPercent(cpuCores)}%`,
         noNewPrivileges: true,
         privateTmp: true,
         protectSystem: 'strict-planned',
@@ -58,9 +64,10 @@ function wrapCommand(command, args, profile) {
   return {
     command: 'systemd-run',
     args: [
-      '--scope',
       '--quiet',
       '--pipe',
+      '--wait',
+      '--collect',
       `--unit=${unit}`,
       '--property',
       `MemoryMax=${profile.memoryMaxMb}M`,
@@ -72,7 +79,7 @@ function wrapCommand(command, args, profile) {
       command,
       ...args,
     ],
-    unit: `${unit}.scope`,
+    unit: `${unit}.service`,
   };
 }
 

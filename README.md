@@ -104,6 +104,8 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - The Adaptive Engine learns baselines for servers, backups, uploads, CPU, and memory and performs non-destructive maintenance.
 - Alpha UI Studio provides 20 controls, draft previews, explicit save/cancel, undo/redo, navigation order, and command order.
 - Host Edition adds maintenance mode and configurable per-account server quotas.
+- Nexus-Mark uses transient systemd services; 1-3 core servers receive a temporary startup burst while allocations of 4+ cores stay at their configured steady limit.
+- Launch-failure restart storms stop automatically and do not create meaningless crash backups.
 - Server settings now expose per-server auto start, auto restart, wake on join, crash backup, startup delay, RAM, port, and a confirmed Fix Server action after creation.
 - Backups include minute/hour scheduling, 6-digit share-code requests, owner approval, timed access, revoke, and a separate shared-backup restore section.
 - Cross-panel backup transfer uses revocable public archive links with 256-bit random tokens, hashed token storage, expiry, ranged downloads, remote ZIP validation, and private-network import blocking.

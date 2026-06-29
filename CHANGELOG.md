@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Nexus-Mark now uses a transient systemd service because `--scope` is incompatible with `--pipe`.
+- CPU startup burst applies only to 1-3 core allocations; allocations of 4+ cores start at their steady limit.
+- Launch failures skip crash backups and restart storms stop after three failures in two minutes.
 - Public backup URLs reject direct browser downloads and only stream to NexusPanel's importer.
 - Backup filenames use each server owner's IANA timezone and include a UTC offset.
 - Automatic backup checks run every 30 seconds and expose the calculated next run.
