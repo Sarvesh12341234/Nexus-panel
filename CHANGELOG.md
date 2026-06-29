@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Runtime now falls back to the verified server directory when a stored path is missing.
+- Software version selection no longer gets rebuilt by ordinary status polling.
+- Action groups wrap inside their containers on phone, tablet, and desktop layouts.
 - Nexus-Mark now uses a transient systemd service because `--scope` is incompatible with `--pipe`.
 - CPU startup burst applies only to 1-3 core allocations; allocations of 4+ cores start at their steady limit.
 - Launch failures skip crash backups and restart storms stop after three failures in two minutes.
@@ -19,6 +22,9 @@
 
 ### Added
 
+- Alpha Studio now includes 20 button shapes, 10 additional sizing/detail controls, and portable non-expiring layout codes.
+- Start, stop, restart, and kill commands have responsive command animations.
+- Password reset email relays receive a styled NexusPanel HTML message as well as plain text.
 - Adaptive baseline monitoring and safe automatic maintenance.
 - Alpha UI Studio with 20 controls, drafts, save/cancel, undo/redo, and command ordering.
 - Forge Geometry theme with a distinct button silhouette.

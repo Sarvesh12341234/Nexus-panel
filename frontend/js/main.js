@@ -169,6 +169,16 @@ function loadUiPreferences() {
     rowGap: 12,
     borderWidth: 1,
     shadowStrength: 35,
+    navFontSize: 14,
+    buttonGap: 8,
+    cardRadius: 8,
+    inputRadius: 7,
+    sidebarOpacity: 98,
+    backdropBlur: 18,
+    lineHeight: 150,
+    consoleFontSize: 13,
+    animationSpeed: 100,
+    toolbarScale: 100,
     stickyTopbar: true,
     showQuickStats: true,
     showEyebrows: true,
@@ -205,6 +215,16 @@ function applyUiPreferences(preferences = uiPreferences) {
   document.documentElement.style.setProperty('--alpha-row-gap', `${Number(preferences.rowGap)}px`);
   document.documentElement.style.setProperty('--alpha-border-width', `${Number(preferences.borderWidth)}px`);
   document.documentElement.style.setProperty('--alpha-shadow-strength', Number(preferences.shadowStrength) / 100);
+  document.documentElement.style.setProperty('--alpha-nav-font-size', `${Number(preferences.navFontSize)}px`);
+  document.documentElement.style.setProperty('--alpha-button-gap', `${Number(preferences.buttonGap)}px`);
+  document.documentElement.style.setProperty('--alpha-card-radius', `${Number(preferences.cardRadius)}px`);
+  document.documentElement.style.setProperty('--alpha-input-radius', `${Number(preferences.inputRadius)}px`);
+  document.documentElement.style.setProperty('--alpha-sidebar-opacity', `${Number(preferences.sidebarOpacity)}%`);
+  document.documentElement.style.setProperty('--alpha-backdrop-blur', `${Number(preferences.backdropBlur)}px`);
+  document.documentElement.style.setProperty('--alpha-line-height', Number(preferences.lineHeight) / 100);
+  document.documentElement.style.setProperty('--alpha-console-font-size', `${Number(preferences.consoleFontSize)}px`);
+  document.documentElement.style.setProperty('--alpha-animation-speed', `${Number(preferences.animationSpeed)}ms`);
+  document.documentElement.style.setProperty('--alpha-toolbar-scale', Number(preferences.toolbarScale) / 100);
   const nav = document.querySelector('.nav-list');
   if (!nav) return;
   const buttons = new Map([...nav.querySelectorAll('[data-view]')].map((button) => [button.dataset.view, button]));
@@ -811,6 +831,14 @@ async function renderActiveView() {
   applyUiPreferences(alphaDraft);
 }
 
+function animateCommandButton(button) {
+  if (!button) return;
+  button.classList.remove('is-commanding');
+  void button.offsetWidth;
+  button.classList.add('is-commanding');
+  button.addEventListener('animationend', () => button.classList.remove('is-commanding'), { once: true });
+}
+
 function renderPlugins() {
   const canManagePlugins = can(state.permissions.MANAGE_FILES);
   if (elements.pluginForm) elements.pluginForm.hidden = true;
@@ -1069,7 +1097,9 @@ function renderSettings() {
       <summary>Alpha UI studio</summary>
       <form id="alphaUiForm">
         <div class="alpha-control-grid">
-          <label>Button shape <select data-alpha-key="buttonShape">${alphaOption('soft', alphaDraft.buttonShape, 'Soft')}${alphaOption('angular', alphaDraft.buttonShape, 'Angular')}${alphaOption('pill', alphaDraft.buttonShape, 'Pill')}${alphaOption('tech', alphaDraft.buttonShape, 'Tech cut')}</select></label>
+          <label>Button shape <select data-alpha-key="buttonShape">${[
+            ['soft','Soft'],['angular','Angular'],['pill','Pill'],['tech','Tech cut'],['square','Square'],['bevel','Bevel'],['notch','Notch'],['hex','Hex'],['slant','Slant'],['tab','Tab'],['leaf','Leaf'],['bracket','Bracket'],['arc','Arc'],['shield','Shield'],['ticket','Ticket'],['step','Step'],['edge','Diamond edge'],['outline','Outline'],['compact','Compact'],['glass','Glass'],
+          ].map(([value,label]) => alphaOption(value, alphaDraft.buttonShape, label)).join('')}</select></label>
           <label>Button size <select data-alpha-key="buttonSize">${alphaOption('small', alphaDraft.buttonSize, 'Small')}${alphaOption('medium', alphaDraft.buttonSize, 'Medium')}${alphaOption('large', alphaDraft.buttonSize, 'Large')}</select></label>
           <label>Sidebar width <input data-alpha-key="sidebarWidth" type="range" min="220" max="380" value="${alphaDraft.sidebarWidth}"></label>
           <label>Font scale <input data-alpha-key="fontScale" type="range" min="85" max="120" value="${alphaDraft.fontScale}"></label>
@@ -1079,6 +1109,16 @@ function renderSettings() {
           <label>Row gap <input data-alpha-key="rowGap" type="range" min="4" max="24" value="${alphaDraft.rowGap}"></label>
           <label>Border width <input data-alpha-key="borderWidth" type="range" min="0" max="3" value="${alphaDraft.borderWidth}"></label>
           <label>Shadow strength <input data-alpha-key="shadowStrength" type="range" min="0" max="100" value="${alphaDraft.shadowStrength}"></label>
+          <label>Navigation text <input data-alpha-key="navFontSize" type="range" min="11" max="20" value="${alphaDraft.navFontSize}"></label>
+          <label>Button spacing <input data-alpha-key="buttonGap" type="range" min="2" max="20" value="${alphaDraft.buttonGap}"></label>
+          <label>Card corners <input data-alpha-key="cardRadius" type="range" min="0" max="24" value="${alphaDraft.cardRadius}"></label>
+          <label>Input corners <input data-alpha-key="inputRadius" type="range" min="0" max="20" value="${alphaDraft.inputRadius}"></label>
+          <label>Sidebar opacity <input data-alpha-key="sidebarOpacity" type="range" min="55" max="100" value="${alphaDraft.sidebarOpacity}"></label>
+          <label>Backdrop blur <input data-alpha-key="backdropBlur" type="range" min="0" max="30" value="${alphaDraft.backdropBlur}"></label>
+          <label>Line height <input data-alpha-key="lineHeight" type="range" min="110" max="190" value="${alphaDraft.lineHeight}"></label>
+          <label>Console text <input data-alpha-key="consoleFontSize" type="range" min="10" max="20" value="${alphaDraft.consoleFontSize}"></label>
+          <label>Animation speed <input data-alpha-key="animationSpeed" type="range" min="0" max="400" step="20" value="${alphaDraft.animationSpeed}"></label>
+          <label>Toolbar scale <input data-alpha-key="toolbarScale" type="range" min="80" max="125" value="${alphaDraft.toolbarScale}"></label>
           ${[
             ['compact', 'Compact density'],
             ['reducedMotion', 'Reduced motion'],
@@ -1097,6 +1137,8 @@ function renderSettings() {
           <button class="secondary" type="button" data-action="alpha-cancel">Cancel preview</button>
           <button class="secondary" type="button" data-action="alpha-undo" ${uiHistory.length ? '' : 'disabled'}>Undo saved</button>
           <button class="secondary" type="button" data-action="alpha-redo" ${uiRedo.length ? '' : 'disabled'}>Redo saved</button>
+          <button class="secondary" type="button" data-action="alpha-export">Export layout code</button>
+          <button class="secondary" type="button" data-action="alpha-import">Import layout code</button>
           <button class="danger" type="button" data-action="alpha-reset">Reset draft</button>
         </div>
       </form>
@@ -1522,7 +1564,7 @@ async function refreshServerStatusOnly() {
   renderStats();
   renderServerSwitcher();
   if (state.activeView === 'dashboard') renderServers();
-  if (state.activeView === 'software') renderSoftware();
+  if (state.activeView === 'software' && state.servers.some((server) => server.installStatus === 'installing')) renderSoftware();
   updateSettingsLiveStatus();
 }
 
@@ -2145,6 +2187,29 @@ document.addEventListener('click', async (event) => {
       renderSettings();
       return;
     }
+    if (action === 'alpha-export') {
+      const payload = JSON.stringify({ version: 1, nonce: crypto.randomUUID(), preferences: uiPreferences });
+      const code = btoa(unescape(encodeURIComponent(payload))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+      await copyText(code);
+      prompt('Alpha layout code copied:', code);
+      return;
+    }
+    if (action === 'alpha-import') {
+      const code = prompt('Paste an Alpha layout code:');
+      if (!code) return;
+      try {
+        const normalized = code.replaceAll('-', '+').replaceAll('_', '/');
+        const payload = JSON.parse(decodeURIComponent(escape(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))));
+        if (payload.version !== 1 || !payload.preferences || typeof payload.preferences !== 'object') throw new Error('Unsupported layout code.');
+        alphaDraft = { ...loadUiPreferences(), ...payload.preferences };
+        applyUiPreferences(alphaDraft);
+        renderSettings();
+        showToast('Layout code loaded as a preview. Save to keep it.');
+      } catch (error) {
+        showToast(`Layout import failed: ${error.message}`);
+      }
+      return;
+    }
     if (action === 'manage-server') {
       state.activeServerId = Number(actionTarget.closest('[data-server-id]').dataset.serverId);
       filePath = '';
@@ -2256,6 +2321,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'start-server' || action === 'stop-server' || action === 'kill-server' || action === 'restart-server') {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
+      animateCommandButton(actionTarget);
       const op = action.replace('-server', '');
       try {
         await api(`/api/servers/${server.id}/${op}`, { method: 'POST' });

@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnOptions, wrapCommand } = require('./nexus_mark');
 const { hostCpuCount } = require('./system_info');
+const { ensureServerDirs } = require('./paths');
 
 const processes = new Map();
 const logs = new Map();
@@ -66,7 +67,8 @@ function startServer(server, software) {
     throw new Error('Install server software before starting.');
   }
 
-  const root = server.server_path;
+  const root = server.server_path || ensureServerDirs(server);
+  appendLog(server.id, `[NexusPanel] Working directory: ${root}`);
   const executable = server.executable_path;
   let command;
   let args;

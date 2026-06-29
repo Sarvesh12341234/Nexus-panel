@@ -112,7 +112,9 @@ button {
   cursor: pointer;
   font-weight: 850;
   min-height: 42px;
-  white-space: nowrap;
+  white-space: normal;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   box-shadow: 0 0 0 1px rgba(255,255,255,.04) inset, 0 0 24px var(--glow);
   transition: box-shadow .08s ease, border-color .08s ease, opacity .08s ease;
 }
@@ -1672,6 +1674,23 @@ body[data-theme-mode="picture"] #backupMinutes {
   backdrop-filter: blur(8px);
 }
 
+.row-actions,
+.server-actions,
+.file-toolbar,
+.upload-actions,
+.backup-settings {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.row-actions > *,
+.server-actions > *,
+.file-toolbar > *,
+.upload-actions > *,
+.backup-settings > * {
+  min-width: 0;
+}
+
 body[data-density="compact"] .workspace {
   gap: 0.65rem;
   padding: 0.75rem;
@@ -1774,3 +1793,54 @@ body[data-theme="forge-ui"] button {
   clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
   box-shadow: 4px 4px 0 rgba(0,0,0,.36);
 }
+
+.nav-item { font-size: var(--alpha-nav-font-size, 14px); }
+.row-actions,
+.server-actions,
+.file-toolbar,
+.upload-actions { gap: var(--alpha-button-gap, 8px); }
+.surface,
+.server-card,
+.software-card,
+.plugin-row,
+.user-row,
+.quick-stats article { border-radius: var(--alpha-card-radius, 8px); }
+input,
+select,
+textarea { border-radius: var(--alpha-input-radius, 7px); }
+.sidebar {
+  background: color-mix(in srgb, var(--sidebar) var(--alpha-sidebar-opacity, 98%), transparent);
+  backdrop-filter: blur(var(--alpha-backdrop-blur, 18px));
+}
+body { line-height: var(--alpha-line-height, 1.5); }
+.console-box,
+.terminal-output { font-size: var(--alpha-console-font-size, 13px); }
+button { transition-duration: var(--alpha-animation-speed, 100ms); }
+.row-actions,
+.server-actions,
+.file-toolbar { zoom: var(--alpha-toolbar-scale, 1); }
+
+body[data-button-shape="square"] button { border-radius: 0; }
+body[data-button-shape="bevel"] button { border-radius: 2px 14px 2px 14px; }
+body[data-button-shape="notch"] button { border-radius: 0; clip-path: polygon(10px 0,100% 0,100% 100%,0 100%,0 10px); }
+body[data-button-shape="hex"] button { border-radius: 0; clip-path: polygon(10px 0,calc(100% - 10px) 0,100% 50%,calc(100% - 10px) 100%,10px 100%,0 50%); }
+body[data-button-shape="slant"] button { border-radius: 0; clip-path: polygon(10px 0,100% 0,calc(100% - 10px) 100%,0 100%); }
+body[data-button-shape="tab"] button { border-radius: 12px 12px 2px 2px; }
+body[data-button-shape="leaf"] button { border-radius: 18px 2px 18px 2px; }
+body[data-button-shape="bracket"] button { border-radius: 0; border-inline-width: 4px; background: transparent; color: var(--text); }
+body[data-button-shape="arc"] button { border-radius: 50% 8px / 35% 8px; }
+body[data-button-shape="shield"] button { border-radius: 8px 8px 16px 16px; clip-path: polygon(0 0,100% 0,94% 78%,50% 100%,6% 78%); }
+body[data-button-shape="ticket"] button { border-radius: 4px; clip-path: polygon(0 0,100% 0,100% 35%,94% 50%,100% 65%,100% 100%,0 100%,0 65%,6% 50%,0 35%); }
+body[data-button-shape="step"] button { border-radius: 0; clip-path: polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px,8px 8px); }
+body[data-button-shape="edge"] button { border-radius: 0; clip-path: polygon(6% 0,94% 0,100% 50%,94% 100%,6% 100%,0 50%); }
+body[data-button-shape="outline"] button { border-radius: 6px; background: transparent; color: var(--text); box-shadow: none; }
+body[data-button-shape="compact"] button { border-radius: 4px; min-height: 32px; padding: .35rem .6rem; }
+body[data-button-shape="glass"] button { border-radius: 10px; background: rgba(255,255,255,.09); color: var(--text); backdrop-filter: blur(12px); }
+
+@keyframes nexus-command-pulse {
+  0% { transform: scale(1); }
+  45% { transform: scale(.94); box-shadow: 0 0 0 6px color-mix(in srgb, var(--green), transparent 75%); }
+  100% { transform: scale(1); }
+}
+
+button.is-commanding { animation: nexus-command-pulse .55s ease; }

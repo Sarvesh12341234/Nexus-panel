@@ -465,6 +465,7 @@ function otpHash(email, code) {
 async function sendPasswordOtp(email, code) {
   const subject = 'NexusPanel password reset OTP';
   const text = `Your NexusPanel password reset OTP is ${code}. It expires in 10 minutes.`;
+  const html = `<!doctype html><html><body style="margin:0;background:#080b0f;color:#f4f8fb;font-family:Arial,sans-serif;padding:32px"><div style="max-width:520px;margin:auto;background:#111820;border:1px solid #34414d;border-radius:8px;padding:28px"><div style="color:#41e69b;font-size:13px;font-weight:700;text-transform:uppercase">NexusPanel</div><h1 style="font-size:24px;margin:10px 0 8px">Reset your password</h1><p style="color:#a9b7c5;line-height:1.6">Use this one-time code within 10 minutes:</p><div style="background:#05080c;border:1px solid #41e69b;border-radius:6px;color:#9dffd0;font-size:34px;font-weight:800;letter-spacing:8px;text-align:center;padding:20px;margin:22px 0">${code}</div><p style="color:#7f8c99;font-size:12px">Select the code to copy it. If you did not request this reset, ignore this email.</p></div></body></html>`;
   const apiUrl = process.env.NEXUSPANEL_EMAIL_API_URL;
   const apiKey = process.env.NEXUSPANEL_EMAIL_API_KEY;
   if (apiUrl && globalThis.fetch) {
@@ -473,8 +474,8 @@ async function sendPasswordOtp(email, code) {
     const from = process.env.NEXUSPANEL_EMAIL_FROM;
     if (isResend && !from) throw new Error('NEXUSPANEL_EMAIL_FROM is required for Resend.');
     const body = isResend
-      ? { from, to: [email], subject, text }
-      : { to: email, from: from || undefined, subject, text };
+      ? { from, to: [email], subject, text, html }
+      : { to: email, from: from || undefined, subject, text, html };
     const response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
