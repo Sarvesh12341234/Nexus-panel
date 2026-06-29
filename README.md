@@ -100,6 +100,7 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Backup scheduling has 30-second resolution, per-server owner timezones, visible next-run timing, and offset-stamped archive names.
 - Uploads use server-authoritative ranges, per-file locks, 8 MB chunks, and one-second cross-client progress refresh.
 - Public backup links support a configurable public panel URL and eligible Normal/Host account ownership.
+- Transfer URLs reject normal browser downloads and are consumed through NexusPanel's Import Backup workflow.
 - The Adaptive Engine learns baselines for servers, backups, uploads, CPU, and memory and performs non-destructive maintenance.
 - Alpha UI Studio provides 20 controls, draft previews, explicit save/cancel, undo/redo, navigation order, and command order.
 - Host Edition adds maintenance mode and configurable per-account server quotas.

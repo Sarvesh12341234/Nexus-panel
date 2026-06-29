@@ -1272,7 +1272,7 @@ function renderBackups() {
         <article><span>Scheduler accuracy</span><strong>within ${Number(data.schedule?.schedulerResolutionSeconds || 30)} sec</strong></article>
       </div>
       <form class="backup-settings" id="publicBackupImportForm">
-        <label>Public backup URL <input name="url" type="url" placeholder="https://panel.example/api/public/backups/..." required></label>
+        <label>NexusPanel transfer URL <input name="url" type="url" placeholder="https://panel.example/api/public/backups/..." required></label>
         <button type="submit">Import backup</button>
       </form>
       ${data.canManageShare ? `<div class="plugin-list">

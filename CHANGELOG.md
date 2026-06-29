@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Public backup URLs reject direct browser downloads and only stream to NexusPanel's importer.
 - Backup filenames use each server owner's IANA timezone and include a UTC offset.
 - Automatic backup checks run every 30 seconds and expose the calculated next run.
 - Eligible Normal Edition admins can create public backup links.

@@ -2994,7 +2994,14 @@ app.delete('/api/servers/:id/backups/public-link', requireAccess(permissions.MAN
   res.json({ ok: true });
 });
 
-app.get('/api/public/backups/:token/:name', asyncRoute(async (req, res) => {
+app.get('/api/public/backups/:token/:name', (_req, res) => {
+  res.status(403).json({ error: 'Direct browser downloads are disabled. Paste this URL into NexusPanel Import Backup.' });
+});
+
+app.post('/api/public/backups/:token/:name', asyncRoute(async (req, res) => {
+  if (req.get('x-nexuspanel-transfer') !== 'backup-v1') {
+    return res.status(403).json({ error: 'This backup can only be transferred by NexusPanel.' });
+  }
   const share = db.prepare(`
     SELECT * FROM backup_public_links
     WHERE token_hash = ? AND revoked_at = 0 AND expires_at > ?
@@ -3010,7 +3017,15 @@ app.get('/api/public/backups/:token/:name', asyncRoute(async (req, res) => {
 app.post('/api/servers/:id/backups/import-url', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const url = await validatePublicBackupUrl(req.body.url);
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(30 * 60 * 1000) });
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/octet-stream',
+      'X-NexusPanel-Transfer': 'backup-v1',
+    },
+    redirect: 'error',
+    signal: AbortSignal.timeout(30 * 60 * 1000),
+  });
   if (!response.ok || !response.body) throw new Error(`Remote panel returned HTTP ${response.status}.`);
   const maxBytes = Math.max(1, Number(process.env.NEXUSPANEL_MAX_REMOTE_BACKUP_GB || 20)) * 1024 * 1024 * 1024;
   const contentLength = Number(response.headers.get('content-length') || 0);
