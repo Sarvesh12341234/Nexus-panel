@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Layout reordering preserves untouched form-control slots, so moving boxes cannot pull submit buttons or inputs into unintended positions.
 - Alpha UI editing now stays responsive on desktop and mobile without page overflow.
 - Hidden switch inputs no longer expand the Settings page beyond the viewport.
 - Runtime now falls back to the verified server directory when a stored path is missing.
@@ -24,6 +25,8 @@
 
 ### Added
 
+- Advanced Boxes mode for moving and resizing complete cards, forms, status blocks, field groups, and tool panels independently from Buttons mode.
+- Nested drop-zone matching lets large parent panels move correctly even when the pointer is over one of their child cards.
 - Free drag placement for panel command buttons and navigation, per-button widths, a floating editor toolbar, and permanent UI layout codes.
 - A repair playbook learner that fingerprints redacted crash output, learns from successful Repair & Diagnose runs, and repeats only the panel's safe repair routine.
 - Accessible show/hide password controls across login, reset, and owner-password fields.

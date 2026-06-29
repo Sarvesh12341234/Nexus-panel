@@ -101,9 +101,11 @@ let uiPreferences = loadUiPreferences();
 let alphaDraft = structuredClone(uiPreferences);
 const layoutEditor = {
   active: false,
+  mode: 'boxes',
   dragging: null,
   pointerId: null,
   selectedKey: '',
+  selectedType: '',
 };
 let lastCreateSoftwareKey = '';
 const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
@@ -164,6 +166,8 @@ function loadUiPreferences() {
     actionPriority: ['start-server', 'stop-server', 'restart-server', 'open-console', 'file-upload', 'manual-backup', 'fix-server', 'kill-server', 'delete-server'],
     buttonLayout: {},
     buttonWidths: {},
+    componentLayout: {},
+    componentWidths: {},
     compact: false,
     reducedMotion: false,
     liveRefresh: true,
@@ -204,6 +208,8 @@ function loadUiPreferences() {
       actionPriority: Array.isArray(saved.actionPriority) ? saved.actionPriority : defaults.actionPriority,
       buttonLayout: saved.buttonLayout && typeof saved.buttonLayout === 'object' ? saved.buttonLayout : {},
       buttonWidths: saved.buttonWidths && typeof saved.buttonWidths === 'object' ? saved.buttonWidths : {},
+      componentLayout: saved.componentLayout && typeof saved.componentLayout === 'object' ? saved.componentLayout : {},
+      componentWidths: saved.componentWidths && typeof saved.componentWidths === 'object' ? saved.componentWidths : {},
     };
   } catch {
     return defaults;
@@ -250,6 +256,7 @@ function applyUiPreferences(preferences = uiPreferences) {
     button.style.order = String(priority.has(button.dataset.action) ? priority.get(button.dataset.action) : priority.size + 100);
   });
   applyButtonLayout(preferences);
+  applyComponentLayout(preferences);
 }
 
 function layoutRegionElements() {
@@ -266,13 +273,20 @@ function layoutRegionElements() {
   return [...parents];
 }
 
+function stableClassName(element) {
+  return [...element.classList]
+    .filter((name) => !name.startsWith('is-') && !name.startsWith('has-'))
+    .slice(0, 2)
+    .join('.');
+}
+
 function regionBaseName(region) {
   if (region.classList.contains('nav-list')) return 'navigation';
   if (region.id) return `${state.activeView}:id:${region.id}`;
-  const identity = `${region.tagName.toLowerCase()}.${[...region.classList].slice(0, 2).join('.') || 'plain'}`;
+  const identity = `${region.tagName.toLowerCase()}.${stableClassName(region) || 'plain'}`;
   const peers = layoutRegionElements().filter((item) => (
     !item.id
-    && `${item.tagName.toLowerCase()}.${[...item.classList].slice(0, 2).join('.') || 'plain'}` === identity
+    && `${item.tagName.toLowerCase()}.${stableClassName(item) || 'plain'}` === identity
   ));
   return `${state.activeView}:${identity}:${Math.max(0, peers.indexOf(region))}`;
 }
@@ -301,6 +315,17 @@ function prepareLayoutRegions() {
   }
 }
 
+function reorderInExistingSlots(parent, currentElements, desiredElements) {
+  if (currentElements.length < 2 || desiredElements.length !== currentElements.length) return;
+  const markers = currentElements.map((element) => {
+    const marker = document.createComment('nexus-layout-slot');
+    parent.insertBefore(marker, element);
+    return marker;
+  });
+  desiredElements.forEach((element, index) => parent.insertBefore(element, markers[index]));
+  markers.forEach((marker) => marker.remove());
+}
+
 function applyButtonLayout(preferences = uiPreferences) {
   prepareLayoutRegions();
   for (const region of layoutRegionElements()) {
@@ -308,10 +333,11 @@ function applyButtonLayout(preferences = uiPreferences) {
     const buttons = [...region.querySelectorAll(':scope > button, :scope > .button-link')];
     const byKey = new Map(buttons.map((button) => [button.dataset.uiButtonKey, button]));
     if (Array.isArray(savedOrder)) {
-      for (const key of savedOrder) {
-        const button = byKey.get(key);
-        if (button) region.appendChild(button);
-      }
+      const desired = [
+        ...savedOrder.map((key) => byKey.get(key)).filter(Boolean),
+        ...buttons.filter((button) => !savedOrder.includes(button.dataset.uiButtonKey)),
+      ];
+      reorderInExistingSlots(region, buttons, desired);
     }
     for (const button of buttons) {
       const width = preferences.buttonWidths?.[`${region.dataset.uiRegion}/${button.dataset.uiButtonKey}`] || 'auto';
@@ -330,6 +356,147 @@ function captureButtonLayout() {
       .map((button) => button.dataset.uiButtonKey);
   }
   alphaDraft = { ...alphaDraft, buttonLayout };
+}
+
+const COMPONENT_SELECTOR = [
+  '.surface',
+  '.tool-surface',
+  'form',
+  'article',
+  '[class*="-card"]',
+  'form > label',
+  'form > input',
+  'form > select',
+  'form > textarea',
+  '.section-head',
+  '.settings-group',
+  '.upload-panel',
+  '.public-help-grid',
+  '.nexu-details',
+  '.server-card',
+  '.server-row-card',
+  '.software-card',
+  '.template-card',
+  '.plugin-row',
+  '.user-row',
+  '.file-row',
+  '.upload-session-row',
+  '.backup-settings',
+  '.console-metrics',
+  '.server-actions',
+  '.file-toolbar',
+  '.console-box',
+  '.command-row',
+  '.field-grid',
+  '.option-grid',
+  '.plugin-list',
+  '.server-grid',
+  '.server-rows-list',
+  '.software-grid',
+  '.template-grid',
+  '.modrinth-grid',
+  '.optimizer-summary',
+  '.audit-row',
+  '.stat-row',
+  '.status-row',
+  '.quick-stats > article',
+  '.promise-strip > article',
+  '.settings-form > label',
+  '.settings-form > .settings-group',
+  '.server-config-form > label',
+  '.admin-form > input',
+  '.admin-form > select',
+  '.admin-form > label',
+].join(',');
+
+function componentElements() {
+  return [...document.querySelectorAll(COMPONENT_SELECTOR)].filter((component) => (
+    (!component.closest('.alpha-lab') || component.classList.contains('alpha-lab'))
+    && !component.closest('#layoutEditorBar')
+    && !component.closest('#powerPalette')
+    && !component.closest('[hidden]')
+    && component !== document.querySelector('.panel-shell')
+    && component !== document.querySelector('.workspace')
+    && component !== document.querySelector('.sidebar')
+  ));
+}
+
+function componentZoneElements() {
+  return [...new Set(componentElements().map((component) => component.parentElement).filter(Boolean))];
+}
+
+function componentZoneKey(zone) {
+  if (zone.id) return `${state.activeView}:id:${zone.id}`;
+  if (zone.classList.contains('quick-stats')) return 'global:quick-stats';
+  const identity = `${zone.tagName.toLowerCase()}.${stableClassName(zone) || 'plain'}`;
+  const peers = componentZoneElements().filter((item) => (
+    !item.id
+    && `${item.tagName.toLowerCase()}.${stableClassName(item) || 'plain'}` === identity
+  ));
+  return `${state.activeView}:${identity}:${Math.max(0, peers.indexOf(zone))}`;
+}
+
+function componentBaseKey(component) {
+  if (component.id) return `id:${component.id}`;
+  for (const key of ['serverId', 'pluginId', 'userId', 'requestId']) {
+    if (component.dataset[key]) return `${key}:${component.dataset[key]}`;
+  }
+  const field = component.matches('input, select, label')
+    ? (component.name || component.querySelector?.('input,select,textarea')?.name || '')
+    : '';
+  if (field) return `field:${field}`;
+  const label = component.querySelector?.('h1,h2,h3,strong,.property-name')?.textContent
+    || component.getAttribute('aria-label')
+    || '';
+  const cleanLabel = String(label).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+  const className = stableClassName(component) || component.tagName.toLowerCase();
+  return `${className}:${cleanLabel}`;
+}
+
+function prepareComponentLayout() {
+  for (const zone of componentZoneElements()) {
+    zone.dataset.uiComponentZone = componentZoneKey(zone);
+    const seen = new Map();
+    const directComponents = componentElements().filter((component) => component.parentElement === zone);
+    for (const component of directComponents) {
+      const base = componentBaseKey(component);
+      const occurrence = seen.get(base) || 0;
+      seen.set(base, occurrence + 1);
+      component.dataset.uiComponentKey = `${base}#${occurrence}`;
+    }
+  }
+}
+
+function applyComponentLayout(preferences = uiPreferences) {
+  prepareComponentLayout();
+  for (const zone of componentZoneElements()) {
+    const zoneKey = zone.dataset.uiComponentZone;
+    const components = componentElements().filter((component) => component.parentElement === zone);
+    const byKey = new Map(components.map((component) => [component.dataset.uiComponentKey, component]));
+    const savedOrder = preferences.componentLayout?.[zoneKey];
+    if (Array.isArray(savedOrder)) {
+      const desired = [
+        ...savedOrder.map((key) => byKey.get(key)).filter(Boolean),
+        ...components.filter((component) => !savedOrder.includes(component.dataset.uiComponentKey)),
+      ];
+      reorderInExistingSlots(zone, components, desired);
+    }
+    for (const component of components) {
+      const fullKey = `${zoneKey}/${component.dataset.uiComponentKey}`;
+      component.dataset.uiComponentWidth = preferences.componentWidths?.[fullKey] || 'auto';
+    }
+  }
+}
+
+function captureComponentLayout() {
+  prepareComponentLayout();
+  const componentLayout = { ...(alphaDraft.componentLayout || {}) };
+  for (const zone of componentZoneElements()) {
+    componentLayout[zone.dataset.uiComponentZone] = componentElements()
+      .filter((component) => component.parentElement === zone)
+      .map((component) => component.dataset.uiComponentKey);
+  }
+  alphaDraft = { ...alphaDraft, componentLayout };
 }
 
 function encodeLayoutCode(preferences = uiPreferences) {
@@ -355,8 +522,10 @@ function renderLayoutEditorBar() {
   bar.setAttribute('aria-label', 'UI layout editor');
   bar.innerHTML = `
     <strong>UI Editor</strong>
-    <span>Drag buttons to place them. Select one to change its width.</span>
-    <button type="button" data-layout-command="width" title="Cycle selected button width">Width</button>
+    <span>${layoutEditor.mode === 'boxes' ? 'Drag boxes, cards, and panels.' : 'Drag buttons inside their functional area.'} Select one to change its width.</span>
+    <button type="button" data-layout-command="mode-boxes" class="${layoutEditor.mode === 'boxes' ? '' : 'secondary'}" title="Move cards and panels">Boxes</button>
+    <button type="button" data-layout-command="mode-buttons" class="${layoutEditor.mode === 'buttons' ? '' : 'secondary'}" title="Move command buttons">Buttons</button>
+    <button type="button" data-layout-command="width" title="Cycle selected box or button width">Width</button>
     <button type="button" data-layout-command="undo" title="Undo last saved layout">Undo</button>
     <button type="button" data-layout-command="redo" title="Redo saved layout">Redo</button>
     <button type="button" data-layout-command="copy" title="Copy permanent UI code">Copy UI Code</button>
@@ -371,10 +540,12 @@ function setLayoutEditor(active) {
   layoutEditor.dragging = null;
   layoutEditor.pointerId = null;
   layoutEditor.selectedKey = '';
+  layoutEditor.selectedType = '';
   document.body.dataset.uiEditing = layoutEditor.active ? 'true' : 'false';
+  document.body.dataset.uiEditMode = layoutEditor.mode;
   applyUiPreferences(layoutEditor.active ? alphaDraft : uiPreferences);
   renderLayoutEditorBar();
-  if (layoutEditor.active) showToast('UI Editor active. Drag any highlighted button.');
+  if (layoutEditor.active) showToast('UI Editor active. Drag highlighted boxes or switch to Buttons mode.');
 }
 
 function closePowerPalette() {
@@ -1331,6 +1502,7 @@ function renderSettings() {
     </details>` : ''}
     <details class="nexu-details alpha-lab" open>
       <summary>Alpha UI studio</summary>
+      <p class="help-text">The full layout editor has separate Boxes and Buttons modes. Boxes moves cards, forms, status blocks, field groups, and tool panels without moving the outer panel shell.</p>
       <form id="alphaUiForm">
         <div class="alpha-control-grid">
           <label>Button shape <select data-alpha-key="buttonShape">${[
@@ -1370,7 +1542,7 @@ function renderSettings() {
         </div>
         <div class="backup-settings">
           <button type="submit">Save Alpha layout</button>
-          <button type="button" data-action="alpha-open-editor">Open drag-and-drop editor</button>
+          <button type="button" data-action="alpha-open-editor">Open full layout editor</button>
           <button class="secondary" type="button" data-action="alpha-cancel">Cancel preview</button>
           <button class="secondary" type="button" data-action="alpha-undo" ${uiHistory.length ? '' : 'disabled'}>Undo saved</button>
           <button class="secondary" type="button" data-action="alpha-redo" ${uiRedo.length ? '' : 'disabled'}>Redo saved</button>
@@ -2301,25 +2473,34 @@ document.addEventListener('submit', async (event) => {
 });
 
 document.addEventListener('dragstart', (event) => {
-  if (layoutEditor.active && event.target.closest('[data-ui-button-key]')) event.preventDefault();
+  if (layoutEditor.active && event.target.closest('[data-ui-button-key], [data-ui-component-key]')) event.preventDefault();
 });
 
 document.addEventListener('pointerdown', (event) => {
   if (!layoutEditor.active || event.button !== 0) return;
-  const button = event.target.closest('[data-ui-button-key]');
-  if (!button || button.closest('#layoutEditorBar')) return;
-  const region = button.closest('[data-ui-region]');
-  if (!region) return;
+  const type = layoutEditor.mode === 'boxes' ? 'component' : 'button';
+  const item = type === 'component'
+    ? event.target.closest('[data-ui-component-key]')
+    : event.target.closest('[data-ui-button-key]');
+  if (!item || item.closest('#layoutEditorBar')) return;
+  const zone = type === 'component'
+    ? item.parentElement?.closest('[data-ui-component-zone]')
+    : item.closest('[data-ui-region]');
+  if (!zone) return;
   layoutEditor.dragging = {
-    button,
-    region,
+    item,
+    zone,
+    type,
     startX: event.clientX,
     startY: event.clientY,
     moved: false,
   };
   layoutEditor.pointerId = event.pointerId;
-  layoutEditor.selectedKey = `${region.dataset.uiRegion}/${button.dataset.uiButtonKey}`;
-  button.setPointerCapture?.(event.pointerId);
+  layoutEditor.selectedType = type;
+  layoutEditor.selectedKey = type === 'component'
+    ? `${zone.dataset.uiComponentZone}/${item.dataset.uiComponentKey}`
+    : `${zone.dataset.uiRegion}/${item.dataset.uiButtonKey}`;
+  item.setPointerCapture?.(event.pointerId);
 }, true);
 
 document.addEventListener('pointermove', (event) => {
@@ -2327,26 +2508,37 @@ document.addEventListener('pointermove', (event) => {
   if (!layoutEditor.active || !drag || event.pointerId !== layoutEditor.pointerId) return;
   if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
   drag.moved = true;
-  drag.button.classList.add('is-layout-dragging');
-  const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-ui-button-key]');
-  if (!target || target === drag.button || target.closest('[data-ui-region]') !== drag.region) return;
+  drag.item.classList.add('is-layout-dragging');
+  const selector = drag.type === 'component' ? '[data-ui-component-key]' : '[data-ui-button-key]';
+  let target = document.elementFromPoint(event.clientX, event.clientY);
+  while (target && target !== document.body) {
+    if (target.matches?.(selector)) {
+      const targetZone = drag.type === 'component'
+        ? target.parentElement?.closest('[data-ui-component-zone]')
+        : target.closest('[data-ui-region]');
+      if (targetZone === drag.zone) break;
+    }
+    target = target.parentElement;
+  }
+  if (!target || target === document.body || target === drag.item) return;
   const rect = target.getBoundingClientRect();
   const before = event.clientY < rect.top + rect.height / 2
     || (Math.abs(event.clientY - (rect.top + rect.height / 2)) < rect.height / 3 && event.clientX < rect.left + rect.width / 2);
-  drag.region.insertBefore(drag.button, before ? target : target.nextSibling);
+  drag.zone.insertBefore(drag.item, before ? target : target.nextSibling);
   event.preventDefault();
 }, { passive: false, capture: true });
 
 document.addEventListener('pointerup', (event) => {
   const drag = layoutEditor.dragging;
   if (!drag || event.pointerId !== layoutEditor.pointerId) return;
-  drag.button.classList.remove('is-layout-dragging');
+  drag.item.classList.remove('is-layout-dragging');
   if (drag.moved) {
-    captureButtonLayout();
-    showToast('Position updated in the layout draft.');
+    if (drag.type === 'component') captureComponentLayout();
+    else captureButtonLayout();
+    showToast(`${drag.type === 'component' ? 'Box' : 'Button'} position updated in the layout draft.`);
   } else {
     document.querySelectorAll('.is-layout-selected').forEach((item) => item.classList.remove('is-layout-selected'));
-    drag.button.classList.add('is-layout-selected');
+    drag.item.classList.add('is-layout-selected');
   }
   layoutEditor.dragging = null;
   layoutEditor.pointerId = null;
@@ -2354,8 +2546,10 @@ document.addEventListener('pointerup', (event) => {
 
 document.addEventListener('click', (event) => {
   if (!layoutEditor.active || event.target.closest('#layoutEditorBar')) return;
-  const button = event.target.closest('[data-ui-button-key]');
-  if (!button || button.dataset.view) return;
+  const target = layoutEditor.mode === 'boxes'
+    ? event.target.closest('[data-ui-component-key]')
+    : event.target.closest('[data-ui-button-key]');
+  if (!target || (layoutEditor.mode === 'buttons' && target.dataset.view)) return;
   event.preventDefault();
   event.stopImmediatePropagation();
 }, true);
@@ -2363,8 +2557,19 @@ document.addEventListener('click', (event) => {
 document.addEventListener('click', async (event) => {
   const command = event.target.closest('[data-layout-command]')?.dataset.layoutCommand;
   if (!command) return;
+  if (command === 'mode-boxes' || command === 'mode-buttons') {
+    layoutEditor.mode = command === 'mode-boxes' ? 'boxes' : 'buttons';
+    layoutEditor.selectedKey = '';
+    layoutEditor.selectedType = '';
+    document.body.dataset.uiEditMode = layoutEditor.mode;
+    document.querySelectorAll('.is-layout-selected').forEach((item) => item.classList.remove('is-layout-selected'));
+    renderLayoutEditorBar();
+    showToast(`${layoutEditor.mode === 'boxes' ? 'Box' : 'Button'} placement mode active.`);
+    return;
+  }
   if (command === 'save') {
     captureButtonLayout();
+    captureComponentLayout();
     commitUiPreferences(alphaDraft);
     setLayoutEditor(false);
     showToast('Custom UI saved. Its layout code does not expire.');
@@ -2377,6 +2582,7 @@ document.addEventListener('click', async (event) => {
   }
   if (command === 'copy') {
     captureButtonLayout();
+    captureComponentLayout();
     const code = encodeLayoutCode(alphaDraft);
     await copyText(code);
     showToast('Permanent UI code copied.');
@@ -2399,18 +2605,34 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (command === 'width') {
-    const selected = [...document.querySelectorAll('[data-ui-region] [data-ui-button-key]')]
-      .find((button) => `${button.closest('[data-ui-region]').dataset.uiRegion}/${button.dataset.uiButtonKey}` === layoutEditor.selectedKey);
-    if (!selected) return showToast('Select a button first.');
-    const current = alphaDraft.buttonWidths?.[layoutEditor.selectedKey] || 'auto';
+    const isComponent = layoutEditor.selectedType === 'component';
+    const selected = isComponent
+      ? [...document.querySelectorAll('[data-ui-component-key]')].find((component) => {
+        const zone = component.parentElement?.closest('[data-ui-component-zone]');
+        return zone && `${zone.dataset.uiComponentZone}/${component.dataset.uiComponentKey}` === layoutEditor.selectedKey;
+      })
+      : [...document.querySelectorAll('[data-ui-region] [data-ui-button-key]')].find((button) => (
+        `${button.closest('[data-ui-region]').dataset.uiRegion}/${button.dataset.uiButtonKey}` === layoutEditor.selectedKey
+      ));
+    if (!selected) return showToast(`Select a ${layoutEditor.mode === 'boxes' ? 'box' : 'button'} first.`);
+    const widths = isComponent ? alphaDraft.componentWidths : alphaDraft.buttonWidths;
+    const current = widths?.[layoutEditor.selectedKey] || 'auto';
     const next = current === 'auto' ? 'half' : current === 'half' ? 'full' : 'auto';
-    alphaDraft = {
-      ...alphaDraft,
-      buttonWidths: { ...(alphaDraft.buttonWidths || {}), [layoutEditor.selectedKey]: next },
-    };
-    applyButtonLayout(alphaDraft);
+    if (isComponent) {
+      alphaDraft = {
+        ...alphaDraft,
+        componentWidths: { ...(alphaDraft.componentWidths || {}), [layoutEditor.selectedKey]: next },
+      };
+      applyComponentLayout(alphaDraft);
+    } else {
+      alphaDraft = {
+        ...alphaDraft,
+        buttonWidths: { ...(alphaDraft.buttonWidths || {}), [layoutEditor.selectedKey]: next },
+      };
+      applyButtonLayout(alphaDraft);
+    }
     selected.classList.add('is-layout-selected');
-    showToast(`Button width: ${next}.`);
+    showToast(`${isComponent ? 'Box' : 'Button'} width: ${next}.`);
   }
 });
 

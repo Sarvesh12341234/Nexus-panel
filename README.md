@@ -103,7 +103,8 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Transfer URLs reject normal browser downloads and are consumed through NexusPanel's Import Backup workflow.
 - The Adaptive Engine learns baselines for servers, backups, uploads, CPU, and memory and performs non-destructive maintenance.
 - Alpha UI Studio provides 20 controls, draft previews, explicit save/cancel, undo/redo, navigation order, and command order.
-- Its visual editor supports mouse, pen, and touch drag placement, per-button widths, a floating save bar, and permanent portable UI codes.
+- Its visual editor has separate Boxes and Buttons modes for mouse, pen, and touch placement. Cards, forms, status blocks, field groups, tool panels, and buttons can be reordered and resized without moving the outer panel shell.
+- Component and button layouts share the floating save/undo controls and permanent portable UI codes.
 - Repair & Diagnose learns a redacted crash signature from successful fixes and safely repeats the same built-in repair workflow when that error returns.
 - Login, password reset, and protected owner-password fields include accessible password reveal controls.
 - Host Edition adds maintenance mode and configurable per-account server quotas.

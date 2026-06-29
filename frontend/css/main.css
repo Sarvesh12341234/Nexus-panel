@@ -1857,7 +1857,7 @@ button.is-commanding { animation: nexus-command-pulse .55s ease; }
   flex: 1 1 100% !important;
 }
 
-body[data-ui-editing="true"] [data-ui-button-key] {
+body[data-ui-editing="true"][data-ui-edit-mode="buttons"] [data-ui-button-key] {
   cursor: grab;
   outline: 2px dashed color-mix(in srgb, var(--cyan), transparent 30%);
   outline-offset: 2px;
@@ -1865,20 +1865,61 @@ body[data-ui-editing="true"] [data-ui-button-key] {
   user-select: none;
 }
 
-body[data-ui-editing="true"] [data-ui-region] {
+body[data-ui-editing="true"][data-ui-edit-mode="buttons"] [data-ui-region] {
   min-height: 46px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--cyan), transparent 94%);
 }
 
-body[data-ui-editing="true"] [data-ui-button-key].is-layout-selected {
+body[data-ui-editing="true"][data-ui-edit-mode="buttons"] [data-ui-button-key].is-layout-selected {
   outline: 3px solid var(--yellow);
 }
 
-body[data-ui-editing="true"] [data-ui-button-key].is-layout-dragging {
+body[data-ui-editing="true"][data-ui-edit-mode="buttons"] [data-ui-button-key].is-layout-dragging {
   cursor: grabbing;
   opacity: 0.58;
   transform: scale(.97);
+}
+
+[data-ui-component-width="half"] {
+  grid-column: span 1 !important;
+  flex: 1 1 min(48%, 520px) !important;
+  width: 100%;
+}
+
+[data-ui-component-width="full"] {
+  grid-column: 1 / -1 !important;
+  flex: 1 1 100% !important;
+  width: 100%;
+}
+
+body[data-ui-editing="true"][data-ui-edit-mode="boxes"] [data-ui-component-key] {
+  position: relative;
+  cursor: grab;
+  outline: 2px dashed color-mix(in srgb, var(--yellow), transparent 42%);
+  outline-offset: 3px;
+  touch-action: none;
+  user-select: none;
+}
+
+body[data-ui-editing="true"][data-ui-edit-mode="boxes"] [data-ui-component-key]:hover {
+  outline-color: var(--yellow);
+}
+
+body[data-ui-editing="true"][data-ui-edit-mode="boxes"] [data-ui-component-zone] {
+  min-height: 48px;
+}
+
+body[data-ui-editing="true"][data-ui-edit-mode="boxes"] [data-ui-component-key].is-layout-selected {
+  outline: 3px solid var(--cyan);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--cyan), transparent 82%);
+}
+
+body[data-ui-editing="true"][data-ui-edit-mode="boxes"] [data-ui-component-key].is-layout-dragging {
+  z-index: 30;
+  cursor: grabbing;
+  opacity: .56;
+  transform: scale(.985);
 }
 
 .layout-editor-bar {
