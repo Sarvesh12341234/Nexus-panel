@@ -5,7 +5,55 @@ const { DatabaseSync } = require('node:sqlite');
 const dataDir = path.join(__dirname, '..', 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 
-const db = new DatabaseSync(path.join(dataDir, 'nexuspanel.sqlite'));
+const databasePath = path.join(dataDir, 'nexuspanel.sqlite');
+const databaseBackupDir = path.join(dataDir, 'db-backups');
+fs.mkdirSync(databaseBackupDir, { recursive: true });
+
+function verifiedBackupPaths() {
+  return fs.readdirSync(databaseBackupDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /^nexuspanel-\d+\.sqlite$/.test(entry.name))
+    .map((entry) => path.join(databaseBackupDir, entry.name))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+}
+
+function openDatabaseWithRecovery() {
+  let opened;
+  try {
+    opened = new DatabaseSync(databasePath);
+    const result = opened.prepare('PRAGMA quick_check').get();
+    if (result.quick_check !== 'ok') {
+      opened.close();
+      opened = null;
+      throw new Error(`SQLite quick_check: ${result.quick_check}`);
+    }
+    return opened;
+  } catch (error) {
+    try { opened?.close(); } catch {}
+    const damagedPath = `${databasePath}.damaged-${Date.now()}`;
+    if (fs.existsSync(databasePath)) fs.renameSync(databasePath, damagedPath);
+    for (const suffix of ['-wal', '-shm']) {
+      const sidecar = `${databasePath}${suffix}`;
+      if (fs.existsSync(sidecar)) fs.renameSync(sidecar, `${damagedPath}${suffix}`);
+    }
+    for (const backup of verifiedBackupPaths()) {
+      let recovered;
+      try {
+        fs.copyFileSync(backup, databasePath);
+        recovered = new DatabaseSync(databasePath);
+        const result = recovered.prepare('PRAGMA quick_check').get();
+        if (result.quick_check !== 'ok') throw new Error(result.quick_check);
+        console.error(`[NexusPanel] Recovered SQLite database from ${path.basename(backup)}. Damaged copy: ${path.basename(damagedPath)}`);
+        return recovered;
+      } catch {
+        try { recovered?.close(); } catch {}
+        fs.rmSync(databasePath, { force: true });
+      }
+    }
+    throw error;
+  }
+}
+
+const db = openDatabaseWithRecovery();
 db.exec('PRAGMA foreign_keys = ON');
 db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA synchronous = NORMAL');
@@ -195,6 +243,25 @@ db.exec(`
     last_learned_at INTEGER NOT NULL DEFAULT 0,
     last_replayed_at INTEGER NOT NULL DEFAULT 0
   );
+
+  CREATE TABLE IF NOT EXISTS repair_command_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    signature TEXT NOT NULL,
+    software_key TEXT NOT NULL DEFAULT '',
+    command_hash TEXT NOT NULL,
+    command_text TEXT NOT NULL DEFAULT '',
+    command_preview TEXT NOT NULL DEFAULT '',
+    safe_to_replay INTEGER NOT NULL DEFAULT 0,
+    exit_code INTEGER,
+    stable_success_count INTEGER NOT NULL DEFAULT 0,
+    replay_count INTEGER NOT NULL DEFAULT 0,
+    observed_at INTEGER NOT NULL,
+    validated_at INTEGER NOT NULL DEFAULT 0,
+    last_replayed_at INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(server_id, signature, command_hash),
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  );
 `);
 
 // Insert default timezone
@@ -265,7 +332,50 @@ function getUserCount() {
   return db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
 }
 
+function verifyDatabase() {
+  const quick = db.prepare('PRAGMA quick_check').get();
+  const foreignKeys = db.prepare('PRAGMA foreign_key_check').all();
+  return {
+    ok: quick.quick_check === 'ok' && foreignKeys.length === 0,
+    quickCheck: quick.quick_check,
+    foreignKeyErrors: foreignKeys.length,
+  };
+}
+
+function backupDatabase({ force = false } = {}) {
+  const latest = verifiedBackupPaths()[0];
+  if (!force && latest && Date.now() - fs.statSync(latest).mtimeMs < 6 * 60 * 60 * 1000) {
+    return { created: false, path: latest, verification: verifyDatabase() };
+  }
+  const verification = verifyDatabase();
+  if (!verification.ok) throw new Error(`Database integrity check failed: ${verification.quickCheck}`);
+  db.exec('PRAGMA wal_checkpoint(PASSIVE)');
+  const stamp = Date.now();
+  const temporary = path.join(databaseBackupDir, `nexuspanel-${stamp}.sqlite.tmp`);
+  const destination = path.join(databaseBackupDir, `nexuspanel-${stamp}.sqlite`);
+  fs.rmSync(temporary, { force: true });
+  db.exec(`VACUUM INTO '${temporary.replaceAll("'", "''")}'`);
+  const check = new DatabaseSync(temporary, { readOnly: true });
+  const backupCheck = check.prepare('PRAGMA quick_check').get();
+  check.close();
+  if (backupCheck.quick_check !== 'ok') {
+    fs.rmSync(temporary, { force: true });
+    throw new Error(`Created database snapshot failed verification: ${backupCheck.quick_check}`);
+  }
+  fs.renameSync(temporary, destination);
+  for (const old of verifiedBackupPaths().slice(8)) fs.rmSync(old, { force: true });
+  return { created: true, path: destination, verification };
+}
+
+try {
+  backupDatabase();
+} catch (error) {
+  console.error(`[NexusPanel] Database snapshot warning: ${error.message}`);
+}
+
 module.exports = {
+  backupDatabase,
   db,
   getUserCount,
+  verifyDatabase,
 };

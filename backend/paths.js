@@ -43,9 +43,46 @@ function serverPath(id, name) {
   return assertInside(serversRoot, path.join(serversRoot, `${id}-${slug(name)}`));
 }
 
+function serverRootScore(root) {
+  if (!fs.existsSync(root)) return -1;
+  let score = 1;
+  for (const [relative, weight] of [
+    ['server.properties', 12],
+    ['level.dat', 8],
+    ['world/level.dat', 14],
+    ['worlds', 10],
+    ['software', 6],
+    ['plugins', 3],
+    ['bedrock_server', 14],
+    ['server.jar', 14],
+  ]) {
+    if (fs.existsSync(path.join(root, relative))) score += weight;
+  }
+  return score;
+}
+
+function findServerRoot(server) {
+  const candidates = [];
+  if (server.server_path) {
+    try {
+      candidates.push(assertInside(serversRoot, server.server_path));
+    } catch {}
+  }
+  candidates.push(serverPath(server.id, server.name));
+  if (fs.existsSync(serversRoot)) {
+    for (const entry of fs.readdirSync(serversRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith(`${Number(server.id)}-`)) {
+        candidates.push(assertInside(serversRoot, path.join(serversRoot, entry.name)));
+      }
+    }
+  }
+  const unique = [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
+  return unique.sort((a, b) => serverRootScore(b) - serverRootScore(a))[0] || serverPath(server.id, server.name);
+}
+
 function ensureServerDirs(server) {
-  const root = server.server_path || serverPath(server.id, server.name);
-  fs.mkdirSync(assertInside(serversRoot, root), { recursive: true });
+  const root = findServerRoot(server);
+  fs.mkdirSync(root, { recursive: true });
   return root;
 }
 
@@ -78,6 +115,7 @@ module.exports = {
   displayPath,
   externalDataRoot,
   ensureServerDirs,
+  findServerRoot,
   pluginTarget,
   serverPath,
   serversRoot,

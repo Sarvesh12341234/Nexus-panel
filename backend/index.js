@@ -11,7 +11,7 @@ const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
-const { db, getUserCount } = require('./db');
+const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
 const { AdaptiveEngine } = require('./adaptive_engine');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
@@ -22,6 +22,7 @@ const { profileForServer, writeProfile } = require('./nexus_mark');
 const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer } = require('./runtime');
 const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
+const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
 const {
   SESSION_COOKIE,
   authMiddleware,
@@ -50,6 +51,7 @@ const keyedOperations = new Map();
 const crashHistory = new Map();
 const adaptiveEngine = new AdaptiveEngine();
 let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
+let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
 const PANEL_VERSION = '1.2.0';
 let updateStatus = {
@@ -213,6 +215,96 @@ function rememberCrash(server, software, code, signal) {
   return crash;
 }
 
+function redactRepairCommand(command) {
+  return String(command || '')
+    .replace(/\b(password|token|secret|api[-_]?key)\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, '$1=<redacted>')
+    .replace(/(?:Bearer\s+)[A-Za-z0-9._~-]+/gi, 'Bearer <redacted>')
+    .slice(0, 800);
+}
+
+function safeReplayCommand(command, server) {
+  const clean = String(command || '').trim();
+  if (!clean || clean.length > 800 || /[\r\n;&|`$<>]/.test(clean)) return { safe: false, command: '' };
+  const tokens = clean.match(/"(?:\\.|[^"])*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^(['"])(.*)\1$/, '$2')) || [];
+  const executable = path.basename(tokens.shift() || '').toLowerCase();
+  if (!['chmod', 'mkdir', 'touch', 'cp', 'dos2unix'].includes(executable)) return { safe: false, command: '' };
+  if (executable === 'mkdir' && !tokens.includes('-p')) return { safe: false, command: '' };
+  if (executable === 'cp' && !tokens.some((token) => /^-[A-Za-z]*f/.test(token))) return { safe: false, command: '' };
+  const root = ensureServerDirs(server);
+  const pathTokens = tokens.filter((token) => (
+    !token.startsWith('-')
+    && !/^[0-7]{3,4}$/.test(token)
+    && !/^[ugoa]*[+-][rwxXst]+$/.test(token)
+  ));
+  if (!pathTokens.length) return { safe: false, command: '' };
+  try {
+    for (const token of pathTokens) {
+      const candidate = path.isAbsolute(token) ? token : path.resolve(root, token);
+      assertInside(root, candidate);
+    }
+  } catch {
+    return { safe: false, command: '' };
+  }
+  return { safe: true, command: clean };
+}
+
+function recordTerminalRepairOutcome({ serverId, command, code }) {
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(serverId));
+  const crash = server && db.prepare('SELECT * FROM repair_crash_state WHERE server_id = ?').get(server.id);
+  if (!server || !crash || Date.now() - Number(crash.last_seen_at) > 4 * 60 * 60 * 1000) return null;
+  const safety = safeReplayCommand(command, server);
+  const preview = redactRepairCommand(command);
+  const commandHash = crypto.createHash('sha256').update(String(command)).digest('hex');
+  db.prepare(`
+    INSERT INTO repair_command_observations (
+      server_id, signature, software_key, command_hash, command_text,
+      command_preview, safe_to_replay, exit_code, observed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(server_id, signature, command_hash) DO UPDATE SET
+      command_text = excluded.command_text,
+      command_preview = excluded.command_preview,
+      safe_to_replay = excluded.safe_to_replay,
+      exit_code = excluded.exit_code,
+      observed_at = excluded.observed_at
+  `).run(
+    server.id,
+    crash.signature,
+    crash.software_key,
+    commandHash,
+    safety.command,
+    preview,
+    safety.safe ? 1 : 0,
+    Number(code),
+    Date.now(),
+  );
+  appendLog(server.id, `[NexusPanel] Repair learner observed terminal command (${safety.safe ? 'eligible after stability validation' : 'evidence only'}): ${preview}`);
+  return { safe: safety.safe, preview };
+}
+
+function validateStableTerminalRepairs() {
+  const cutoff = Date.now() - 60 * 1000;
+  const candidates = db.prepare(`
+    SELECT observation.*
+    FROM repair_command_observations observation
+    JOIN repair_crash_state crash ON crash.server_id = observation.server_id AND crash.signature = observation.signature
+    WHERE observation.exit_code = 0
+      AND observation.observed_at <= ?
+      AND observation.validated_at = 0
+  `).all(cutoff);
+  const validated = [];
+  for (const candidate of candidates) {
+    if (runtimeStatus(candidate.server_id) !== 'online') continue;
+    db.prepare(`
+      UPDATE repair_command_observations
+      SET stable_success_count = stable_success_count + 1, validated_at = ?
+      WHERE id = ?
+    `).run(Date.now(), candidate.id);
+    appendLog(candidate.server_id, `[NexusPanel] Repair learner validated terminal fix after stable runtime: ${candidate.command_preview}`);
+    validated.push(candidate.id);
+  }
+  return validated;
+}
+
 function learnRepairPlaybook(server, report) {
   const crash = db.prepare('SELECT * FROM repair_crash_state WHERE server_id = ?').get(server.id);
   if (!crash || Date.now() - Number(crash.last_seen_at) > 7 * 24 * 60 * 60 * 1000) return null;
@@ -238,14 +330,33 @@ async function replayLearnedRepair(server, software, crash) {
     SELECT * FROM repair_playbooks
     WHERE signature = ? AND software_key = ? AND success_count > 0
   `).get(crash.signature, software?.key || server.software_key || '');
-  if (!playbook) return null;
-  appendLog(server.id, `[NexusPanel] Learned recovery matched ${crash.signature.slice(0, 12)}. Replaying the previously successful safe repair.`);
+  const learnedCommands = db.prepare(`
+    SELECT * FROM repair_command_observations
+    WHERE server_id = ? AND signature = ? AND software_key = ?
+      AND safe_to_replay = 1 AND stable_success_count > 0 AND command_text != ''
+    ORDER BY validated_at DESC
+    LIMIT 5
+  `).all(server.id, crash.signature, software?.key || server.software_key || '');
+  if (!playbook && !learnedCommands.length) return null;
+  appendLog(server.id, `[NexusPanel] Learned recovery matched ${crash.signature.slice(0, 12)}. Replaying previously validated repairs.`);
+  const root = ensureServerDirs(server);
+  for (const learned of learnedCommands) {
+    await runShellCommand(learned.command_text, root);
+    db.prepare(`
+      UPDATE repair_command_observations
+      SET replay_count = replay_count + 1, last_replayed_at = ?
+      WHERE id = ?
+    `).run(Date.now(), learned.id);
+    appendLog(server.id, `[NexusPanel] Replayed validated terminal repair: ${learned.command_preview}`);
+  }
   const report = await runServerRepair(server, software);
-  db.prepare(`
-    UPDATE repair_playbooks
-    SET replay_count = replay_count + 1, last_replayed_at = ?
-    WHERE signature = ?
-  `).run(Date.now(), crash.signature);
+  if (playbook) {
+    db.prepare(`
+      UPDATE repair_playbooks
+      SET replay_count = replay_count + 1, last_replayed_at = ?
+      WHERE signature = ?
+    `).run(Date.now(), crash.signature);
+  }
   appendLog(server.id, `[NexusPanel] Learned recovery completed: ${report.summary}`);
   return report;
 }
@@ -541,22 +652,56 @@ function otpHash(email, code) {
 async function sendPasswordOtp(email, code) {
   const subject = 'NexusPanel password reset OTP';
   const text = `Your NexusPanel password reset OTP is ${code}. It expires in 10 minutes.`;
-  const html = `<!doctype html><html><body style="margin:0;background:#080b0f;color:#f4f8fb;font-family:Arial,sans-serif;padding:32px"><div style="max-width:520px;margin:auto;background:#111820;border:1px solid #34414d;border-radius:8px;padding:28px"><div style="color:#41e69b;font-size:13px;font-weight:700;text-transform:uppercase">NexusPanel</div><h1 style="font-size:24px;margin:10px 0 8px">Reset your password</h1><p style="color:#a9b7c5;line-height:1.6">Use this one-time code within 10 minutes:</p><div style="background:#05080c;border:1px solid #41e69b;border-radius:6px;color:#9dffd0;font-size:34px;font-weight:800;letter-spacing:8px;text-align:center;padding:20px;margin:22px 0">${code}</div><p style="color:#7f8c99;font-size:12px">Select the code to copy it. If you did not request this reset, ignore this email.</p></div></body></html>`;
+  const html = `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
+<body style="margin:0;padding:0;background:#070b10;color:#f4f8fb;font-family:Arial,Helvetica,sans-serif">
+  <div style="display:none;max-height:0;overflow:hidden;color:transparent">Your NexusPanel reset code is ${code}.</div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#070b10;padding:32px 14px">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#111820;border:1px solid #30404d;border-radius:8px;overflow:hidden">
+        <tr><td style="height:5px;background:#41e69b"></td></tr>
+        <tr><td style="padding:32px">
+          <div style="display:inline-block;width:42px;height:42px;line-height:42px;text-align:center;background:#173c35;border:1px solid #41e69b;border-radius:8px;color:#9dffd0;font-size:20px;font-weight:800">N</div>
+          <div style="margin-top:18px;color:#41e69b;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:1px">NexusPanel Security</div>
+          <h1 style="margin:8px 0 10px;color:#ffffff;font-size:26px;line-height:1.2">Reset your password</h1>
+          <p style="margin:0;color:#a9b7c5;font-size:15px;line-height:1.7">Enter this one-time code on the NexusPanel reset page. It expires in 10 minutes.</p>
+          <div style="margin:26px 0;padding:22px 12px;background:#05080c;border:2px solid #41e69b;border-radius:8px;color:#b4ffdc;font-family:Consolas,Monaco,monospace;font-size:38px;font-weight:800;letter-spacing:10px;text-align:center">${code}</div>
+          <div style="padding:14px;background:#0b1219;border-left:3px solid #5ed8ff;color:#9cabb8;font-size:13px;line-height:1.6">Never share this code. NexusPanel staff will not ask for it. If you did not request a reset, no action is required.</div>
+        </td></tr>
+        <tr><td style="padding:18px 32px;background:#0b1117;border-top:1px solid #26333e;color:#71808d;font-size:12px">Automated security message from your NexusPanel VPS.</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
   const apiUrl = process.env.NEXUSPANEL_EMAIL_API_URL;
   const apiKey = process.env.NEXUSPANEL_EMAIL_API_KEY;
   if (apiUrl && globalThis.fetch) {
     const provider = String(process.env.NEXUSPANEL_EMAIL_PROVIDER || '').toLowerCase();
     const isResend = provider === 'resend' || apiUrl.includes('api.resend.com');
+    const isBrevo = provider === 'brevo' || apiUrl.includes('api.brevo.com');
+    const isSendGrid = provider === 'sendgrid' || apiUrl.includes('api.sendgrid.com');
     const from = process.env.NEXUSPANEL_EMAIL_FROM;
     if (isResend && !from) throw new Error('NEXUSPANEL_EMAIL_FROM is required for Resend.');
+    if ((isBrevo || isSendGrid) && !from) throw new Error('NEXUSPANEL_EMAIL_FROM is required for this email provider.');
     const body = isResend
       ? { from, to: [email], subject, text, html }
-      : { to: email, from: from || undefined, subject, text, html };
+      : isBrevo
+        ? { sender: { email: from, name: 'NexusPanel' }, to: [{ email }], subject, textContent: text, htmlContent: html }
+        : isSendGrid
+          ? {
+            personalizations: [{ to: [{ email }] }],
+            from: { email: from, name: 'NexusPanel' },
+            subject,
+            content: [{ type: 'text/plain', value: text }, { type: 'text/html', value: html }],
+          }
+          : { to: email, from: from || undefined, subject, text, html, textContent: text, htmlContent: html };
     const response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...(apiKey ? (isBrevo ? { 'api-key': apiKey } : { Authorization: `Bearer ${apiKey}` }) : {}),
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
@@ -569,7 +714,30 @@ async function sendPasswordOtp(email, code) {
   }
 
   if (process.platform !== 'win32' && fs.existsSync('/usr/sbin/sendmail')) {
-    const message = `To: ${email}\nSubject: ${subject}\n\n${text}\n`;
+    const boundary = `nexus-${crypto.randomBytes(12).toString('hex')}`;
+    const from = process.env.NEXUSPANEL_EMAIL_FROM || 'noreply@nexuspanel.local';
+    const message = [
+      `To: ${email}`,
+      `From: NexusPanel <${from}>`,
+      `Subject: ${subject}`,
+      'MIME-Version: 1.0',
+      `Content-Type: multipart/alternative; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      text,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      html,
+      '',
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
     const result = spawnSync('/usr/sbin/sendmail', ['-t'], { input: message, encoding: 'utf8' });
     if (result.status === 0) return 'OTP sent by local sendmail.';
   }
@@ -859,7 +1027,11 @@ async function runHealthCheck(force = false) {
   const add = (name, ok, message) => checks.push({ name, ok: Boolean(ok), message });
   fs.mkdirSync(dataRoot, { recursive: true });
 
-  add('SQLite database', Boolean(db.prepare('SELECT 1 AS ok').get().ok), 'Database responds');
+  const databaseVerification = verifyDatabase();
+  databaseHealthStatus = { ...databaseVerification, checkedAt: now, snapshotAt: databaseHealthStatus.snapshotAt || 0 };
+  add('SQLite database', databaseVerification.ok, databaseVerification.ok
+    ? 'quick_check passed and foreign keys are consistent'
+    : `${databaseVerification.quickCheck}; ${databaseVerification.foreignKeyErrors} foreign-key issue(s)`);
   add('Servers folder', fs.existsSync(serversRoot), displayPath(serversRoot));
   add('Backups folder', fs.existsSync(backupsRoot), displayPath(backupsRoot));
   fs.mkdirSync(softwareRoot, { recursive: true });
@@ -1129,7 +1301,13 @@ const propertySchema = [
 ];
 
 function propertiesPath(server) {
-  return path.join(ensureServerDirs(server), 'server.properties');
+  const root = ensureServerDirs(server);
+  if (path.resolve(server.server_path || '') !== path.resolve(root)) {
+    db.prepare('UPDATE servers SET server_path = ? WHERE id = ?').run(root, server.id);
+    server.server_path = root;
+    appendLog(server.id, `[NexusPanel] Recovered properties path: ${displayPath(root)}`);
+  }
+  return path.join(root, 'server.properties');
 }
 
 function parseProperties(content) {
@@ -1142,29 +1320,137 @@ function parseProperties(content) {
   return values;
 }
 
-async function readProperties(server) {
+function defaultPropertyValues(server) {
+  return {
+    'server-name': server.name,
+    motd: server.name,
+    'max-players': '20',
+    gamemode: 'survival',
+    difficulty: 'normal',
+    pvp: 'true',
+    'white-list': 'false',
+    'allow-list': 'false',
+    'allow-cheats': 'false',
+    'force-gamemode': 'false',
+    hardcore: 'false',
+    'command-blocks-enabled': 'false',
+    'texturepack-required': 'false',
+    'enable-lan-visibility': 'true',
+    'default-player-permission-level': 'member',
+    'server-port': String(server.port),
+  };
+}
+
+function inspectProperties(content, server) {
+  const values = {};
+  const issues = [];
+  const cleanContent = String(content || '').replaceAll('\0', '');
+  if (cleanContent !== String(content || '')) issues.push('Removed null bytes.');
+  cleanContent.split(/\r?\n/).forEach((line, lineIndex) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+    const separator = line.indexOf('=');
+    if (separator < 1) {
+      issues.push(`Ignored malformed line ${lineIndex + 1}.`);
+      return;
+    }
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!/^[A-Za-z0-9._-]+$/.test(key)) {
+      issues.push(`Ignored invalid key on line ${lineIndex + 1}.`);
+      return;
+    }
+    if (Object.hasOwn(values, key)) issues.push(`Collapsed duplicate key ${key}.`);
+    values[key] = value;
+  });
+
+  const schema = new Map(propertySchema.map((item) => [item.key, item]));
+  const numberRanges = {
+    'server-port': [1, 65535],
+    'server-portv6': [1, 65535],
+    'rcon.port': [1, 65535],
+    'max-players': [1, 10000],
+    'view-distance': [2, 64],
+    'simulation-distance': [2, 64],
+    'tick-distance': [4, 32],
+    'max-threads': [0, 1024],
+    'spawn-protection': [0, 100000],
+    'player-idle-timeout': [0, 100000],
+  };
+  for (const [key, value] of Object.entries(values)) {
+    const item = schema.get(key);
+    if (!item) continue;
+    if (item.type === 'boolean') {
+      if (/^(?:true|1|yes|on)$/i.test(value)) values[key] = 'true';
+      else if (/^(?:false|0|no|off)$/i.test(value)) values[key] = 'false';
+      else {
+        values[key] = defaultPropertyValues(server)[key] || 'false';
+        issues.push(`Reset invalid boolean ${key}.`);
+      }
+    }
+    if (item.type === 'number') {
+      const parsed = Math.trunc(Number(value));
+      const [minimum, maximum] = numberRanges[key] || [-2147483648, 2147483647];
+      if (!Number.isFinite(parsed)) {
+        values[key] = defaultPropertyValues(server)[key] || '0';
+        issues.push(`Reset invalid number ${key}.`);
+      } else {
+        const clamped = Math.max(minimum, Math.min(maximum, parsed));
+        values[key] = String(clamped);
+        if (clamped !== parsed) issues.push(`Clamped ${key} to ${clamped}.`);
+      }
+    }
+    if (item.type === 'select' && !item.options.includes(value)) {
+      const match = item.options.find((option) => option.toLowerCase() === value.toLowerCase());
+      values[key] = match || defaultPropertyValues(server)[key] || item.options[0];
+      issues.push(`Normalized invalid option ${key}.`);
+    }
+  }
+  if (values['server-port'] !== undefined && values['server-port'] !== String(server.port)) {
+    issues.push(`Synchronized server-port to ${server.port}.`);
+  }
+  values['server-port'] = String(server.port);
+  return { values, issues };
+}
+
+async function atomicWriteText(filePath, content) {
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.promises.writeFile(temporary, content, 'utf8');
+  try {
+    await fs.promises.rename(temporary, filePath);
+  } catch {
+    await fs.promises.copyFile(temporary, filePath);
+    await fs.promises.rm(temporary, { force: true });
+  }
+}
+
+async function repairPropertiesFile(server, { create = true } = {}) {
   const filePath = propertiesPath(server);
   const existing = await fs.promises.readFile(filePath, 'utf8').catch(() => '');
-  const values = parseProperties(existing);
-  if (!existing) {
-    values['server-name'] = server.name;
-    values.motd = server.name;
-    values['max-players'] = '20';
-    values.gamemode = 'survival';
-    values.difficulty = 'normal';
-    values.pvp = 'true';
-    values['white-list'] = 'false';
-    values['allow-list'] = 'false';
-    values['allow-cheats'] = 'false';
-    values['force-gamemode'] = 'false';
-    values['hardcore'] = 'false';
-    values['command-blocks-enabled'] = 'false';
-    values['texturepack-required'] = 'false';
-    values['enable-lan-visibility'] = 'true';
-    values['default-player-permission-level'] = 'member';
-    values['server-port'] = String(server.port);
+  const inspected = inspectProperties(existing, server);
+  const values = existing ? inspected.values : { ...defaultPropertyValues(server), ...inspected.values };
+  if (!existing && !create) return { values, issues: [], repaired: false, filePath };
+  const needsWrite = !existing || inspected.issues.length > 0 || values['server-port'] !== String(server.port);
+  if (!needsWrite) return { values, issues: [], repaired: false, filePath };
+
+  if (existing) {
+    const recoveryDir = path.join(path.dirname(filePath), 'runtime', 'property-recovery');
+    await fs.promises.mkdir(recoveryDir, { recursive: true });
+    await fs.promises.writeFile(path.join(recoveryDir, `server.properties.${Date.now()}.bak`), existing, 'utf8');
   }
-  return values;
+  const content = [
+    '# NexusPanel validated server.properties',
+    ...Object.entries(values).map(([key, value]) => `${key}=${String(value).replace(/[\r\n]/g, ' ')}`),
+    '',
+  ].join('\n');
+  await atomicWriteText(filePath, content);
+  appendLog(server.id, `[NexusPanel] Properties self-heal: ${inspected.issues.join(' ') || 'created missing server.properties'}`);
+  return { values, issues: inspected.issues, repaired: true, filePath };
+}
+
+async function readProperties(server) {
+  return (await repairPropertiesFile(server)).values;
 }
 
 async function writeProperties(server, values) {
@@ -1175,7 +1461,7 @@ async function writeProperties(server, values) {
     ...Object.entries(merged).map(([key, value]) => `${key}=${value}`),
     '',
   ].join('\n');
-  await fs.promises.writeFile(propertiesPath(server), content, 'utf8');
+  await atomicWriteText(propertiesPath(server), content);
 }
 
 async function javaUuidForName(name) {
@@ -1258,6 +1544,46 @@ function adaptiveInsights(user, req) {
       memoryPercent: Math.round((memory.used / Math.max(1, memory.total)) * 100),
     }),
   ];
+}
+
+function repairBrainPayload() {
+  const playbooks = db.prepare(`
+    SELECT COUNT(*) AS count, COALESCE(SUM(success_count), 0) AS learned, COALESCE(SUM(replay_count), 0) AS replays
+    FROM repair_playbooks
+  `).get();
+  const commands = db.prepare(`
+    SELECT
+      COUNT(*) AS observed,
+      COALESCE(SUM(CASE WHEN safe_to_replay = 1 THEN 1 ELSE 0 END), 0) AS safe,
+      COALESCE(SUM(CASE WHEN stable_success_count > 0 THEN 1 ELSE 0 END), 0) AS validated,
+      COALESCE(SUM(replay_count), 0) AS replays
+    FROM repair_command_observations
+  `).get();
+  const recent = db.prepare(`
+    SELECT observation.server_id, observation.command_preview, observation.safe_to_replay,
+      observation.exit_code, observation.stable_success_count, observation.replay_count,
+      observation.observed_at, server.name AS server_name
+    FROM repair_command_observations observation
+    JOIN servers server ON server.id = observation.server_id
+    ORDER BY observation.observed_at DESC
+    LIMIT 8
+  `).all().map((row) => ({
+    serverId: row.server_id,
+    serverName: row.server_name,
+    commandPreview: row.command_preview,
+    safeToReplay: Boolean(row.safe_to_replay),
+    exitCode: row.exit_code,
+    validated: row.stable_success_count > 0,
+    replayCount: row.replay_count,
+    observedAt: row.observed_at,
+  }));
+  return {
+    knowledge: knowledgeStatus(),
+    playbooks,
+    commands,
+    recent,
+    database: databaseHealthStatus,
+  };
 }
 
 function backupTimezone(server) {
@@ -1344,6 +1670,11 @@ async function backupRows(server) {
 
 function executableCandidates(server, software) {
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  if (path.resolve(server.server_path || '') !== path.resolve(root)) {
+    db.prepare('UPDATE servers SET server_path = ? WHERE id = ?').run(root, server.id);
+    server.server_path = root;
+    appendLog(server.id, `[NexusPanel] Recovered server root: ${displayPath(root)}`);
+  }
   return [
     server.executable_path,
     path.join(root, 'software', software.executable),
@@ -1437,10 +1768,31 @@ async function runServerRepair(server, software) {
   const actions = [];
   const warnings = [];
   const checks = [];
+  const diagnostics = diagnoseRuntime(consoleLogs(server.id));
+  const knowledge = knowledgeStatus();
+  checks.push({
+    name: 'Crash intelligence',
+    ok: true,
+    detail: diagnostics.length
+      ? `${diagnostics.length} likely cause(s) matched from ${knowledge.diagnosticSignals} signals.`
+      : `No known crash signature matched across ${knowledge.diagnosticSignals} signals.`,
+  });
+  diagnostics.forEach((diagnostic) => {
+    warnings.push(`${diagnostic.severity.toUpperCase()} ${diagnostic.summary} ${diagnostic.techniques[0]}`);
+  });
 
   const repair = await repairMissingExecutable(server, software);
   actions.push(repair.message);
   checks.push({ name: 'Executable', ok: true, detail: displayPath(repair.path) });
+  if (['java', 'bedrock'].includes(server.type)) {
+    const properties = await repairPropertiesFile(server);
+    checks.push({
+      name: 'Server properties',
+      ok: true,
+      detail: properties.repaired ? `Repaired ${properties.issues.length || 1} issue(s).` : 'Syntax and values validated.',
+    });
+    if (properties.repaired) actions.push(`Repaired server.properties (${properties.issues.join(' ') || 'created missing file'}).`);
+  }
 
   const queue = [root];
   const staleTransfers = [];
@@ -1497,6 +1849,8 @@ async function runServerRepair(server, software) {
     checks,
     actions,
     warnings,
+    diagnostics,
+    knowledge,
     summary: `${checks.filter((check) => check.ok).length}/${checks.length} checks passed, ${actions.length} repair action(s), ${warnings.length} warning(s).`,
   };
 }
@@ -1693,6 +2047,7 @@ app.get('/api/overview', (req, res) => {
     health: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? (fs.existsSync(healthPath) ? readHealthFile() : null) : null,
     optimizer: req.user && req.user.access_level >= permissions.MANAGE_SERVERS ? optimizerStatus() : null,
     adaptiveInsights: req.user ? adaptiveInsights(req.user, req) : [],
+    repairBrain: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? repairBrainPayload() : null,
   };
 
   res.json(payload);
@@ -1917,6 +2272,42 @@ app.post('/api/host/token/regenerate', requireAuth, (req, res) => {
 app.get('/api/health', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
   res.json({ health: await runHealthCheck(req.query.force === '1') });
 }));
+
+app.get('/api/repair/bundle', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+  const crashes = db.prepare(`
+    SELECT crash.server_id, crash.signature, crash.software_key, crash.sample, crash.last_seen_at, server.name
+    FROM repair_crash_state crash
+    JOIN servers server ON server.id = crash.server_id
+    ORDER BY crash.last_seen_at DESC
+    LIMIT 30
+  `).all();
+  res.json({
+    generatedAt: new Date().toISOString(),
+    panelVersion: PANEL_VERSION,
+    knowledge: knowledgeStatus(),
+    database: databaseHealthStatus,
+    crashes,
+    brain: repairBrainPayload(),
+  });
+});
+
+app.post('/api/database/snapshot', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+  const snapshot = backupDatabase({ force: true });
+  databaseHealthStatus = { ...snapshot.verification, checkedAt: Date.now(), snapshotAt: Date.now() };
+  res.json({ ok: true, created: snapshot.created, file: path.basename(snapshot.path), database: databaseHealthStatus });
+});
+
+app.post('/api/servers/:id/repair-preview', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const diagnostics = diagnoseRuntime(consoleLogs(server.id));
+  res.json({
+    server: server.name,
+    signature: crashSignature(server, softwareForServer(server), null, null).signature.slice(0, 12),
+    diagnostics,
+    knowledge: knowledgeStatus(),
+    changesApplied: false,
+  });
+});
 
 app.post('/api/host/provision', asyncRoute(async (req, res) => {
   if (!isHostApiAuthorized(req)) return res.status(401).json({ error: 'Host API token required.' });
@@ -2205,6 +2596,13 @@ function terminalShell() {
   return { command: shell, args: shell.endsWith('bash') ? ['-l'] : [] };
 }
 
+function wrappedTerminalInput(input, token) {
+  if (process.platform === 'win32') {
+    return `${input}\n$__nexusCode = if ($?) { 0 } else { 1 }\nWrite-Output "__NEXUS_CMD_END_${token}:$($__nexusCode)__"\n`;
+  }
+  return `${input}\n__nexus_code=$?\nprintf '__NEXUS_CMD_END_${token}:%s__\\n' "$__nexus_code"\n`;
+}
+
 function closeWakeWatcher(serverId) {
   const watcher = wakeWatchers.get(serverId);
   if (!watcher) return;
@@ -2303,9 +2701,32 @@ app.post('/api/terminal/session', requireAuth, (req, res) => {
   const shell = terminalShell();
   const cwd = path.join(__dirname, '..');
   const child = spawn(shell.command, shell.args, { cwd, env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-  const session = { id: crypto.randomUUID(), userId: req.user.id, child, buffer: [], cwd, closed: false, lastSeen: Date.now() };
+  const session = {
+    id: crypto.randomUUID(),
+    userId: req.user.id,
+    child,
+    buffer: [],
+    markerBuffer: '',
+    pendingCommands: new Map(),
+    cwd,
+    closed: false,
+    lastSeen: Date.now(),
+  };
   const push = (chunk) => {
-    session.buffer.push(String(chunk).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''));
+    const clean = String(chunk).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+    session.markerBuffer = `${session.markerBuffer}${clean}`.slice(-12000);
+    const markerPattern = /__NEXUS_CMD_END_([a-f0-9]+):(\d+)__/g;
+    let marker;
+    while ((marker = markerPattern.exec(session.markerBuffer))) {
+      const pending = session.pendingCommands.get(marker[1]);
+      if (pending) {
+        recordTerminalRepairOutcome({ ...pending, code: Number(marker[2]) });
+        session.pendingCommands.delete(marker[1]);
+      }
+    }
+    session.markerBuffer = session.markerBuffer.replace(markerPattern, '').slice(-4000);
+    const visible = clean.replace(markerPattern, '');
+    if (visible) session.buffer.push(visible);
     if (session.buffer.length > 2000) session.buffer.splice(0, session.buffer.length - 2000);
   };
   child.stdout.on('data', push);
@@ -2331,8 +2752,23 @@ app.post('/api/terminal/session/:sessionId/input', requireAuth, (req, res) => {
   if (session.closed) return res.status(410).json({ error: 'Terminal session is closed.' });
   const input = String(req.body.input || '');
   if (input.length > 4000) return res.status(400).json({ error: 'Terminal input is too long.' });
-  session.child.stdin.write(input.endsWith('\n') ? input : `${input}\n`);
-  res.json({ ok: true });
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.body.serverId));
+  const crash = server && db.prepare('SELECT * FROM repair_crash_state WHERE server_id = ?').get(server.id);
+  const canObserve = Boolean(
+    server
+    && crash
+    && Date.now() - Number(crash.last_seen_at) <= 4 * 60 * 60 * 1000
+    && !input.includes('\n')
+    && !/^\s*(?:exit|logout)\b/i.test(input),
+  );
+  if (canObserve) {
+    const token = crypto.randomBytes(8).toString('hex');
+    session.pendingCommands.set(token, { serverId: server.id, command: input.trim() });
+    session.child.stdin.write(wrappedTerminalInput(input, token));
+  } else {
+    session.child.stdin.write(input.endsWith('\n') ? input : `${input}\n`);
+  }
+  res.json({ ok: true, learning: canObserve, serverId: server?.id || null });
 });
 
 app.delete('/api/terminal/session/:sessionId', requireAuth, (req, res) => {
@@ -2877,6 +3313,7 @@ app.post('/api/servers/:id/start', requireAccess(permissions.POWER_SERVERS), asy
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can start.' });
+  if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
   try {
     return res.json(startServer(resolveInstalledExecutable(server, software), software));
   } catch (error) {
@@ -3600,6 +4037,20 @@ async function runAdaptiveMaintenance() {
   if (expiredSessions) actions.push(`Removed ${expiredSessions} expired session(s)`);
   if (expiredOtps) actions.push(`Removed ${expiredOtps} expired reset code(s)`);
   if (expiredLinks) actions.push(`Revoked ${expiredLinks} expired public backup link(s)`);
+  const validatedRepairs = validateStableTerminalRepairs();
+  if (validatedRepairs.length) actions.push(`Validated ${validatedRepairs.length} learned terminal repair(s)`);
+  if (now - Number(databaseHealthStatus.checkedAt || 0) >= 5 * 60 * 1000) {
+    const verification = verifyDatabase();
+    databaseHealthStatus = { ...verification, checkedAt: now, snapshotAt: databaseHealthStatus.snapshotAt || 0 };
+    if (!verification.ok) actions.push(`Database integrity warning: ${verification.quickCheck}`);
+    if (verification.ok) {
+      const snapshot = backupDatabase();
+      if (snapshot.created) {
+        databaseHealthStatus.snapshotAt = now;
+        actions.push('Created and verified SQLite recovery snapshot');
+      }
+    }
+  }
   await runAutoBackups();
   refreshWakeWatchers();
   adaptiveMaintenanceStatus = { lastRunAt: now, actions };
@@ -3619,12 +4070,13 @@ function startConfiguredServers() {
   const servers = db.prepare('SELECT * FROM servers WHERE auto_start = 1').all();
   for (const server of servers) {
     const delayMs = Math.max(0, Number(server.startup_delay_sec || 0)) * 1000;
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       try {
         if (runtimeStatus(server.id) === 'online') return;
         if (!hasJavaEula(server)) throw new Error('Minecraft EULA has not been accepted.');
         const software = softwareForServer(server);
         if (!software) throw new Error('No installed runtime is configured.');
+        if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
         startServer(resolveInstalledExecutable(server, software), software);
         appendLog(server.id, '[NexusPanel] Auto-start completed.');
       } catch (error) {
@@ -3648,6 +4100,14 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
   crashHistory.set(server.id, recent);
   const launchFailure = uptimeMs < 10 * 1000;
   const crash = rememberCrash(current, software, code, signal);
+  const crashDiagnostics = diagnoseRuntime(consoleLogs(current.id), { limit: 5 });
+  if (crashDiagnostics.length) {
+    crashDiagnostics.forEach((diagnostic) => {
+      appendLog(current.id, `[NexusPanel] Crash intelligence (${diagnostic.severity}): ${diagnostic.summary} Next: ${diagnostic.techniques[0]}`);
+    });
+  } else {
+    appendLog(current.id, `[NexusPanel] Crash intelligence recorded unknown signature ${crash.signature.slice(0, 12)} for learning.`);
+  }
   if (current.crash_backup && !launchFailure) {
     await createServerBackup(current, 'crash')
       .catch((error) => appendLog(current.id, `[NexusPanel] Crash backup failed: ${error.message}`));
@@ -3659,8 +4119,16 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
     appendLog(current.id, '[NexusPanel] Restart storm stopped after 3 failures in 2 minutes. Run Repair & Diagnose, then start manually.');
     return;
   }
-  await replayLearnedRepair(current, software, crash)
-    .catch((error) => appendLog(current.id, `[NexusPanel] Learned recovery could not complete: ${error.message}`));
+  const learnedRecovery = await replayLearnedRepair(current, software, crash)
+    .catch((error) => {
+      appendLog(current.id, `[NexusPanel] Learned recovery could not complete: ${error.message}`);
+      return null;
+    });
+  if (!learnedRecovery) {
+    await runServerRepair(current, software)
+      .then((report) => appendLog(current.id, `[NexusPanel] Proactive crash repair completed: ${report.summary}`))
+      .catch((error) => appendLog(current.id, `[NexusPanel] Proactive crash repair warning: ${error.message}`));
+  }
   const restartDelaySeconds = launchFailure ? 10 * recent.length : 5;
   appendLog(current.id, `[NexusPanel] Unexpected exit detected. Restarting in ${restartDelaySeconds} seconds...`);
   const timer = setTimeout(() => {

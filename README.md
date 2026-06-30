@@ -107,7 +107,12 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Free mode supports bounded pixel-level X/Y placement, 1px arrow-key nudging, Shift+Arrow 10px movement, configurable mouse snapping, layers, position reset, and independent desktop/mobile coordinates. Flow mode retains responsive order-based placement.
 - Component and button layouts share the floating save/undo controls and permanent portable UI codes.
 - Repair & Diagnose learns a redacted crash signature from successful fixes and safely repeats the same built-in repair workflow when that error returns.
+- The repair brain includes 748 diagnostic signals across 47 cause families covering game runtimes, plugins, mods, worlds, networks, storage, databases, and VPS limits.
+- Owner-terminal commands can be associated with a crashed server. Exit-zero commands are observed, stability-validated after the game remains online, and replayed only when they are idempotent and confined to that server root; dangerous commands remain redacted evidence.
+- Stored server roots are rediscovered from ID-prefixed folders and real game files. Missing or malformed `server.properties` files are backed up, validated, normalized, and atomically rewritten before startup.
+- SQLite uses integrity checks, foreign-key checks, verified rotating snapshots, and startup recovery from the latest verified snapshot when the primary database cannot open.
 - Login, password reset, and protected owner-password fields include accessible password reveal controls.
+- Password-reset delivery sends styled multipart HTML through local sendmail and provider-specific Resend, Brevo, SendGrid, or generic API payloads.
 - Host Edition adds maintenance mode and configurable per-account server quotas.
 - Nexus-Mark uses transient systemd services; 1-3 core servers receive a temporary startup burst while allocations of 4+ cores stay at their configured steady limit.
 - Launch-failure restart storms stop automatically and do not create meaningless crash backups.

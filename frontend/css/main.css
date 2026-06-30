@@ -1933,6 +1933,14 @@ body[data-ui-editing="true"][data-ui-move-mode="free"] [data-ui-button-key] {
   cursor: crosshair;
 }
 
+body[data-ui-editing="true"][data-ui-move-mode="free"] [data-ui-component-zone],
+body[data-ui-editing="true"][data-ui-move-mode="free"] [data-ui-region] {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--cyan), transparent 94%) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--cyan), transparent 94%) 1px, transparent 1px);
+  background-size: var(--ui-editor-grid, 8px) var(--ui-editor-grid, 8px);
+}
+
 .layout-editor-bar {
   position: fixed;
   z-index: 1000;

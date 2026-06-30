@@ -13,6 +13,7 @@ const state = {
   loginEvents: [],
   health: null,
   adaptiveInsights: [],
+  repairBrain: null,
   metricHistory: {},
   activeView: 'dashboard',
   activeServerId: null,
@@ -611,6 +612,29 @@ function updatePrecisionControls(position = selectedPosition()) {
   if (y) y.value = position.y;
 }
 
+function alignSelectedItem(alignment) {
+  const item = selectedLayoutItem();
+  const zone = selectedLayoutZone(item);
+  if (!item || !zone) return null;
+  const current = selectedPosition();
+  const rect = item.getBoundingClientRect();
+  const zoneRect = zone.getBoundingClientRect();
+  const origin = {
+    left: rect.left - current.x,
+    top: rect.top - current.y,
+    width: rect.width,
+    height: rect.height,
+  };
+  const next = { ...current };
+  if (alignment === 'left') next.x = Math.round(zoneRect.left - origin.left);
+  if (alignment === 'center') next.x = Math.round(zoneRect.left + (zoneRect.width - origin.width) / 2 - origin.left);
+  if (alignment === 'right') next.x = Math.round(zoneRect.right - (origin.left + origin.width));
+  if (alignment === 'top') next.y = Math.round(zoneRect.top - origin.top);
+  if (alignment === 'middle') next.y = Math.round(zoneRect.top + (zoneRect.height - origin.height) / 2 - origin.top);
+  if (alignment === 'bottom') next.y = Math.round(zoneRect.bottom - (origin.top + origin.height));
+  return updateSelectedPosition(next);
+}
+
 function encodeLayoutCode(preferences = uiPreferences) {
   const payload = JSON.stringify({ version: 2, preferences });
   return btoa(unescape(encodeURIComponent(payload))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -647,6 +671,17 @@ function renderLayoutEditorBar() {
         ${[1, 2, 4, 8, 16].map((value) => `<option value="${value}" ${layoutEditor.snap === value ? 'selected' : ''}>${value}px</option>`).join('')}
       </select>
     </label>
+    <label class="precision-snap" title="Align inside the current UI container">Align
+      <select data-layout-align>
+        <option value="">Choose</option>
+        <option value="left">Left</option>
+        <option value="center">Center</option>
+        <option value="right">Right</option>
+        <option value="top">Top</option>
+        <option value="middle">Middle</option>
+        <option value="bottom">Bottom</option>
+      </select>
+    </label>
     <button type="button" data-layout-command="front" title="Bring selected item above nearby items">Front</button>
     <button type="button" data-layout-command="reset-position" class="secondary" title="Reset selected item coordinates">Reset Pos</button>
     <button type="button" data-layout-command="width" title="Cycle selected box or button width">Width</button>
@@ -668,6 +703,7 @@ function setLayoutEditor(active) {
   document.body.dataset.uiEditing = layoutEditor.active ? 'true' : 'false';
   document.body.dataset.uiEditMode = layoutEditor.mode;
   document.body.dataset.uiMoveMode = layoutEditor.precision ? 'free' : 'flow';
+  document.documentElement.style.setProperty('--ui-editor-grid', `${Math.max(8, layoutEditor.snap)}px`);
   applyUiPreferences(layoutEditor.active ? alphaDraft : uiPreferences);
   renderLayoutEditorBar();
   if (layoutEditor.active) showToast('UI Editor active. Drag highlighted boxes or switch to Buttons mode.');
@@ -1717,6 +1753,10 @@ function renderTerminal() {
     </form>
     <pre class="terminal-output" id="terminalOutput">${terminalSession.id ? 'Connected. Waiting for shell output...' : 'Terminal locked. Owner password required.'}</pre>
     <form class="terminal-form" id="terminalInputForm" ${terminalSession.id ? '' : 'hidden'}>
+      <label>Repair learning target <select name="serverId">
+        <option value="">Do not associate</option>
+        ${state.servers.map((server) => `<option value="${server.id}" ${server.id === state.activeServerId ? 'selected' : ''}>${escapeHtml(server.name)}</option>`).join('')}
+      </select></label>
       <label>Input <input name="input" placeholder="systemctl status nexuspanel --no-pager" autocomplete="off"></label>
       <button type="submit">Send</button>
     </form>
@@ -1977,7 +2017,13 @@ async function renderSecurity(forceHealth = false) {
     elements.healthPanel.innerHTML = `
       <div class="section-head">
         <div><p class="eyebrow">Smart Check</p><h2>${escapeHtml(state.health?.summary || 'No check yet')}</h2></div>
-        <div class="row-actions"><button class="secondary" type="button" data-action="adaptive-heal">Adaptive heal</button><button type="button" data-action="run-health-check">Run check now</button></div>
+        <div class="row-actions">
+          <button class="secondary" type="button" data-action="repair-preview">Preview repair</button>
+          <button class="secondary" type="button" data-action="copy-repair-bundle">Copy repair bundle</button>
+          <button class="secondary" type="button" data-action="database-snapshot">Snapshot DB</button>
+          <button class="secondary" type="button" data-action="adaptive-heal">Adaptive heal</button>
+          <button type="button" data-action="run-health-check">Run check now</button>
+        </div>
       </div>
       <p class="muted">Last checked: ${escapeHtml(state.health?.checkedAtText ? new Date(state.health.checkedAtText).toLocaleString() : 'never')}</p>
       <div class="health-grid">
@@ -1986,6 +2032,16 @@ async function renderSecurity(forceHealth = false) {
       <h3>Adaptive engine</h3>
       <div class="health-grid">
         ${(state.adaptiveInsights || []).map((insight) => `<article class="${insight.anomalies?.length ? 'is-bad' : 'is-ok'}"><strong>${escapeHtml(insight.section)} ${insight.health}%</strong><span>${insight.learnedSamples < 5 ? `Learning baseline (${insight.learnedSamples}/5)` : insight.anomalies?.length ? `${insight.anomalies.length} learned anomaly signal(s)` : 'Operating inside its learned baseline'}</span></article>`).join('')}
+      </div>
+      <h3>Repair brain</h3>
+      <div class="health-grid">
+        <article class="is-ok"><strong>${Number(state.repairBrain?.knowledge?.diagnosticSignals || 0)} crash signals</strong><span>${Number(state.repairBrain?.knowledge?.rules || 0)} cause families across game, world, network, storage, runtime, and VPS health.</span></article>
+        <article class="is-ok"><strong>${Number(state.repairBrain?.playbooks?.count || 0)} repair playbooks</strong><span>${Number(state.repairBrain?.playbooks?.replays || 0)} automatic replay(s) completed.</span></article>
+        <article class="${state.repairBrain?.commands?.validated ? 'is-ok' : ''}"><strong>${Number(state.repairBrain?.commands?.observed || 0)} terminal fixes observed</strong><span>${Number(state.repairBrain?.commands?.validated || 0)} stability-validated; ${Number(state.repairBrain?.commands?.safe || 0)} eligible for safe replay.</span></article>
+        <article class="${state.repairBrain?.database?.ok ? 'is-ok' : 'is-bad'}"><strong>SQLite ${state.repairBrain?.database?.ok ? 'verified' : 'warning'}</strong><span>${escapeHtml(state.repairBrain?.database?.quickCheck || 'not checked')} · ${Number(state.repairBrain?.database?.foreignKeyErrors || 0)} foreign-key issue(s).</span></article>
+      </div>
+      <div class="plugin-list">
+        ${(state.repairBrain?.recent || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)}</strong><div class="muted">${escapeHtml(item.commandPreview)} · exit ${item.exitCode ?? 'pending'}</div></div><span class="badge ${item.validated ? 'is-on' : ''}">${item.validated ? `learned · ${item.replayCount} replay(s)` : item.safeToReplay ? 'validating' : 'evidence only'}</span></div>`).join('') || '<p class="empty-state">Terminal fixes will appear here after a crash is associated with a repair command.</p>'}
       </div>
     `;
   }
@@ -2055,6 +2111,7 @@ async function refresh({ keepView = true } = {}) {
     state.loginEvents = overview.loginEvents || [];
     state.health = overview.health || null;
     state.adaptiveInsights = overview.adaptiveInsights || [];
+    state.repairBrain = overview.repairBrain || null;
 
     if (state.activeServerId && !state.servers.some((server) => server.id === state.activeServerId)) {
       state.activeServerId = null;
@@ -2091,6 +2148,7 @@ async function refreshServerStatusOnly() {
   state.loginEvents = overview.loginEvents || state.loginEvents;
   state.health = overview.health || state.health;
   state.adaptiveInsights = overview.adaptiveInsights || state.adaptiveInsights;
+  state.repairBrain = overview.repairBrain || state.repairBrain;
   if (state.activeServerId && !state.servers.some((server) => server.id === state.activeServerId)) {
     state.activeServerId = state.servers[0]?.id || null;
   }
@@ -2534,7 +2592,11 @@ document.addEventListener('submit', async (event) => {
   event.target.input.value = '';
   appendTerminalOutput(`\n$ ${input}\n`);
   try {
-    await api(`/api/terminal/session/${encodeURIComponent(terminalSession.id)}/input`, { method: 'POST', body: JSON.stringify({ input }) });
+    const result = await api(`/api/terminal/session/${encodeURIComponent(terminalSession.id)}/input`, {
+      method: 'POST',
+      body: JSON.stringify({ input, serverId: event.target.serverId.value }),
+    });
+    if (result.learning) showToast('Repair learner is observing this command and its outcome.');
   } catch (error) {
     appendTerminalOutput(`\n[NexusPanel] ${error.message}\n`);
     showToast(error.message);
@@ -2809,9 +2871,17 @@ document.addEventListener('input', (event) => {
 });
 
 document.addEventListener('change', (event) => {
-  if (!event.target.matches('[data-layout-snap]')) return;
-  layoutEditor.snap = Math.max(1, Number(event.target.value) || 1);
-  showToast(`Mouse snap set to ${layoutEditor.snap}px.`);
+  if (event.target.matches('[data-layout-snap]')) {
+    layoutEditor.snap = Math.max(1, Number(event.target.value) || 1);
+    document.documentElement.style.setProperty('--ui-editor-grid', `${Math.max(8, layoutEditor.snap)}px`);
+    showToast(`Mouse snap set to ${layoutEditor.snap}px.`);
+  }
+  if (event.target.matches('[data-layout-align]') && event.target.value) {
+    const position = alignSelectedItem(event.target.value);
+    if (!position) showToast('Select a box or button first.');
+    else showToast(`Aligned ${event.target.value} at X ${position.x}, Y ${position.y}.`);
+    event.target.value = '';
+  }
 });
 
 document.addEventListener('keydown', (event) => {
@@ -3171,6 +3241,28 @@ document.addEventListener('click', async (event) => {
       if (!response.ok) throw new Error(text || 'Could not load Nginx config.');
       await navigator.clipboard?.writeText(text).catch(() => {});
       prompt('Nginx X-Accel config copied if browser allowed it:', text);
+      return;
+    }
+    if (action === 'repair-preview') {
+      const server = activeServer();
+      if (!server) return showToast('Select a server first.');
+      const result = await api(`/api/servers/${server.id}/repair-preview`, { method: 'POST', body: '{}' });
+      const summary = result.diagnostics?.length
+        ? result.diagnostics.map((item) => `${item.severity.toUpperCase()}: ${item.summary}`).join('\n')
+        : `No known cause matched ${result.knowledge?.diagnosticSignals || 0} signals.`;
+      prompt(`Repair preview ${result.signature} (no changes applied):`, summary);
+      return;
+    }
+    if (action === 'copy-repair-bundle') {
+      const bundle = await api('/api/repair/bundle');
+      await copyText(JSON.stringify(bundle, null, 2));
+      showToast('Redacted repair bundle copied.');
+      return;
+    }
+    if (action === 'database-snapshot') {
+      const result = await api('/api/database/snapshot', { method: 'POST', body: '{}' });
+      showToast(`Verified database snapshot created: ${result.file}`);
+      await refresh();
       return;
     }
     if (action === 'run-health-check') {

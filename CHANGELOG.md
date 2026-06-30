@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Runtime no longer trusts a stale stored server path; it discovers the strongest ID-matched folder and synchronizes `server_path`.
+- Missing, malformed, duplicated, or invalid `server.properties` values are backed up and repaired before launch.
+- Local sendmail password resets now include styled multipart HTML instead of plain text only.
+- Precision editor alignment and grid guides remain bounded to each functional UI container.
 - Saved precision positions switch live between desktop and mobile breakpoints during resize or orientation changes.
 - Layout reordering preserves untouched form-control slots, so moving boxes cannot pull submit buttons or inputs into unintended positions.
 - Alpha UI editing now stays responsive on desktop and mobile without page overflow.
@@ -26,6 +30,12 @@
 
 ### Added
 
+- Repair brain catalog with 748 diagnostic signals across 47 crash and VPS cause families.
+- Terminal fix learning with real command exit markers, crash/server association, online stability validation, redacted evidence, and restricted idempotent replay.
+- Proactive safe Repair & Diagnose execution before automatic crash restart when no learned playbook exists.
+- SQLite quick/foreign-key checks, eight rotating verified snapshots, manual snapshot controls, and startup recovery.
+- Repair preview, redacted repair bundle export, and database snapshot controls in Security.
+- Precision alignment controls and visible snap-grid guides.
 - Bounded Free placement with exact X/Y inputs, 1px keyboard nudging, Shift+Arrow 10px movement, 1-16px mouse snapping, layer controls, and per-breakpoint coordinates.
 - A Flow/Free switch keeps responsive order editing available alongside cursor-precise placement.
 - Advanced Boxes mode for moving and resizing complete cards, forms, status blocks, field groups, and tool panels independently from Buttons mode.
