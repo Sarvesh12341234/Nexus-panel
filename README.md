@@ -106,6 +106,9 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Its visual editor has separate Boxes and Buttons modes for mouse, pen, and touch placement. Cards, forms, status blocks, field groups, tool panels, and buttons can be reordered and resized without moving the outer panel shell.
 - Free mode supports bounded pixel-level X/Y placement, 1px arrow-key nudging, Shift+Arrow 10px movement, configurable mouse snapping, layers, position reset, and independent desktop/mobile coordinates. Flow mode retains responsive order-based placement.
 - Component and button layouts share the floating save/undo controls and permanent portable UI codes.
+- Portable UI codes use a versioned `NXUI2` format. Import remains compatible with older URL-safe Base64 codes, standard Base64, raw JSON, and codes pasted with surrounding text.
+- Editor selection survives live panel rerenders, supports Shift/Ctrl multi-select, and can align edges or centers and distribute three or more boxes/buttons horizontally or vertically.
+- Visual-editor undo and redo operate on one drag, nudge, resize, coordinate edit, or alignment action at a time without reverting unrelated sections.
 - Repair & Diagnose learns a redacted crash signature from successful fixes and safely repeats the same built-in repair workflow when that error returns.
 - The repair brain includes 748 diagnostic signals across 47 cause families covering game runtimes, plugins, mods, worlds, networks, storage, databases, and VPS limits.
 - Owner-terminal commands can be associated with a crashed server. Exit-zero commands are observed, stability-validated after the game remains online, and replayed only when they are idempotent and confined to that server root; dangerous commands remain redacted evidence.

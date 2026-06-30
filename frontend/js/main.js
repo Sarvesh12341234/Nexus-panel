@@ -109,6 +109,10 @@ const layoutEditor = {
   pointerId: null,
   selectedKey: '',
   selectedType: '',
+  selection: [],
+  undo: [],
+  redo: [],
+  controlSnapshot: null,
 };
 let lastCreateSoftwareKey = '';
 const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
@@ -264,6 +268,7 @@ function applyUiPreferences(preferences = uiPreferences) {
   });
   applyButtonLayout(preferences);
   applyComponentLayout(preferences);
+  restoreLayoutSelection();
 }
 
 function layoutRegionElements() {
@@ -539,22 +544,80 @@ function selectedPosition() {
 
 function selectedLayoutItem() {
   if (!layoutEditor.selectedKey || !layoutEditor.selectedType) return null;
-  if (layoutEditor.selectedType === 'component') {
+  return layoutItemByKey(layoutEditor.selectedType, layoutEditor.selectedKey);
+}
+
+function layoutItemByKey(type, key) {
+  if (type === 'component') {
     return [...document.querySelectorAll('[data-ui-component-key]')].find((component) => {
       const zone = component.parentElement?.closest('[data-ui-component-zone]');
-      return zone && `${zone.dataset.uiComponentZone}/${component.dataset.uiComponentKey}` === layoutEditor.selectedKey;
+      return zone && `${zone.dataset.uiComponentZone}/${component.dataset.uiComponentKey}` === key;
     }) || null;
   }
   return [...document.querySelectorAll('[data-ui-region] [data-ui-button-key]')].find((button) => (
-    `${button.closest('[data-ui-region]').dataset.uiRegion}/${button.dataset.uiButtonKey}` === layoutEditor.selectedKey
+    `${button.closest('[data-ui-region]').dataset.uiRegion}/${button.dataset.uiButtonKey}` === key
   )) || null;
 }
 
-function selectedLayoutZone(item = selectedLayoutItem()) {
+function layoutZoneFor(type, item) {
   if (!item) return null;
-  return layoutEditor.selectedType === 'component'
+  return type === 'component'
     ? item.parentElement?.closest('[data-ui-component-zone]')
     : item.closest('[data-ui-region]');
+}
+
+function selectedLayoutZone(item = selectedLayoutItem()) {
+  return layoutZoneFor(layoutEditor.selectedType, item);
+}
+
+function layoutItemKey(type, item, zone = layoutZoneFor(type, item)) {
+  if (!item || !zone) return '';
+  return type === 'component'
+    ? `${zone.dataset.uiComponentZone}/${item.dataset.uiComponentKey}`
+    : `${zone.dataset.uiRegion}/${item.dataset.uiButtonKey}`;
+}
+
+function restoreLayoutSelection() {
+  if (!layoutEditor.active) return;
+  document.querySelectorAll('.is-layout-selected').forEach((item) => item.classList.remove('is-layout-selected'));
+  for (const entry of layoutEditor.selection) {
+    layoutItemByKey(entry.type, entry.key)?.classList.add('is-layout-selected');
+  }
+}
+
+function selectLayoutItem(type, key, { additive = false } = {}) {
+  const exists = layoutEditor.selection.some((entry) => entry.type === type && entry.key === key);
+  if (additive) {
+    layoutEditor.selection = exists
+      ? layoutEditor.selection.filter((entry) => entry.type !== type || entry.key !== key)
+      : [...layoutEditor.selection, { type, key }];
+  } else if (!exists || layoutEditor.selection.length <= 1) {
+    layoutEditor.selection = [{ type, key }];
+  }
+  const primary = layoutEditor.selection.find((entry) => entry.type === type && entry.key === key)
+    || layoutEditor.selection.at(-1);
+  layoutEditor.selectedType = primary?.type || '';
+  layoutEditor.selectedKey = primary?.key || '';
+  restoreLayoutSelection();
+  renderLayoutEditorBar();
+  return exists && additive ? null : layoutItemByKey(type, key);
+}
+
+function selectedLayoutEntries({ sameZone = false } = {}) {
+  const entries = layoutEditor.selection.map((entry) => {
+    const item = layoutItemByKey(entry.type, entry.key);
+    return item ? { ...entry, item, zone: layoutZoneFor(entry.type, item) } : null;
+  }).filter((entry) => entry?.zone);
+  if (!sameZone || entries.length < 2) return entries;
+  const primary = entries.find((entry) => (
+    entry.type === layoutEditor.selectedType && entry.key === layoutEditor.selectedKey
+  )) || entries.at(-1);
+  return entries.filter((entry) => entry.type === primary.type && entry.zone === primary.zone);
+}
+
+function layoutPositionFor(entry) {
+  const store = entry.type === 'component' ? alphaDraft.componentPositions : alphaDraft.buttonPositions;
+  return cleanPosition(store?.[entry.key]?.[positionBreakpoint()]);
 }
 
 function constrainPosition(item, zone, desired, current = selectedPosition()) {
@@ -584,22 +647,33 @@ function updateSelectedPosition(nextPosition, { constrain = true } = {}) {
   const item = selectedLayoutItem();
   const zone = selectedLayoutZone(item);
   if (!item || !zone) return null;
-  const current = selectedPosition();
+  return updateLayoutItemPosition({
+    type: layoutEditor.selectedType,
+    key: layoutEditor.selectedKey,
+    item,
+    zone,
+  }, nextPosition, { constrain });
+}
+
+function updateLayoutItemPosition(entry, nextPosition, { constrain = true } = {}) {
+  const { type, key, item, zone } = entry;
+  if (!item || !zone) return null;
+  const current = layoutPositionFor(entry);
   const next = constrain ? constrainPosition(item, zone, nextPosition, current) : cleanPosition(nextPosition);
-  const storeKey = layoutEditor.selectedType === 'component' ? 'componentPositions' : 'buttonPositions';
+  const storeKey = type === 'component' ? 'componentPositions' : 'buttonPositions';
   const store = alphaDraft[storeKey] || {};
   alphaDraft = {
     ...alphaDraft,
     [storeKey]: {
       ...store,
-      [layoutEditor.selectedKey]: {
-        ...(store[layoutEditor.selectedKey] || {}),
+      [key]: {
+        ...(store[key] || {}),
         [positionBreakpoint()]: next,
       },
     },
   };
-  applyStoredPosition(item, alphaDraft[storeKey][layoutEditor.selectedKey]);
-  updatePrecisionControls(next);
+  applyStoredPosition(item, alphaDraft[storeKey][key]);
+  if (key === layoutEditor.selectedKey && type === layoutEditor.selectedType) updatePrecisionControls(next);
   return next;
 }
 
@@ -610,43 +684,160 @@ function updatePrecisionControls(position = selectedPosition()) {
   const y = bar.querySelector('[data-layout-coordinate="y"]');
   if (x) x.value = position.x;
   if (y) y.value = position.y;
+  const count = bar.querySelector('[data-layout-selection-count]');
+  if (count) count.textContent = `${layoutEditor.selection.length} selected`;
 }
 
-function alignSelectedItem(alignment) {
-  const item = selectedLayoutItem();
-  const zone = selectedLayoutZone(item);
-  if (!item || !zone) return null;
-  const current = selectedPosition();
-  const rect = item.getBoundingClientRect();
-  const zoneRect = zone.getBoundingClientRect();
-  const origin = {
-    left: rect.left - current.x,
-    top: rect.top - current.y,
-    width: rect.width,
-    height: rect.height,
+function alignSelectedItems(alignment) {
+  const entries = selectedLayoutEntries({ sameZone: true });
+  if (!entries.length) return 0;
+  if (entries.length === 1) {
+    const [{ item, zone }] = entries;
+    const current = selectedPosition();
+    const rect = item.getBoundingClientRect();
+    const zoneRect = zone.getBoundingClientRect();
+    const origin = {
+      left: rect.left - current.x,
+      top: rect.top - current.y,
+      width: rect.width,
+      height: rect.height,
+    };
+    const next = { ...current };
+    if (alignment === 'left') next.x = Math.round(zoneRect.left - origin.left);
+    if (alignment === 'center') next.x = Math.round(zoneRect.left + (zoneRect.width - origin.width) / 2 - origin.left);
+    if (alignment === 'right') next.x = Math.round(zoneRect.right - (origin.left + origin.width));
+    if (alignment === 'top') next.y = Math.round(zoneRect.top - origin.top);
+    if (alignment === 'middle') next.y = Math.round(zoneRect.top + (zoneRect.height - origin.height) / 2 - origin.top);
+    if (alignment === 'bottom') next.y = Math.round(zoneRect.bottom - (origin.top + origin.height));
+    updateSelectedPosition(next);
+    return 1;
+  }
+
+  const measured = entries.map((entry) => ({
+    ...entry,
+    position: layoutPositionFor(entry),
+    rect: entry.item.getBoundingClientRect(),
+  }));
+  const bounds = {
+    left: Math.min(...measured.map((entry) => entry.rect.left)),
+    right: Math.max(...measured.map((entry) => entry.rect.right)),
+    top: Math.min(...measured.map((entry) => entry.rect.top)),
+    bottom: Math.max(...measured.map((entry) => entry.rect.bottom)),
   };
-  const next = { ...current };
-  if (alignment === 'left') next.x = Math.round(zoneRect.left - origin.left);
-  if (alignment === 'center') next.x = Math.round(zoneRect.left + (zoneRect.width - origin.width) / 2 - origin.left);
-  if (alignment === 'right') next.x = Math.round(zoneRect.right - (origin.left + origin.width));
-  if (alignment === 'top') next.y = Math.round(zoneRect.top - origin.top);
-  if (alignment === 'middle') next.y = Math.round(zoneRect.top + (zoneRect.height - origin.height) / 2 - origin.top);
-  if (alignment === 'bottom') next.y = Math.round(zoneRect.bottom - (origin.top + origin.height));
-  return updateSelectedPosition(next);
+  if (alignment === 'distribute-horizontal' && measured.length >= 3) {
+    const ordered = [...measured].sort((a, b) => a.rect.left - b.rect.left);
+    const width = ordered.reduce((sum, entry) => sum + entry.rect.width, 0);
+    const gap = (bounds.right - bounds.left - width) / (ordered.length - 1);
+    let cursor = bounds.left;
+    for (const entry of ordered) {
+      updateLayoutItemPosition(entry, { ...entry.position, x: entry.position.x + cursor - entry.rect.left });
+      cursor += entry.rect.width + gap;
+    }
+    return measured.length;
+  }
+  if (alignment === 'distribute-vertical' && measured.length >= 3) {
+    const ordered = [...measured].sort((a, b) => a.rect.top - b.rect.top);
+    const height = ordered.reduce((sum, entry) => sum + entry.rect.height, 0);
+    const gap = (bounds.bottom - bounds.top - height) / (ordered.length - 1);
+    let cursor = bounds.top;
+    for (const entry of ordered) {
+      updateLayoutItemPosition(entry, { ...entry.position, y: entry.position.y + cursor - entry.rect.top });
+      cursor += entry.rect.height + gap;
+    }
+    return measured.length;
+  }
+  for (const entry of measured) {
+    const next = { ...entry.position };
+    if (alignment === 'left') next.x += bounds.left - entry.rect.left;
+    if (alignment === 'center') next.x += ((bounds.left + bounds.right) / 2) - (entry.rect.left + entry.rect.width / 2);
+    if (alignment === 'right') next.x += bounds.right - entry.rect.right;
+    if (alignment === 'top') next.y += bounds.top - entry.rect.top;
+    if (alignment === 'middle') next.y += ((bounds.top + bounds.bottom) / 2) - (entry.rect.top + entry.rect.height / 2);
+    if (alignment === 'bottom') next.y += bounds.bottom - entry.rect.bottom;
+    updateLayoutItemPosition(entry, next);
+  }
+  return measured.length;
+}
+
+function rememberLayoutMutation(before) {
+  if (!before || JSON.stringify(before) === JSON.stringify(alphaDraft)) return false;
+  layoutEditor.undo.push(before);
+  if (layoutEditor.undo.length > 100) layoutEditor.undo.shift();
+  layoutEditor.redo.length = 0;
+  renderLayoutEditorBar();
+  restoreLayoutSelection();
+  return true;
+}
+
+function restoreLayoutDraft(next) {
+  alphaDraft = structuredClone(next);
+  applyUiPreferences(alphaDraft);
+  restoreLayoutSelection();
+  renderLayoutEditorBar();
+}
+
+function undoLayoutMutation() {
+  if (!layoutEditor.undo.length) return false;
+  layoutEditor.redo.push(structuredClone(alphaDraft));
+  restoreLayoutDraft(layoutEditor.undo.pop());
+  return true;
+}
+
+function redoLayoutMutation() {
+  if (!layoutEditor.redo.length) return false;
+  layoutEditor.undo.push(structuredClone(alphaDraft));
+  restoreLayoutDraft(layoutEditor.redo.pop());
+  return true;
+}
+
+function decodeBase64Utf8(value) {
+  const compact = value.replace(/\s+/g, '').replaceAll('-', '+').replaceAll('_', '/');
+  if (!compact || compact.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact)) {
+    throw new Error('Layout code is not valid Base64.');
+  }
+  const binary = atob(compact.padEnd(Math.ceil(compact.length / 4) * 4, '='));
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function parseLayoutPayload(value) {
+  const payload = JSON.parse(value);
+  if (![1, 2].includes(payload.version) || !payload.preferences || typeof payload.preferences !== 'object' || Array.isArray(payload.preferences)) {
+    throw new Error('Unsupported layout code.');
+  }
+  return payload.preferences;
 }
 
 function encodeLayoutCode(preferences = uiPreferences) {
   const payload = JSON.stringify({ version: 2, preferences });
-  return btoa(unescape(encodeURIComponent(payload))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  const bytes = new TextEncoder().encode(payload);
+  let binary = '';
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return `NXUI2.${btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')}`;
 }
 
 function decodeLayoutCode(code) {
-  const normalized = String(code || '').trim().replaceAll('-', '+').replaceAll('_', '/');
-  const payload = JSON.parse(decodeURIComponent(escape(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))));
-  if (![1, 2].includes(payload.version) || !payload.preferences || typeof payload.preferences !== 'object') {
-    throw new Error('Unsupported layout code.');
+  let normalized = String(code || '').trim();
+  normalized = normalized.replace(/^["'`]|["'`]$/g, '');
+  if (normalized.startsWith('{')) return parseLayoutPayload(normalized);
+  const compactInput = normalized.replace(/\s+/g, '');
+  if (/^(?:NXUI[12][.:])?[A-Za-z0-9_+/-]{20,}={0,2}$/i.test(compactInput)) {
+    normalized = compactInput.replace(/^NXUI[12][.:]/i, '');
+  } else {
+    const prefixed = normalized.match(/NXUI[12][.:]\s*([A-Za-z0-9_+/-]{20,}={0,2})/i);
+    if (prefixed) {
+      normalized = prefixed[1];
+    } else {
+      const candidates = [...normalized.matchAll(/[A-Za-z0-9_+/-]{20,}={0,2}/g)];
+      if (candidates.length) normalized = candidates.at(-1)[0];
+    }
   }
-  return payload.preferences;
+  try {
+    return parseLayoutPayload(decodeBase64Utf8(normalized));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error('Layout code contains invalid data.');
+    throw error;
+  }
 }
 
 function renderLayoutEditorBar() {
@@ -659,7 +850,7 @@ function renderLayoutEditorBar() {
   const position = selectedPosition();
   bar.innerHTML = `
     <strong>UI Editor</strong>
-    <span>${layoutEditor.precision ? 'Free move: hold and place precisely inside the highlighted container.' : 'Flow move: drag to swap item order.'}</span>
+    <span>${layoutEditor.precision ? 'Free move: drag precisely. Shift-click or Ctrl-click to select multiple items.' : 'Flow move: drag to swap item order.'} <b data-layout-selection-count>${layoutEditor.selection.length} selected</b></span>
     <button type="button" data-layout-command="mode-boxes" class="${layoutEditor.mode === 'boxes' ? '' : 'secondary'}" title="Move cards and panels">Boxes</button>
     <button type="button" data-layout-command="mode-buttons" class="${layoutEditor.mode === 'buttons' ? '' : 'secondary'}" title="Move command buttons">Buttons</button>
     <button type="button" data-layout-command="move-free" class="${layoutEditor.precision ? '' : 'secondary'}" title="Place items at exact coordinates">Free</button>
@@ -680,13 +871,15 @@ function renderLayoutEditorBar() {
         <option value="top">Top</option>
         <option value="middle">Middle</option>
         <option value="bottom">Bottom</option>
+        <option value="distribute-horizontal">Distribute H</option>
+        <option value="distribute-vertical">Distribute V</option>
       </select>
     </label>
     <button type="button" data-layout-command="front" title="Bring selected item above nearby items">Front</button>
     <button type="button" data-layout-command="reset-position" class="secondary" title="Reset selected item coordinates">Reset Pos</button>
     <button type="button" data-layout-command="width" title="Cycle selected box or button width">Width</button>
-    <button type="button" data-layout-command="undo" title="Undo last saved layout">Undo</button>
-    <button type="button" data-layout-command="redo" title="Redo saved layout">Redo</button>
+    <button type="button" data-layout-command="undo" title="Undo one editor action" ${layoutEditor.undo.length ? '' : 'disabled'}>Undo</button>
+    <button type="button" data-layout-command="redo" title="Redo one editor action" ${layoutEditor.redo.length ? '' : 'disabled'}>Redo</button>
     <button type="button" data-layout-command="copy" title="Copy permanent UI code">Copy UI Code</button>
     <button type="button" data-layout-command="cancel" class="secondary">Cancel</button>
     <button type="button" data-layout-command="save">Save</button>
@@ -700,6 +893,12 @@ function setLayoutEditor(active) {
   layoutEditor.pointerId = null;
   layoutEditor.selectedKey = '';
   layoutEditor.selectedType = '';
+  layoutEditor.selection = [];
+  layoutEditor.controlSnapshot = null;
+  if (layoutEditor.active) {
+    layoutEditor.undo = [];
+    layoutEditor.redo = [];
+  }
   document.body.dataset.uiEditing = layoutEditor.active ? 'true' : 'false';
   document.body.dataset.uiEditMode = layoutEditor.mode;
   document.body.dataset.uiMoveMode = layoutEditor.precision ? 'free' : 'flow';
@@ -2674,6 +2873,9 @@ document.addEventListener('pointerdown', (event) => {
     ? item.parentElement?.closest('[data-ui-component-zone]')
     : item.closest('[data-ui-region]');
   if (!zone) return;
+  const key = layoutItemKey(type, item, zone);
+  const selected = selectLayoutItem(type, key, { additive: event.shiftKey || event.ctrlKey || event.metaKey });
+  if (!selected) return;
   layoutEditor.dragging = {
     item,
     zone,
@@ -2681,12 +2883,11 @@ document.addEventListener('pointerdown', (event) => {
     startX: event.clientX,
     startY: event.clientY,
     moved: false,
+    beforeDraft: structuredClone(alphaDraft),
   };
   layoutEditor.pointerId = event.pointerId;
   layoutEditor.selectedType = type;
-  layoutEditor.selectedKey = type === 'component'
-    ? `${zone.dataset.uiComponentZone}/${item.dataset.uiComponentKey}`
-    : `${zone.dataset.uiRegion}/${item.dataset.uiButtonKey}`;
+  layoutEditor.selectedKey = key;
   layoutEditor.dragging.basePosition = selectedPosition();
   updatePrecisionControls(layoutEditor.dragging.basePosition);
   item.setPointerCapture?.(event.pointerId);
@@ -2741,11 +2942,19 @@ document.addEventListener('pointerup', (event) => {
       else captureButtonLayout();
       showToast(`${drag.type === 'component' ? 'Box' : 'Button'} order updated in the layout draft.`);
     }
-  } else {
-    document.querySelectorAll('.is-layout-selected').forEach((item) => item.classList.remove('is-layout-selected'));
-    drag.item.classList.add('is-layout-selected');
-    updatePrecisionControls();
+    rememberLayoutMutation(drag.beforeDraft);
   }
+  restoreLayoutSelection();
+  updatePrecisionControls();
+  layoutEditor.dragging = null;
+  layoutEditor.pointerId = null;
+}, true);
+
+document.addEventListener('pointercancel', (event) => {
+  const drag = layoutEditor.dragging;
+  if (!drag || event.pointerId !== layoutEditor.pointerId) return;
+  drag.item.classList.remove('is-layout-dragging');
+  restoreLayoutDraft(drag.beforeDraft);
   layoutEditor.dragging = null;
   layoutEditor.pointerId = null;
 }, true);
@@ -2755,7 +2964,7 @@ document.addEventListener('click', (event) => {
   const target = layoutEditor.mode === 'boxes'
     ? event.target.closest('[data-ui-component-key]')
     : event.target.closest('[data-ui-button-key]');
-  if (!target || (layoutEditor.mode === 'buttons' && target.dataset.view)) return;
+  if (!target) return;
   event.preventDefault();
   event.stopImmediatePropagation();
 }, true);
@@ -2767,6 +2976,7 @@ document.addEventListener('click', async (event) => {
     layoutEditor.mode = command === 'mode-boxes' ? 'boxes' : 'buttons';
     layoutEditor.selectedKey = '';
     layoutEditor.selectedType = '';
+    layoutEditor.selection = [];
     document.body.dataset.uiEditMode = layoutEditor.mode;
     document.querySelectorAll('.is-layout-selected').forEach((item) => item.classList.remove('is-layout-selected'));
     renderLayoutEditorBar();
@@ -2781,15 +2991,19 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (command === 'reset-position') {
+    const before = structuredClone(alphaDraft);
     const position = updateSelectedPosition({ x: 0, y: 0, z: 0 }, { constrain: false });
     if (!position) return showToast('Select a box or button first.');
+    rememberLayoutMutation(before);
     showToast('Position reset.');
     return;
   }
   if (command === 'front') {
+    const before = structuredClone(alphaDraft);
     const current = selectedPosition();
     const position = updateSelectedPosition({ ...current, z: Math.min(50, current.z + 1) });
     if (!position) return showToast('Select a box or button first.');
+    rememberLayoutMutation(before);
     showToast(`Layer ${position.z}.`);
     return;
   }
@@ -2814,23 +3028,18 @@ document.addEventListener('click', async (event) => {
     showToast('Permanent UI code copied.');
     return;
   }
-  if (command === 'undo' && uiHistory.length) {
-    uiRedo.push(structuredClone(uiPreferences));
-    uiPreferences = uiHistory.pop();
-    alphaDraft = structuredClone(uiPreferences);
-    localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
-    applyUiPreferences(alphaDraft);
+  if (command === 'undo') {
+    if (!undoLayoutMutation()) showToast('Nothing left to undo in this edit session.');
+    else showToast('Undid one layout action.');
     return;
   }
-  if (command === 'redo' && uiRedo.length) {
-    uiHistory.push(structuredClone(uiPreferences));
-    uiPreferences = uiRedo.pop();
-    alphaDraft = structuredClone(uiPreferences);
-    localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
-    applyUiPreferences(alphaDraft);
+  if (command === 'redo') {
+    if (!redoLayoutMutation()) showToast('Nothing left to redo in this edit session.');
+    else showToast('Redid one layout action.');
     return;
   }
   if (command === 'width') {
+    const before = structuredClone(alphaDraft);
     const isComponent = layoutEditor.selectedType === 'component';
     const selected = isComponent
       ? [...document.querySelectorAll('[data-ui-component-key]')].find((component) => {
@@ -2858,6 +3067,7 @@ document.addEventListener('click', async (event) => {
       applyButtonLayout(alphaDraft);
     }
     selected.classList.add('is-layout-selected');
+    rememberLayoutMutation(before);
     showToast(`${isComponent ? 'Box' : 'Button'} width: ${next}.`);
   }
 });
@@ -2870,16 +3080,29 @@ document.addEventListener('input', (event) => {
   if (!updateSelectedPosition(next)) showToast('Select a box or button first.');
 });
 
+document.addEventListener('focusin', (event) => {
+  if (!layoutEditor.active || !event.target.matches('[data-layout-coordinate]')) return;
+  layoutEditor.controlSnapshot = structuredClone(alphaDraft);
+});
+
 document.addEventListener('change', (event) => {
+  if (event.target.matches('[data-layout-coordinate]')) {
+    rememberLayoutMutation(layoutEditor.controlSnapshot);
+    layoutEditor.controlSnapshot = null;
+  }
   if (event.target.matches('[data-layout-snap]')) {
     layoutEditor.snap = Math.max(1, Number(event.target.value) || 1);
     document.documentElement.style.setProperty('--ui-editor-grid', `${Math.max(8, layoutEditor.snap)}px`);
     showToast(`Mouse snap set to ${layoutEditor.snap}px.`);
   }
   if (event.target.matches('[data-layout-align]') && event.target.value) {
-    const position = alignSelectedItem(event.target.value);
-    if (!position) showToast('Select a box or button first.');
-    else showToast(`Aligned ${event.target.value} at X ${position.x}, Y ${position.y}.`);
+    const before = structuredClone(alphaDraft);
+    const count = alignSelectedItems(event.target.value);
+    if (!count) showToast('Select a box or button first.');
+    else {
+      rememberLayoutMutation(before);
+      showToast(`${event.target.value.startsWith('distribute') ? 'Distributed' : 'Aligned'} ${count} item${count === 1 ? '' : 's'}.`);
+    }
     event.target.value = '';
   }
 });
@@ -2893,6 +3116,7 @@ document.addEventListener('keydown', (event) => {
   ) return;
   if (!selectedLayoutItem()) return;
   event.preventDefault();
+  const before = structuredClone(alphaDraft);
   const step = event.shiftKey ? 10 : 1;
   const current = selectedPosition();
   const next = { ...current };
@@ -2901,6 +3125,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'ArrowUp') next.y -= step;
   if (event.key === 'ArrowDown') next.y += step;
   updateSelectedPosition(next);
+  rememberLayoutMutation(before);
 });
 
 let layoutResizeFrame = 0;

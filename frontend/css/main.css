@@ -1966,6 +1966,13 @@ body[data-ui-editing="true"][data-ui-move-mode="free"] [data-ui-region] {
   flex: 1 1 220px;
 }
 
+.layout-editor-bar [data-layout-selection-count] {
+  display: inline-block;
+  margin-left: 6px;
+  color: var(--cyan);
+  font-weight: 700;
+}
+
 .layout-editor-bar button {
   flex: 0 0 auto;
 }
