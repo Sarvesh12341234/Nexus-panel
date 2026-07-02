@@ -23,7 +23,21 @@ function splitLines(serverId, chunk) {
   String(chunk).split(/\r?\n/).filter(Boolean).forEach((line) => {
     trackPlayerLine(serverId, line);
     appendLog(serverId, line);
+    detectRecoverableStartupFailure(serverId, line);
   });
+}
+
+function detectRecoverableStartupFailure(serverId, line) {
+  if (!/(?:error opening file:\s*server\.properties|failed to (?:open|load|read).*server\.properties|server\.properties.*(?:invalid|permission denied|is a directory))/i.test(line)) return;
+  const child = processes.get(serverId);
+  if (!child || child.recoveryReason) return;
+  child.recoveryReason = 'server-properties';
+  appendLog(serverId, '[NexusPanel] Auto-heal detected an unreadable server.properties file. Stopping the failed launch for a clean rebuild.');
+  if (child.nexusUnit && process.platform === 'linux') {
+    spawnSync('systemctl', ['kill', child.nexusUnit], { stdio: 'ignore' });
+  } else {
+    child.kill('SIGTERM');
+  }
 }
 
 function runtimeStatus(serverId) {
@@ -161,7 +175,15 @@ function startServer(server, software) {
     processes.delete(server.id);
     players.delete(server.id);
     if (exitHandler) {
-      Promise.resolve(exitHandler({ server, software, code, signal, intentional, uptimeMs: Date.now() - child.startedAt }))
+      Promise.resolve(exitHandler({
+        server,
+        software,
+        code,
+        signal,
+        intentional,
+        uptimeMs: Date.now() - child.startedAt,
+        recoveryReason: child.recoveryReason || '',
+      }))
         .catch((error) => appendLog(server.id, `[NexusPanel] Exit recovery failed: ${error.message}`));
     }
   });

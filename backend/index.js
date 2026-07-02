@@ -1429,7 +1429,10 @@ async function repairPropertiesFile(server, { create = true } = {}) {
   const filePath = propertiesPath(server);
   const existing = await fs.promises.readFile(filePath, 'utf8').catch(() => '');
   const inspected = inspectProperties(existing, server);
-  const values = existing ? inspected.values : { ...defaultPropertyValues(server), ...inspected.values };
+  if (/^\s*#\s*NexusPanel\b/im.test(existing)) {
+    inspected.issues.push('Removed legacy NexusPanel header.');
+  }
+  const values = { ...defaultPropertyValues(server), ...inspected.values };
   if (!existing && !create) return { values, issues: [], repaired: false, filePath };
   const needsWrite = !existing || inspected.issues.length > 0 || values['server-port'] !== String(server.port);
   if (!needsWrite) return { values, issues: [], repaired: false, filePath };
@@ -1440,11 +1443,13 @@ async function repairPropertiesFile(server, { create = true } = {}) {
     await fs.promises.writeFile(path.join(recoveryDir, `server.properties.${Date.now()}.bak`), existing, 'utf8');
   }
   const content = [
-    '# NexusPanel validated server.properties',
     ...Object.entries(values).map(([key, value]) => `${key}=${String(value).replace(/[\r\n]/g, ' ')}`),
     '',
   ].join('\n');
   await atomicWriteText(filePath, content);
+  if (process.platform !== 'win32') await fs.promises.chmod(filePath, 0o644);
+  const verified = await fs.promises.readFile(filePath, 'utf8');
+  if (!verified.includes('server-port=')) throw new Error('server.properties verification failed after repair.');
   appendLog(server.id, `[NexusPanel] Properties self-heal: ${inspected.issues.join(' ') || 'created missing server.properties'}`);
   return { values, issues: inspected.issues, repaired: true, filePath };
 }
@@ -1457,11 +1462,12 @@ async function writeProperties(server, values) {
   const current = await readProperties(server);
   const merged = { ...current, ...values, 'server-port': String(server.port) };
   const content = [
-    '# NexusPanel managed server.properties',
     ...Object.entries(merged).map(([key, value]) => `${key}=${value}`),
     '',
   ].join('\n');
-  await atomicWriteText(propertiesPath(server), content);
+  const filePath = propertiesPath(server);
+  await atomicWriteText(filePath, content);
+  if (process.platform !== 'win32') await fs.promises.chmod(filePath, 0o644);
 }
 
 async function javaUuidForName(name) {
@@ -2623,10 +2629,11 @@ function refreshWakeWatchers() {
     const software = softwareForServer(server);
     if (!software) continue;
     const protocol = server.type === 'java' ? 'tcp' : 'udp';
-    const start = () => {
+    const start = async () => {
       closeWakeWatcher(server.id);
       try {
         appendLog(server.id, '[NexusPanel] Wake-on-join packet detected. Starting server...');
+        if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
         startServer(resolveInstalledExecutable(server, software), software);
       } catch (error) {
         appendLog(server.id, `[NexusPanel] Wake-on-join failed: ${error.message}`);
@@ -3349,13 +3356,14 @@ app.post('/api/servers/:id/stop', requireAccess(permissions.POWER_SERVERS), (req
   res.json(stopServer(Number(req.params.id)));
 });
 
-app.post('/api/servers/:id/restart', requireAccess(permissions.POWER_SERVERS), (req, res) => {
+app.post('/api/servers/:id/restart', requireAccess(permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can restart.' });
+  if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
   res.json(restartServer(resolveInstalledExecutable(server, software), software));
-});
+}));
 
 app.post('/api/servers/:id/kill', requireAccess(permissions.POWER_SERVERS), (req, res) => {
   res.json(killServer(Number(req.params.id)));
@@ -4087,7 +4095,7 @@ function startConfiguredServers() {
   }
 }
 
-setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 0 }) => {
+setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 0, recoveryReason = '' }) => {
   if (intentional) {
     crashHistory.delete(server.id);
     return;
@@ -4114,7 +4122,18 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
   } else if (launchFailure) {
     appendLog(current.id, `[NexusPanel] Launch failed after ${Math.round(uptimeMs / 1000)}s; skipped crash backup because the game never became stable.`);
   }
-  if (!current.auto_restart) return;
+  const targetedPropertyHeal = recoveryReason === 'server-properties';
+  let targetedPropertyHealSucceeded = true;
+  if (targetedPropertyHeal) {
+    await repairPropertiesFile(current)
+      .then((result) => appendLog(current.id, `[NexusPanel] Auto-heal rebuilt and verified server.properties${result.issues.length ? `: ${result.issues.join(' ')}` : '.'}`))
+      .catch((error) => {
+        targetedPropertyHealSucceeded = false;
+        appendLog(current.id, `[NexusPanel] Auto-heal could not rebuild server.properties: ${error.message}`);
+      });
+  }
+  if (!targetedPropertyHealSucceeded) return;
+  if (!current.auto_restart && !targetedPropertyHeal) return;
   if (recent.length >= 3) {
     appendLog(current.id, '[NexusPanel] Restart storm stopped after 3 failures in 2 minutes. Run Repair & Diagnose, then start manually.');
     return;
@@ -4124,16 +4143,19 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
       appendLog(current.id, `[NexusPanel] Learned recovery could not complete: ${error.message}`);
       return null;
     });
-  if (!learnedRecovery) {
+  if (!learnedRecovery && !targetedPropertyHeal) {
     await runServerRepair(current, software)
       .then((report) => appendLog(current.id, `[NexusPanel] Proactive crash repair completed: ${report.summary}`))
       .catch((error) => appendLog(current.id, `[NexusPanel] Proactive crash repair warning: ${error.message}`));
   }
   const restartDelaySeconds = launchFailure ? 10 * recent.length : 5;
   appendLog(current.id, `[NexusPanel] Unexpected exit detected. Restarting in ${restartDelaySeconds} seconds...`);
-  const timer = setTimeout(() => {
+  const timer = setTimeout(async () => {
     try {
-      if (runtimeStatus(current.id) === 'offline') startServer(resolveInstalledExecutable(current, software), software);
+      if (runtimeStatus(current.id) === 'offline') {
+        if (['java', 'bedrock'].includes(current.type)) await repairPropertiesFile(current);
+        startServer(resolveInstalledExecutable(current, software), software);
+      }
     } catch (error) {
       appendLog(current.id, `[NexusPanel] Auto-restart failed: ${error.message}`);
     }
