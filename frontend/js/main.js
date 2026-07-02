@@ -19,6 +19,9 @@ const state = {
   activeServerId: null,
   refreshTimer: null,
   statusRefreshAt: 0,
+  consolePollAt: {},
+  consoleMetricsAt: {},
+  serverStatusSignature: '',
 };
 
 const elements = {
@@ -164,6 +167,24 @@ const viewTitles = {
   security: ['Security', 'Health and Login Audit'],
   settings: ['Panel', 'Settings'],
   terminal: ['Owner', 'VPS Terminal'],
+};
+const viewAccess = {
+  dashboard: 'VIEW_ONLY',
+  servers: 'POWER_SERVERS',
+  console: 'VIEW_CONSOLE',
+  files: 'MANAGE_FILES',
+  templates: 'MANAGE_SERVERS',
+  software: 'MANAGE_SERVERS',
+  properties: 'MANAGE_SERVERS',
+  whitelist: 'MANAGE_SERVERS',
+  plugins: 'MANAGE_FILES',
+  backups: 'MANAGE_FILES',
+  optimizer: 'MANAGE_SERVERS',
+  network: 'MANAGE_SERVERS',
+  admins: 'MANAGE_ADMINS',
+  security: 'MANAGE_ADMINS',
+  settings: 'MANAGE_ADMINS',
+  terminal: 'MANAGE_ADMINS',
 };
 const defaultNavOrder = Object.keys(viewTitles);
 
@@ -929,7 +950,9 @@ function openPowerPalette() {
   const render = () => {
     const query = input.value.trim().toLowerCase();
     const commands = [
-      ...Object.entries(viewTitles).map(([key, labels]) => ({ key: `view:${key}`, label: `Open ${labels[1]}`, type: 'View' })),
+      ...Object.entries(viewTitles)
+        .filter(([key]) => canView(key))
+        .map(([key, labels]) => ({ key: `view:${key}`, label: `Open ${labels[1]}`, type: 'View' })),
       ...state.servers.map((server) => ({ key: `server:${server.id}`, label: `Switch to ${server.name}`, type: server.status })),
       { key: 'utility:privacy', label: 'Toggle privacy shield', type: 'Utility' },
       { key: 'utility:snapshot', label: 'Copy live panel snapshot', type: 'Utility' },
@@ -1069,6 +1092,17 @@ function formData(form) {
 
 function can(level) {
   return state.user && state.user.accessLevel >= level;
+}
+
+function canView(view) {
+  if (!state.user || !Object.hasOwn(viewAccess, view)) return false;
+  if (view === 'templates' && state.settings?.edition !== 'host') return false;
+  if (view === 'terminal') return Boolean(state.settings?.terminalEnabled && state.user.role === 'owner');
+  return can(Number(state.permissions[viewAccess[view]] || 0));
+}
+
+function firstAllowedView() {
+  return defaultNavOrder.find((view) => canView(view)) || 'dashboard';
 }
 
 function activeServer() {
@@ -1383,11 +1417,10 @@ function renderStats() {
 }
 
 function renderView() {
-  if (elements.terminalNav) elements.terminalNav.hidden = !(state.settings?.terminalEnabled && state.user?.role === 'owner');
-  document.querySelectorAll('[data-view="templates"]').forEach((button) => {
-    button.hidden = state.settings?.edition !== 'host';
+  document.querySelectorAll('.nav-item[data-view]').forEach((button) => {
+    button.hidden = !canView(button.dataset.view);
   });
-  if (state.activeView === 'templates' && state.settings?.edition !== 'host') state.activeView = 'dashboard';
+  if (!canView(state.activeView)) state.activeView = firstAllowedView();
   document.querySelectorAll('.view-section').forEach((section) => {
     section.hidden = section.id !== `view-${state.activeView}`;
   });
@@ -1416,6 +1449,8 @@ function renderServerRows() {
     elements.serverRowsGrid.innerHTML = '<p class="empty-state">No servers yet. Create one from Dashboard or Templates.</p>';
     return;
   }
+  const canOpenConsole = can(state.permissions.VIEW_CONSOLE);
+  const canManageServers = can(state.permissions.MANAGE_SERVERS);
   elements.serverRowsGrid.innerHTML = state.servers.map((server) => `
     <article class="server-row-card ${server.id === state.activeServerId ? 'is-selected' : ''}" data-server-id="${server.id}">
       <div>
@@ -1424,20 +1459,24 @@ function renderServerRows() {
       </div>
       <code>${escapeHtml(server.serverPath || '')}</code>
       <div class="row-actions">
-        <button type="button" data-action="manage-server">Open</button>
-        <button class="secondary" type="button" data-action="open-console">Console</button>
-        <button class="danger" type="button" data-action="delete-server" ${server.status === 'online' ? 'disabled' : ''}>Delete</button>
+        <button type="button" data-action="manage-server" ${canOpenConsole ? '' : 'hidden'}>Open</button>
+        <button class="secondary" type="button" data-action="open-console" ${canOpenConsole ? '' : 'hidden'}>Console</button>
+        <button class="danger" type="button" data-action="delete-server" ${canManageServers ? '' : 'hidden'} ${server.status === 'online' ? 'disabled' : ''}>Delete</button>
       </div>
     </article>
   `).join('');
 }
 
 function renderServers() {
+  elements.serverForm.hidden = !can(state.permissions.MANAGE_SERVERS);
   if (!state.servers.length) {
     elements.serverGrid.innerHTML = '<p class="empty-state">No servers yet. Create one above, then install software from the Software tab.</p>';
     return;
   }
 
+  const canPower = can(state.permissions.POWER_SERVERS);
+  const canOpenConsole = can(state.permissions.VIEW_CONSOLE);
+  const canManageServers = can(state.permissions.MANAGE_SERVERS);
   elements.serverGrid.innerHTML = state.servers.map((server) => {
     const isOnline = server.status === 'online';
     const installed = server.installStatus === 'installed';
@@ -1453,12 +1492,12 @@ function renderServers() {
         <div class="stat-row"><span class="muted">Address</span><strong>${server.host}:${server.port}</strong></div>
         <div class="stat-row"><span class="muted">Path</span><code>${escapeHtml(server.serverPath || 'pending')}</code></div>
         <div class="server-actions">
-          <button type="button" data-action="select-server">Manage</button>
-          <button class="secondary" type="button" data-action="open-console">Console</button>
-          <button class="secondary" type="button" data-action="start-server" ${isOnline || !installed ? 'disabled' : ''}>Start</button>
-          <button class="secondary" type="button" data-action="stop-server" ${isOnline ? '' : 'disabled'}>Stop</button>
-          <button class="secondary" type="button" data-action="restart-server" ${isOnline ? '' : 'disabled'}>Restart</button>
-          <button class="danger" type="button" data-action="delete-server" ${isOnline ? 'disabled' : ''}>Delete</button>
+          <button type="button" data-action="select-server" ${canManageServers ? '' : 'hidden'}>Manage</button>
+          <button class="secondary" type="button" data-action="open-console" ${canOpenConsole ? '' : 'hidden'}>Console</button>
+          <button class="secondary" type="button" data-action="start-server" ${canPower ? '' : 'hidden'} ${isOnline || !installed ? 'disabled' : ''}>Start</button>
+          <button class="secondary" type="button" data-action="stop-server" ${canPower ? '' : 'hidden'} ${isOnline ? '' : 'disabled'}>Stop</button>
+          <button class="secondary" type="button" data-action="restart-server" ${canPower ? '' : 'hidden'} ${isOnline ? '' : 'disabled'}>Restart</button>
+          <button class="danger" type="button" data-action="delete-server" ${canManageServers ? '' : 'hidden'} ${isOnline ? 'disabled' : ''}>Delete</button>
         </div>
       </article>
     `;
@@ -1656,9 +1695,14 @@ async function renderConsole() {
     return;
   }
   const serverId = server.id;
-  const data = await api(`/api/servers/${server.id}/console`).catch(() => ({ lines: [] }));
+  const now = Date.now();
+  if (now - Number(state.consolePollAt[serverId] || 0) < 900) return;
+  state.consolePollAt[serverId] = now;
+  const data = await api(`/api/servers/${server.id}/console`).catch((error) => ({ lines: [], error: error.message }));
   if (renderToken !== consoleRenderToken || state.activeServerId !== serverId) return;
   fillServerConfigForm(server);
+  elements.serverConfigForm.hidden = !can(state.permissions.MANAGE_SERVERS);
+  elements.commandForm.hidden = !can(state.permissions.SEND_COMMANDS);
   if (data.status && server.status !== data.status) {
     server.status = data.status;
     renderStats();
@@ -1666,12 +1710,22 @@ async function renderConsole() {
     if (state.activeView === 'dashboard') renderServers();
   }
   syncConsoleActionButtons(server, data.status || server.status);
-  const lines = data.lines.length ? data.lines : [
-    `[NexusPanel] ${server.name} is ${data.status || server.status}.`,
-    `[NexusPanel] Install software, press Start, then logs will stream here.`,
-  ];
-  elements.consoleBox.innerHTML = lines.map((line) => `<div>${escapeHtml(line)}</div>`).join('');
+  const lines = data.lines.length
+    ? data.lines
+    : data.error
+      ? [`[NexusPanel] Console unavailable: ${data.error}`]
+      : server.installStatus !== 'installed'
+        ? [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] Install server software before starting.']
+        : [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] No panel logs have been recorded yet. Press Start to begin.'];
+  const consoleSignature = `${lines.length}:${lines.at(-1) || ''}`;
+  if (elements.consoleBox.dataset.rendered !== consoleSignature) {
+    const consoleHtml = lines.map((line) => `<div>${escapeHtml(line)}</div>`).join('');
+    elements.consoleBox.innerHTML = consoleHtml;
+    elements.consoleBox.dataset.rendered = consoleSignature;
+  }
   if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
+  if (now - Number(state.consoleMetricsAt[serverId] || 0) < 6000) return;
+  state.consoleMetricsAt[serverId] = now;
   const [metrics, serverMetrics] = await Promise.all([
     api('/api/system/metrics').catch(() => null),
     api(`/api/servers/${server.id}/metrics`).catch(() => null),
@@ -1689,6 +1743,15 @@ function syncConsoleActionButtons(server, status) {
     const button = surface.querySelector(`[data-action="${action}"]`);
     if (button) button.disabled = disabled;
   };
+  const show = (action, visible) => {
+    const button = surface.querySelector(`[data-action="${action}"]`);
+    if (button) button.hidden = !visible;
+  };
+  show('start-server', can(state.permissions.POWER_SERVERS));
+  show('stop-server', can(state.permissions.POWER_SERVERS));
+  show('restart-server', can(state.permissions.POWER_SERVERS));
+  show('kill-server', can(state.permissions.POWER_SERVERS));
+  show('fix-server', can(state.permissions.MANAGE_SERVERS));
   set('start-server', isOnline || !installed);
   set('stop-server', !isOnline);
   set('restart-server', !isOnline);
@@ -2340,26 +2403,41 @@ async function refresh({ keepView = true } = {}) {
 }
 
 async function refreshServerStatusOnly() {
-  const overview = await api('/api/overview');
-  state.servers = overview.servers || [];
-  state.plugins = overview.plugins || state.plugins;
-  state.settings = overview.settings || state.settings;
-  state.loginEvents = overview.loginEvents || state.loginEvents;
-  state.health = overview.health || state.health;
-  state.adaptiveInsights = overview.adaptiveInsights || state.adaptiveInsights;
-  state.repairBrain = overview.repairBrain || state.repairBrain;
+  const live = await api('/api/live');
+  const liveServers = live.servers || [];
+  if (liveServers.some((server) => !state.servers.some((current) => current.id === server.id))) {
+    await refresh();
+    return;
+  }
+  const signature = JSON.stringify(liveServers.map((server) => [
+    server.id, server.status, server.installStatus, server.installProgress, server.installMessage,
+  ]));
+  const changed = signature !== state.serverStatusSignature;
+  state.serverStatusSignature = signature;
+  const updates = new Map(liveServers.map((server) => [server.id, server]));
+  state.servers = state.servers
+    .filter((server) => updates.has(server.id))
+    .map((server) => ({ ...server, ...updates.get(server.id) }));
+  if (state.settings) state.settings = { ...state.settings, updateStatus: live.updateStatus || state.settings.updateStatus };
   if (state.activeServerId && !state.servers.some((server) => server.id === state.activeServerId)) {
     state.activeServerId = state.servers[0]?.id || null;
   }
   if (!state.activeServerId && state.servers.length) state.activeServerId = state.servers[0].id;
-  renderStats();
-  renderServerSwitcher();
-  if (state.activeView === 'dashboard') renderServers();
-  if (state.activeView === 'software' && state.servers.some((server) => server.installStatus === 'installing')) renderSoftware();
+  if (changed) {
+    renderStats();
+    renderServerSwitcher();
+    if (state.activeView === 'dashboard') renderServers();
+    if (state.activeView === 'servers') renderServerRows();
+    if (state.activeView === 'software' && state.servers.some((server) => server.installStatus === 'installing')) renderSoftware();
+  }
   updateSettingsLiveStatus();
 }
 
 function setView(view) {
+  if (!canView(view)) {
+    showToast('That section is not included in this account access role.');
+    return;
+  }
   state.activeView = view;
   if (view === 'console') {
     consoleStickToBottom = true;
@@ -2470,7 +2548,7 @@ function startRefreshLoop() {
   state.refreshTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
-    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy ? 1200 : 2500);
+    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy ? 1500 : 5000);
     if (state.activeView === 'console') {
       renderConsole().catch(() => {});
       if (!dueStatus) return;
@@ -2480,7 +2558,7 @@ function startRefreshLoop() {
       refreshServerStatusOnly().catch(() => {});
     }
     if (state.activeView === 'files') renderUploadSessions().catch(() => {});
-  }, 1000);
+  }, 1500);
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -3140,7 +3218,7 @@ window.addEventListener('resize', () => {
 });
 
 elements.adminForm.addEventListener('input', () => {
-  elements.accessOutput.value = elements.adminForm.accessLevel.value;
+  if (elements.accessOutput) elements.accessOutput.value = elements.adminForm.accessLevel.value;
 });
 
 elements.adminForm.addEventListener('submit', async (event) => {
@@ -3150,7 +3228,7 @@ elements.adminForm.addEventListener('submit', async (event) => {
   try {
     await api('/api/users', { method: 'POST', body: JSON.stringify(payload) });
     elements.adminForm.reset();
-    elements.accessOutput.value = '40';
+    if (elements.accessOutput) elements.accessOutput.value = '5';
     showToast('Admin created.');
     await refresh();
   } catch (error) {

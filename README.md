@@ -115,6 +115,9 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Stored server roots are rediscovered from ID-prefixed folders and real game files. Missing or malformed `server.properties` files are backed up, validated, normalized, and atomically rewritten before startup.
 - Bedrock's `Error opening file: server.properties` startup failure is intercepted live, classified correctly, and repaired automatically. Rebuilt property files are comment-free, restore required defaults, use readable permissions, and are verified before one controlled restart.
 - Nexus-Mark transient systemd services explicitly inherit each server's own `WorkingDirectory`, so Bedrock reads `server.properties`, worlds, permissions, and runtime files from the correct isolated server root. Recovery timers are deduplicated to prevent delayed restart collisions.
+- Admin access roles now hide every navigation section and command outside the granted level. Start/Stop, logs, console commands, server management, files/backups, and full administration have explicit presets.
+- Panel console history is buffered to protected disk logs and restored after panel restarts, including while game servers are offline. Live polling uses a minimal status payload, samples process metrics less often, skips unchanged DOM renders, and prevents overlapping scheduled backups.
+- Password fields on login and dynamically rendered forms receive accessible show/hide controls.
 - SQLite uses integrity checks, foreign-key checks, verified rotating snapshots, and startup recovery from the latest verified snapshot when the primary database cannot open.
 - Login, password reset, and protected owner-password fields include accessible password reveal controls.
 - Password-reset delivery sends styled multipart HTML through local sendmail and provider-specific Resend, Brevo, SendGrid, or generic API payloads.

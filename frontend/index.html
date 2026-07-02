@@ -267,7 +267,17 @@
               <select name="adminDurationMode"><option value="permanent">Permanent</option><option value="temporary">Temporary</option></select>
               <input name="adminDurationValue" type="number" min="1" max="525600" value="60">
               <select name="adminDurationUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select>
-              <label class="range-label">Access <input name="accessLevel" type="range" min="0" max="100" step="5" value="5"><output id="accessOutput">5</output></label>
+              <label>Access
+                <select name="accessLevel">
+                  <option value="0">View only</option>
+                  <option value="5" selected>Start / stop servers</option>
+                  <option value="20">View console logs</option>
+                  <option value="40">Send console commands</option>
+                  <option value="60">Manage servers and software</option>
+                  <option value="80">Manage files and backups</option>
+                  <option value="100">Full administrator</option>
+                </select>
+              </label>
               <button type="submit">Create admin</button>
             </form>
             <div class="user-list" id="userList"></div>

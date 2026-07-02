@@ -1,6 +1,11 @@
 (() => {
   function enhancePasswordInputs(root = document) {
-    for (const input of root.querySelectorAll?.('input[type="password"]:not([data-password-enhanced])') || []) {
+    const inputs = [
+      ...(root.matches?.('input[type="password"]:not([data-password-enhanced])') ? [root] : []),
+      ...(root.querySelectorAll?.('input[type="password"]:not([data-password-enhanced])') || []),
+    ];
+    for (const input of inputs) {
+      if (!input.isConnected || input.closest('.password-input')) continue;
       input.dataset.passwordEnhanced = 'true';
       const wrapper = document.createElement('span');
       wrapper.className = 'password-input';
@@ -30,7 +35,11 @@
     button.title = showing ? 'Show password' : 'Hide password';
   });
 
-  enhancePasswordInputs();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => enhancePasswordInputs(), { once: true });
+  } else {
+    enhancePasswordInputs();
+  }
   new MutationObserver((records) => {
     for (const record of records) {
       for (const node of record.addedNodes) {

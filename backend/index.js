@@ -50,6 +50,7 @@ const passwordResetRequests = new Map();
 const keyedOperations = new Map();
 const crashHistory = new Map();
 const crashRestartTimers = new Map();
+const autoBackupInFlight = new Set();
 const adaptiveEngine = new AdaptiveEngine();
 let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
@@ -1084,11 +1085,14 @@ async function runHealthCheck(force = false) {
   return payload;
 }
 
-function serverRows(user, req = null) {
-  const rows = user?.role === 'owner' || !isHostEdition()
+function visibleServerDatabaseRows(user) {
+  return user?.role === 'owner' || !isHostEdition()
     ? db.prepare('SELECT * FROM servers ORDER BY created_at DESC').all()
     : db.prepare('SELECT * FROM servers WHERE owner_user_id = ? ORDER BY created_at DESC').all(user?.id || 0);
-  return rows.map((server) => serverPayload(server, req));
+}
+
+function serverRows(user, req = null) {
+  return visibleServerDatabaseRows(user).map((server) => serverPayload(server, req));
 }
 
 function canUseServer(user, server) {
@@ -2045,9 +2049,11 @@ app.get('/api/overview', (req, res) => {
     permissions,
     user: req.user ? publicUser(req.user) : null,
     servers: req.user ? serverRows(req.user, req) : [],
-    plugins: req.user ? pluginRows(req.user.role === 'owner' ? null : serverRows(req.user, req).map((server) => server.id)) : [],
-    softwareCatalog: req.user ? softwareCatalog() : [],
-    templates: req.user && isHostEdition() ? templateRows() : [],
+    plugins: req.user && req.user.access_level >= permissions.MANAGE_FILES
+      ? pluginRows(req.user.role === 'owner' ? null : serverRows(req.user, req).map((server) => server.id))
+      : [],
+    softwareCatalog: req.user && req.user.access_level >= permissions.MANAGE_SERVERS ? softwareCatalog() : [],
+    templates: req.user && req.user.access_level >= permissions.MANAGE_SERVERS && isHostEdition() ? templateRows() : [],
     settings: req.user ? panelSettingsPayload(req.user) : null,
     users: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? userRows() : [],
     loginEvents: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? loginEventRows(10) : [],
@@ -2058,6 +2064,19 @@ app.get('/api/overview', (req, res) => {
   };
 
   res.json(payload);
+});
+
+app.get('/api/live', requireAuth, (req, res) => {
+  res.json({
+    servers: visibleServerDatabaseRows(req.user).map((server) => ({
+      id: server.id,
+      status: runtimeStatus(server.id),
+      installStatus: server.install_status,
+      installProgress: server.install_progress,
+      installMessage: server.install_message,
+    })),
+    updateStatus,
+  });
 });
 
 app.get('/api/user/timezone', requireAuth, (req, res) => {
@@ -4015,8 +4034,11 @@ async function runAutoBackups() {
   const rows = db.prepare('SELECT * FROM servers WHERE scheduled_backups = 1').all();
   for (const server of rows) {
     const intervalMs = backupIntervalMinutesFrom(server) * 60 * 1000;
-    if (now - Number(server.last_backup_at || 0) < intervalMs) continue;
-    createServerBackup(server, 'auto').catch((error) => appendLog(server.id, `[NexusPanel] Auto backup failed: ${error.message}`));
+    if (now - Number(server.last_backup_at || 0) < intervalMs || autoBackupInFlight.has(server.id)) continue;
+    autoBackupInFlight.add(server.id);
+    createServerBackup(server, 'auto')
+      .catch((error) => appendLog(server.id, `[NexusPanel] Auto backup failed: ${error.message}`))
+      .finally(() => autoBackupInFlight.delete(server.id));
   }
 }
 
@@ -4222,7 +4244,7 @@ async function start() {
   startSchedulers();
   startConfiguredServers();
   refreshWakeWatchers();
-  setInterval(refreshWakeWatchers, 5000).unref();
+  setInterval(refreshWakeWatchers, 15000).unref();
   app.listen(port, () => {
     console.log(`NexusPanel running at http://localhost:${port}`);
   });

@@ -3,20 +3,68 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnOptions, wrapCommand } = require('./nexus_mark');
 const { hostCpuCount } = require('./system_info');
-const { ensureServerDirs } = require('./paths');
+const { ensureServerDirs, externalDataRoot } = require('./paths');
 
 const processes = new Map();
 const logs = new Map();
 const players = new Map();
 const intentionalStops = new Set();
+const pendingLogWrites = new Map();
+const logWriteChains = new Map();
 let exitHandler = null;
 const MAX_LOG_LINES = 600;
+const MAX_LOG_BYTES = 4 * 1024 * 1024;
+const logRoot = path.join(externalDataRoot, 'logs');
+fs.mkdirSync(logRoot, { recursive: true });
+
+function logPath(serverId) {
+  return path.join(logRoot, `server-${Number(serverId)}.log`);
+}
+
+function persistedLogLines(serverId) {
+  const filePath = logPath(serverId);
+  try {
+    const stats = fs.statSync(filePath);
+    const bytes = Math.min(stats.size, 512 * 1024);
+    const buffer = Buffer.alloc(bytes);
+    const file = fs.openSync(filePath, 'r');
+    fs.readSync(file, buffer, 0, bytes, Math.max(0, stats.size - bytes));
+    fs.closeSync(file);
+    return buffer.toString('utf8').split(/\r?\n/).filter(Boolean).slice(-MAX_LOG_LINES);
+  } catch {
+    return [];
+  }
+}
+
+function flushLogWrites() {
+  for (const [serverId, lines] of pendingLogWrites) {
+    pendingLogWrites.delete(serverId);
+    const filePath = logPath(serverId);
+    const chunk = `${lines.join('\n')}\n`;
+    const previous = logWriteChains.get(serverId) || Promise.resolve();
+    const next = previous.then(async () => {
+      const stats = await fs.promises.stat(filePath).catch(() => null);
+      if (stats?.size > MAX_LOG_BYTES) {
+        await fs.promises.rm(`${filePath}.1`, { force: true }).catch(() => {});
+        await fs.promises.rename(filePath, `${filePath}.1`).catch(() => {});
+      }
+      await fs.promises.appendFile(filePath, chunk, { encoding: 'utf8', mode: 0o600 });
+    }).catch(() => {});
+    logWriteChains.set(serverId, next);
+  }
+}
+
+setInterval(flushLogWrites, 750).unref();
 
 function appendLog(serverId, line) {
-  const rows = logs.get(serverId) || [];
-  rows.push(`[${new Date().toLocaleTimeString()}] ${line}`);
+  const rows = logs.has(serverId) ? logs.get(serverId) : persistedLogLines(serverId);
+  const rendered = `[${new Date().toLocaleTimeString()}] ${line}`;
+  rows.push(rendered);
   while (rows.length > MAX_LOG_LINES) rows.shift();
   logs.set(serverId, rows);
+  const pending = pendingLogWrites.get(serverId) || [];
+  pending.push(rendered);
+  pendingLogWrites.set(serverId, pending);
 }
 
 function splitLines(serverId, chunk) {
@@ -45,7 +93,8 @@ function runtimeStatus(serverId) {
 }
 
 function consoleLogs(serverId) {
-  return logs.get(serverId) || [];
+  if (!logs.has(serverId)) logs.set(serverId, persistedLogLines(serverId));
+  return logs.get(serverId);
 }
 
 function trackPlayerLine(serverId, line) {
