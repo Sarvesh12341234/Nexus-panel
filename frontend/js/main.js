@@ -292,6 +292,19 @@ function applyUiPreferences(preferences = uiPreferences) {
   restoreLayoutSelection();
 }
 
+function reapplyDynamicLayout() {
+  const preferences = layoutEditor.active ? alphaDraft : uiPreferences;
+  const customized = layoutEditor.active
+    || Object.keys(preferences.buttonLayout || {}).length
+    || Object.keys(preferences.buttonPositions || {}).length
+    || Object.keys(preferences.componentLayout || {}).length
+    || Object.keys(preferences.componentPositions || {}).length;
+  if (!customized) return;
+  applyButtonLayout(preferences);
+  applyComponentLayout(preferences);
+  restoreLayoutSelection();
+}
+
 function layoutRegionElements() {
   const parents = new Set();
   for (const button of document.querySelectorAll('button, .button-link')) {
@@ -327,7 +340,11 @@ function regionBaseName(region) {
 function buttonBaseKey(button) {
   if (button.dataset.view) return `view:${button.dataset.view}`;
   if (button.dataset.action) {
-    const qualifier = button.dataset.softwareKey || button.dataset.templateKey || button.dataset.filePath || '';
+    const qualifier = button.dataset.softwareKey
+      || button.dataset.templateKey
+      || button.dataset.filePath
+      || button.dataset.serverId
+      || '';
     return `action:${button.dataset.action}:${qualifier}`;
   }
   if (button.id) return `id:${button.id}`;
@@ -473,15 +490,16 @@ function componentZoneKey(zone) {
 
 function componentBaseKey(component) {
   if (component.id) return `id:${component.id}`;
-  for (const key of ['serverId', 'pluginId', 'userId', 'requestId']) {
+  if (component.dataset.layoutKey) return `layout:${component.dataset.layoutKey}`;
+  for (const key of ['serverId', 'softwareKey', 'templateKey', 'pluginId', 'userId', 'requestId', 'uploadPath']) {
     if (component.dataset[key]) return `${key}:${component.dataset[key]}`;
   }
   const field = component.matches('input, select, label')
     ? (component.name || component.querySelector?.('input,select,textarea')?.name || '')
     : '';
   if (field) return `field:${field}`;
-  const label = component.querySelector?.('h1,h2,h3,strong,.property-name')?.textContent
-    || component.getAttribute('aria-label')
+  const label = component.getAttribute('aria-label')
+    || component.querySelector?.('.property-name,h1,h2,h3')?.textContent
     || '';
   const cleanLabel = String(label).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
   const className = stableClassName(component) || component.tagName.toLowerCase();
@@ -1118,6 +1136,9 @@ function fillServerConfigForm(server, force = false) {
   form.maxMemoryMb.value = server.maxMemoryMb;
   form.maxMemoryMb.disabled = state.user?.role !== 'owner';
   form.maxMemoryMb.title = state.user?.role === 'owner' ? 'Owner can change RAM allocation.' : 'Only the owner can change RAM allocation.';
+  form.cpuCores.value = server.cpuCores || 1;
+  form.cpuCores.disabled = state.user?.role !== 'owner';
+  form.cpuCores.title = state.user?.role === 'owner' ? 'Owner can change CPU allocation.' : 'Only the owner can change CPU allocation.';
   form.port.value = server.port;
   form.startupDelaySec.value = server.startupDelaySec || 0;
   form.autoRestart.checked = Boolean(server.autoRestart);
@@ -1174,17 +1195,35 @@ async function renderUploadSessions() {
   if (!server || !elements.uploadSessionList) return;
   const data = await api(`/api/servers/${server.id}/files/uploads`).catch(() => ({ uploads: [] }));
   const uploads = data.uploads || [];
-  if (uploads.length) elements.uploadPanel.hidden = false;
+  elements.uploadPanel.hidden = !uploads.length && !currentUpload.path;
+  const existing = new Map([...elements.uploadSessionList.querySelectorAll('[data-upload-path]')]
+    .filter((element) => element.classList.contains('upload-session-row'))
+    .map((element) => [element.dataset.uploadPath, element]));
+  const sameSessions = existing.size === uploads.length
+    && uploads.every((upload) => existing.has(upload.path));
+  if (sameSessions) {
+    for (const upload of uploads) {
+      const row = existing.get(upload.path);
+      const uploadedMb = Math.round((upload.uploadedBytes || 0) / 1024 / 1024);
+      const totalMb = Math.round((upload.size || 0) / 1024 / 1024);
+      const detail = row.querySelector('[data-live-upload-detail]');
+      const fill = row.querySelector('[data-live-upload-track]');
+      if (detail) detail.textContent = `${upload.status} · ${upload.progress}% · ${uploadedMb} / ${totalMb} MB`;
+      if (fill) fill.style.width = `${upload.progress}%`;
+    }
+    return;
+  }
   elements.uploadSessionList.innerHTML = uploads.map((upload) => `
-    <div class="upload-session-row">
+    <div class="upload-session-row" data-upload-path="${escapeHtml(upload.path)}">
       <div>
         <strong>${escapeHtml(upload.name)}</strong>
-        <div class="muted">${escapeHtml(upload.status)} · ${upload.progress}% · ${Math.round((upload.uploadedBytes || 0) / 1024 / 1024)} / ${Math.round((upload.size || 0) / 1024 / 1024)} MB</div>
-        <div class="install-track"><span style="width:${upload.progress}%"></span></div>
+        <div class="muted" data-live-upload-detail>${escapeHtml(upload.status)} · ${upload.progress}% · ${Math.round((upload.uploadedBytes || 0) / 1024 / 1024)} / ${Math.round((upload.size || 0) / 1024 / 1024)} MB</div>
+        <div class="install-track"><span data-live-upload-track style="width:${upload.progress}%"></span></div>
       </div>
       <button class="danger" type="button" data-action="upload-cancel" data-upload-path="${escapeHtml(upload.path)}">Cancel</button>
     </div>
   `).join('');
+  reapplyDynamicLayout();
 }
 
 function selectedFilePaths() {
@@ -1436,9 +1475,9 @@ function renderServerSwitcher() {
   const options = state.servers.map((server) => `<option value="${server.id}" ${server.id === state.activeServerId ? 'selected' : ''}>${escapeHtml(server.name)}</option>`).join('');
   elements.activeServerSelect.innerHTML = options || '<option value="">No servers</option>';
   elements.serverList.innerHTML = state.servers.map((server) => `
-    <button class="server-list-item ${server.id === state.activeServerId ? 'is-active' : ''}" type="button" data-action="activate-server" data-server-id="${server.id}">
+    <button class="server-list-item ${server.id === state.activeServerId ? 'is-active' : ''}" type="button" data-action="activate-server" data-server-id="${server.id}" data-live-server-id="${server.id}">
       <span>${escapeHtml(server.name)}</span>
-      <small>${escapeHtml(server.softwareName)} · ${escapeHtml(server.status)}</small>
+      <small data-live-summary="sidebar">${escapeHtml(server.softwareName)} · ${escapeHtml(server.status)}</small>
     </button>
   `).join('') || '<p class="empty-state">No server yet. Create one.</p>';
 }
@@ -1452,10 +1491,10 @@ function renderServerRows() {
   const canOpenConsole = can(state.permissions.VIEW_CONSOLE);
   const canManageServers = can(state.permissions.MANAGE_SERVERS);
   elements.serverRowsGrid.innerHTML = state.servers.map((server) => `
-    <article class="server-row-card ${server.id === state.activeServerId ? 'is-selected' : ''}" data-server-id="${server.id}">
+    <article class="server-row-card ${server.id === state.activeServerId ? 'is-selected' : ''}" data-server-id="${server.id}" data-live-server-id="${server.id}">
       <div>
         <strong>${escapeHtml(server.name)}</strong>
-        <span class="muted">${escapeHtml(server.softwareName)} · ${escapeHtml(server.type)} · ${escapeHtml(server.status)}</span>
+        <span class="muted" data-live-summary="row">${escapeHtml(server.softwareName)} · ${escapeHtml(server.type)} · ${escapeHtml(server.status)}</span>
       </div>
       <code>${escapeHtml(server.serverPath || '')}</code>
       <div class="row-actions">
@@ -1481,14 +1520,14 @@ function renderServers() {
     const isOnline = server.status === 'online';
     const installed = server.installStatus === 'installed';
     return `
-      <article class="server-card ${server.id === state.activeServerId ? 'is-selected' : ''}" data-server-id="${server.id}">
+      <article class="server-card ${server.id === state.activeServerId ? 'is-selected' : ''}" data-server-id="${server.id}" data-live-server-id="${server.id}">
         <div class="status-row">
           <h3>${escapeHtml(server.name)}</h3>
-          <span class="badge ${isOnline ? 'is-on' : ''}">${escapeHtml(server.status)}</span>
+          <span class="badge ${isOnline ? 'is-on' : ''}" data-live-status>${escapeHtml(server.status)}</span>
         </div>
         <div class="stat-row"><span class="muted">Software</span><strong>${escapeHtml(server.softwareName)}</strong></div>
-        <div class="install-track"><span style="width:${server.installProgress}%"></span></div>
-        <div class="stat-row"><span class="muted">${escapeHtml(server.installStatus)}</span><strong>${server.installProgress}%</strong></div>
+        <div class="install-track"><span data-live-install-track style="width:${server.installProgress}%"></span></div>
+        <div class="stat-row"><span class="muted" data-live-install-message data-live-message-format="status">${escapeHtml(server.installStatus)}</span><strong data-live-install-progress>${server.installProgress}%</strong></div>
         <div class="stat-row"><span class="muted">Address</span><strong>${server.host}:${server.port}</strong></div>
         <div class="stat-row"><span class="muted">Path</span><code>${escapeHtml(server.serverPath || 'pending')}</code></div>
         <div class="server-actions">
@@ -1572,7 +1611,7 @@ function renderSoftware() {
   }
 
   elements.softwareGrid.innerHTML = `
-    <article class="software-card software-update-card">
+    <article class="software-card software-update-card" data-layout-key="software-updates">
       <div class="status-row">
         <strong>Software Versions</strong>
         <span class="pill">Live</span>
@@ -1581,22 +1620,22 @@ function renderSoftware() {
       <button type="button" data-action="check-software-updates">Check Updates</button>
     </article>
   ` + (server.templateKey && server.type === 'custom' ? `
-    <article class="software-card is-selected">
+    <article class="software-card is-selected" data-layout-key="template-runtime" data-live-server-id="${server.id}">
       <div class="status-row">
         <strong>${escapeHtml(server.softwareName || 'Nexu Template')}</strong>
         <span class="pill is-on">nexu</span>
       </div>
       <p>Installs from the template's own runtime commands, including SteamCMD app IDs where provided.</p>
       <div class="stat-row"><span class="muted">Executable</span><code>${escapeHtml(server.executablePath || 'resolved after install')}</code></div>
-      <div class="install-track"><span style="width:${server.installProgress || 0}%"></span></div>
-      <div class="stat-row"><span class="muted">${escapeHtml(server.installMessage || server.installStatus || 'Ready')}</span><strong>${server.installProgress || 0}%</strong></div>
+      <div class="install-track"><span data-live-install-track style="width:${server.installProgress || 0}%"></span></div>
+      <div class="stat-row"><span class="muted" data-live-install-message data-live-message-format="message">${escapeHtml(server.installMessage || server.installStatus || 'Ready')}</span><strong data-live-install-progress>${server.installProgress || 0}%</strong></div>
       <button type="button" data-action="install-software" data-software-key="${escapeHtml(server.softwareKey || '')}">${server.installStatus === 'installed' ? 'Reinstall Template' : 'Install Template'}</button>
     </article>
   ` : '') + state.softwareCatalog.map((software) => {
     const compatible = software.edition === server.type;
     const selected = software.key === server.softwareKey;
     return `
-      <article class="software-card ${selected ? 'is-selected' : ''}">
+      <article class="software-card ${selected ? 'is-selected' : ''}" data-software-key="${escapeHtml(software.key)}" ${selected ? `data-live-server-id="${server.id}"` : ''}>
         <div class="status-row">
           <strong>${escapeHtml(software.name)}</strong>
           <span class="pill ${compatible ? 'is-on' : ''}">${compatible ? software.edition : 'blocked'}</span>
@@ -1604,8 +1643,8 @@ function renderSoftware() {
         <p>${escapeHtml(software.notes)}</p>
         <div class="stat-row"><span class="muted">Executable</span><code>${escapeHtml(selected ? server.executablePath : software.expectedPath)}</code></div>
         <label>Version <select data-software-version="${software.key}" ${compatible ? '' : 'disabled'}><option value="latest">Latest</option></select></label>
-        <div class="install-track"><span style="width:${selected ? server.installProgress : 0}%"></span></div>
-        <div class="stat-row"><span class="muted">${selected ? `${escapeHtml(server.installMessage)} (${escapeHtml(server.softwareVersion || 'latest')})` : 'Not selected'}</span><strong>${selected ? `${server.installProgress}%` : ''}</strong></div>
+        <div class="install-track"><span data-live-install-track style="width:${selected ? server.installProgress : 0}%"></span></div>
+        <div class="stat-row"><span class="muted" data-live-install-message data-live-message-format="software">${selected ? `${escapeHtml(server.installMessage)} (${escapeHtml(server.softwareVersion || 'latest')})` : 'Not selected'}</span><strong data-live-install-progress>${selected ? `${server.installProgress}%` : ''}</strong></div>
         <button type="button" data-action="install-software" data-software-key="${software.key}" ${compatible ? '' : 'disabled'}>${selected && server.installStatus === 'installed' ? 'Reinstall' : 'Install'}</button>
       </article>
     `;
@@ -1706,8 +1745,7 @@ async function renderConsole() {
   if (data.status && server.status !== data.status) {
     server.status = data.status;
     renderStats();
-    renderServerSwitcher();
-    if (state.activeView === 'dashboard') renderServers();
+    updateLiveServerDom();
   }
   syncConsoleActionButtons(server, data.status || server.status);
   const lines = data.lines.length
@@ -2352,9 +2390,55 @@ async function hydrateSoftwareVersionSelects() {
   const selects = [...document.querySelectorAll('[data-software-version]')];
   await Promise.all(selects.map(async (select) => {
     const key = select.dataset.softwareVersion;
+    const selected = select.value;
     const versions = await getSoftwareVersions(key);
-    select.innerHTML = versions.slice(0, 80).map((version, index) => `<option value="${escapeHtml(version)}" ${index === 0 ? 'selected' : ''}>${escapeHtml(version)}</option>`).join('');
+    select.innerHTML = versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('');
+    select.value = versions.includes(selected) ? selected : (versions[0] || 'latest');
   }));
+}
+
+function updateLiveServerDom() {
+  const servers = new Map(state.servers.map((server) => [String(server.id), server]));
+  document.querySelectorAll('[data-live-server-id]').forEach((root) => {
+    const server = servers.get(String(root.dataset.liveServerId));
+    if (!server) return;
+    const online = server.status === 'online';
+    const installed = server.installStatus === 'installed';
+    const status = root.querySelector('[data-live-status]');
+    if (status) {
+      status.textContent = server.status;
+      status.classList.toggle('is-on', online);
+    }
+    root.querySelectorAll('[data-live-summary="sidebar"]').forEach((element) => {
+      element.textContent = `${server.softwareName} · ${server.status}`;
+    });
+    root.querySelectorAll('[data-live-summary="row"]').forEach((element) => {
+      element.textContent = `${server.softwareName} · ${server.type} · ${server.status}`;
+    });
+    root.querySelectorAll('[data-live-install-track]').forEach((element) => {
+      element.style.width = `${Number(server.installProgress || 0)}%`;
+    });
+    root.querySelectorAll('[data-live-install-progress]').forEach((element) => {
+      element.textContent = `${Number(server.installProgress || 0)}%`;
+    });
+    root.querySelectorAll('[data-live-install-message]').forEach((element) => {
+      if (element.dataset.liveMessageFormat === 'software') {
+        element.textContent = `${server.installMessage || server.installStatus} (${server.softwareVersion || 'latest'})`;
+      } else if (element.dataset.liveMessageFormat === 'message') {
+        element.textContent = server.installMessage || server.installStatus || 'Ready';
+      } else {
+        element.textContent = server.installStatus;
+      }
+    });
+    const start = root.querySelector('[data-action="start-server"]');
+    const stop = root.querySelector('[data-action="stop-server"]');
+    const restart = root.querySelector('[data-action="restart-server"]');
+    const remove = root.querySelector('[data-action="delete-server"]');
+    if (start) start.disabled = online || !installed;
+    if (stop) stop.disabled = !online;
+    if (restart) restart.disabled = !online;
+    if (remove) remove.disabled = online;
+  });
 }
 
 async function refresh({ keepView = true } = {}) {
@@ -2405,10 +2489,17 @@ async function refresh({ keepView = true } = {}) {
 async function refreshServerStatusOnly() {
   const live = await api('/api/live');
   const liveServers = live.servers || [];
-  if (liveServers.some((server) => !state.servers.some((current) => current.id === server.id))) {
+  const currentIds = state.servers.map((server) => Number(server.id)).sort((a, b) => a - b).join(',');
+  const liveIds = liveServers.map((server) => Number(server.id)).sort((a, b) => a - b).join(',');
+  if (currentIds !== liveIds) {
     await refresh();
     return;
   }
+  const previous = new Map(state.servers.map((server) => [server.id, server]));
+  const installFinished = liveServers.some((server) => (
+    previous.get(server.id)?.installStatus === 'installing'
+    && server.installStatus !== 'installing'
+  ));
   const signature = JSON.stringify(liveServers.map((server) => [
     server.id, server.status, server.installStatus, server.installProgress, server.installMessage,
   ]));
@@ -2423,12 +2514,13 @@ async function refreshServerStatusOnly() {
     state.activeServerId = state.servers[0]?.id || null;
   }
   if (!state.activeServerId && state.servers.length) state.activeServerId = state.servers[0].id;
+  if (installFinished) {
+    await refresh();
+    return;
+  }
   if (changed) {
     renderStats();
-    renderServerSwitcher();
-    if (state.activeView === 'dashboard') renderServers();
-    if (state.activeView === 'servers') renderServerRows();
-    if (state.activeView === 'software' && state.servers.some((server) => server.installStatus === 'installing')) renderSoftware();
+    updateLiveServerDom();
   }
   updateSettingsLiveStatus();
 }
@@ -2749,15 +2841,19 @@ if (elements.serverConfigForm) {
       ...server,
       ...formData(elements.serverConfigForm),
       port: Number(elements.serverConfigForm.port.value),
+      cpuCores: Number(elements.serverConfigForm.cpuCores.value),
       startupDelaySec: Number(elements.serverConfigForm.startupDelaySec.value),
       type: server.type,
       softwareKey: server.softwareKey,
       softwareVersion: server.softwareVersion,
     };
-    if (state.user?.role === 'owner') payload.maxMemoryMb = Number(elements.serverConfigForm.maxMemoryMb.value);
+    if (state.user?.role === 'owner') {
+      payload.maxMemoryMb = Number(elements.serverConfigForm.maxMemoryMb.value);
+      payload.cpuCores = Number(elements.serverConfigForm.cpuCores.value);
+    }
     try {
       await api(`/api/servers/${server.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
-      showToast('Server settings saved. Restart to apply RAM changes.');
+      showToast('Server settings saved. Restart to apply RAM and CPU changes.');
       elements.serverConfigForm.dataset.dirty = '0';
       await refresh();
       fillServerConfigForm(activeServer(), true);
@@ -3471,6 +3567,7 @@ document.addEventListener('click', async (event) => {
       showToast('Software versions refreshed.');
       renderSoftwareChoices();
       renderSoftware();
+      reapplyDynamicLayout();
       return;
     }
     if (action === 'start-server' || action === 'stop-server' || action === 'kill-server' || action === 'restart-server') {
@@ -3585,8 +3682,8 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       if (!server) return;
       if (!confirm(`Delete server "${server.name}" and all its files? This cannot be undone.`)) return;
-      await api(`/api/servers/${server.id}`, { method: 'DELETE' });
-      showToast('Server deleted.');
+      const result = await api(`/api/servers/${server.id}`, { method: 'DELETE' });
+      showToast(result.cleanupPending ? 'Server deleted. Locked leftovers will be removed on next boot.' : 'Server deleted.');
       state.activeServerId = null;
       await refresh({ keepView: false });
       return;

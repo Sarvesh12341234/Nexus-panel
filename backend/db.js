@@ -241,7 +241,9 @@ db.exec(`
     success_count INTEGER NOT NULL DEFAULT 0,
     replay_count INTEGER NOT NULL DEFAULT 0,
     last_learned_at INTEGER NOT NULL DEFAULT 0,
-    last_replayed_at INTEGER NOT NULL DEFAULT 0
+    last_replayed_at INTEGER NOT NULL DEFAULT 0,
+    pending_validation INTEGER NOT NULL DEFAULT 0,
+    validated_at INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS repair_command_observations (
@@ -307,6 +309,11 @@ const uploadColumns = {
   chunks_json: "TEXT NOT NULL DEFAULT '[]'",
 };
 
+const repairPlaybookColumns = {
+  pending_validation: 'INTEGER NOT NULL DEFAULT 0',
+  validated_at: 'INTEGER NOT NULL DEFAULT 0',
+};
+
 const existingServerColumns = new Set(db.prepare('PRAGMA table_info(servers)').all().map((column) => column.name));
 for (const [name, definition] of Object.entries(serverColumns)) {
   if (!existingServerColumns.has(name)) {
@@ -330,6 +337,13 @@ for (const [name, definition] of Object.entries(uploadColumns)) {
 
 function getUserCount() {
   return db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
+}
+
+const existingRepairPlaybookColumns = new Set(db.prepare('PRAGMA table_info(repair_playbooks)').all().map((column) => column.name));
+for (const [name, definition] of Object.entries(repairPlaybookColumns)) {
+  if (!existingRepairPlaybookColumns.has(name)) {
+    db.exec(`ALTER TABLE repair_playbooks ADD COLUMN ${name} ${definition}`);
+  }
 }
 
 function verifyDatabase() {

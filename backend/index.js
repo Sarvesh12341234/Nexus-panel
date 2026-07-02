@@ -178,6 +178,66 @@ function panelSettingsPayload(user = null) {
   };
 }
 
+function serverTombstoneKey(serverId) {
+  return `deleted_server_${Number(serverId)}`;
+}
+
+function clearServerTombstone(serverId) {
+  db.prepare('DELETE FROM panel_settings WHERE key = ?').run(serverTombstoneKey(serverId));
+}
+
+function isServerTombstoned(serverId) {
+  return settingValue(serverTombstoneKey(serverId), '') !== '';
+}
+
+function prepareServerIdForCreation(serverId) {
+  if (!isServerTombstoned(serverId)) return;
+  if (fs.existsSync(serversRoot)) {
+    for (const entry of fs.readdirSync(serversRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith(`${Number(serverId)}-`)) {
+        fs.rmSync(assertInside(serversRoot, path.join(serversRoot, entry.name)), { recursive: true, force: true });
+      }
+    }
+  }
+  clearServerTombstone(serverId);
+}
+
+function serverMetadataPath(root) {
+  return path.join(root, '.nexus-server.json');
+}
+
+function readServerMetadata(root) {
+  try {
+    const value = JSON.parse(fs.readFileSync(serverMetadataPath(root), 'utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeServerMetadata(server, root) {
+  const filePath = serverMetadataPath(root);
+  const temporary = `${filePath}.${process.pid}.tmp`;
+  const payload = {
+    version: 1,
+    id: Number(server.id),
+    name: server.name,
+    type: server.type,
+    maxMemoryMb: Number(server.max_memory_mb),
+    cpuCores: Number(server.cpu_cores),
+    port: Number(server.port),
+    softwareKey: server.software_key || '',
+    updatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(temporary, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 });
+  try {
+    fs.renameSync(temporary, filePath);
+  } catch {
+    fs.copyFileSync(temporary, filePath);
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
 function normalizeCrashLine(line) {
   return String(line || '')
     .replace(/^\[[^\]]+\]\s*/, '')
@@ -314,17 +374,42 @@ function learnRepairPlaybook(server, report) {
   db.prepare(`
     INSERT INTO repair_playbooks (
       signature, software_key, sample, actions_json, learned_from_server_id,
-      success_count, last_learned_at
-    ) VALUES (?, ?, ?, ?, ?, 1, ?)
+      success_count, last_learned_at, pending_validation, validated_at
+    ) VALUES (?, ?, ?, ?, ?, 0, ?, 1, 0)
     ON CONFLICT(signature) DO UPDATE SET
       software_key = excluded.software_key,
       sample = excluded.sample,
       actions_json = excluded.actions_json,
       learned_from_server_id = excluded.learned_from_server_id,
-      success_count = repair_playbooks.success_count + 1,
-      last_learned_at = excluded.last_learned_at
+      last_learned_at = excluded.last_learned_at,
+      pending_validation = 1,
+      validated_at = 0
   `).run(crash.signature, crash.software_key, crash.sample, JSON.stringify(actions), server.id, Date.now());
   return { signature: crash.signature.slice(0, 12), actions: actions.length };
+}
+
+function validateStableRepairPlaybooks() {
+  const cutoff = Date.now() - 60 * 1000;
+  const candidates = db.prepare(`
+    SELECT playbook.signature, playbook.learned_from_server_id
+    FROM repair_playbooks playbook
+    JOIN repair_crash_state crash
+      ON crash.server_id = playbook.learned_from_server_id
+      AND crash.signature = playbook.signature
+    WHERE playbook.pending_validation = 1 AND playbook.last_learned_at <= ?
+  `).all(cutoff);
+  const validated = [];
+  for (const candidate of candidates) {
+    if (runtimeStatus(candidate.learned_from_server_id) !== 'online') continue;
+    db.prepare(`
+      UPDATE repair_playbooks
+      SET success_count = success_count + 1, pending_validation = 0, validated_at = ?
+      WHERE signature = ? AND pending_validation = 1
+    `).run(Date.now(), candidate.signature);
+    appendLog(candidate.learned_from_server_id, `[NexusPanel] Repair learner validated playbook ${candidate.signature.slice(0, 12)} after 60 seconds of stable runtime.`);
+    validated.push(candidate.signature);
+  }
+  return validated;
 }
 
 async function replayLearnedRepair(server, software, crash) {
@@ -761,6 +846,15 @@ function recoverServerFolders() {
     const id = Number(match[1]);
     if (!id || existingIds.has(id)) continue;
     const root = path.join(serversRoot, entry.name);
+    if (isServerTombstoned(id)) {
+      try {
+        fs.rmSync(root, { recursive: true, force: true });
+      } catch (error) {
+        console.warn(`Deferred cleanup for deleted server ${id}: ${error.message}`);
+      }
+      continue;
+    }
+    const metadata = readServerMetadata(root);
     const propertiesPath = path.join(root, 'server.properties');
     const properties = fs.existsSync(propertiesPath) ? fs.readFileSync(propertiesPath, 'utf8') : '';
     const portMatch = properties.match(/(?:server-port|server-portv4)\s*=\s*(\d+)/i);
@@ -781,18 +875,20 @@ function recoverServerFolders() {
         scheduled_backups, backup_retention, server_path, software_key,
         executable_path, install_status, install_progress, install_message, cpu_cores
       )
-      VALUES (?, ?, ?, ?, 1024, 1, 1, 1, 4, ?, ?, ?, ?, ?, ?, 1)
+        VALUES (?, ?, ?, ?, ?, 1, 1, 1, 4, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       name,
       type,
       clampNumber(portMatch?.[1], 1, 65535, type === 'java' ? 25565 : 19132),
+      clampMemoryMb(metadata.maxMemoryMb, 1024),
       root,
       softwareKey,
       executable,
       executable ? 'installed' : 'missing',
       executable ? 100 : 0,
       executable ? 'Recovered from server folder.' : 'Recovered folder; executable missing.',
+      clampNumber(metadata.cpuCores, 1, hostCpuCount(), 1),
     );
     recovered.push({ id, name, root });
   }
@@ -1559,7 +1655,9 @@ function adaptiveInsights(user, req) {
 
 function repairBrainPayload() {
   const playbooks = db.prepare(`
-    SELECT COUNT(*) AS count, COALESCE(SUM(success_count), 0) AS learned, COALESCE(SUM(replay_count), 0) AS replays
+    SELECT COUNT(*) AS count, COALESCE(SUM(success_count), 0) AS learned,
+      COALESCE(SUM(replay_count), 0) AS replays,
+      COALESCE(SUM(pending_validation), 0) AS pending
     FROM repair_playbooks
   `).get();
   const commands = db.prepare(`
@@ -2427,12 +2525,15 @@ app.post('/api/host/provision', asyncRoute(async (req, res) => {
   );
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
   setSettingValue(`server_backup_timezone_${inserted.id}`, getUserTimezone(user.id));
+  prepareServerIdForCreation(inserted.id);
   const root = ensureServerDirs({ ...inserted, server_path: serverPath(inserted.id, inserted.name) });
   const executablePath = path.join(root, 'software', selectedSoftware.executable);
   const mark = writeProfile({ ...inserted, server_path: root }, root, null);
   db.prepare('UPDATE servers SET server_path = ?, executable_path = ?, nexus_mark_profile = ? WHERE id = ?')
     .run(root, executablePath, JSON.stringify(mark), inserted.id);
-  res.status(201).json({ user: publicUser(user), server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(inserted.id), req) });
+  const provisioned = db.prepare('SELECT * FROM servers WHERE id = ?').get(inserted.id);
+  writeServerMetadata(provisioned, root);
+  res.status(201).json({ user: publicUser(user), server: serverPayload(provisioned, req) });
 }));
 
 app.post('/api/users', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
@@ -2896,12 +2997,14 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
 
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
   setSettingValue(`server_backup_timezone_${inserted.id}`, getUserTimezone(req.user.id));
+  prepareServerIdForCreation(inserted.id);
   const root = ensureServerDirs({ ...inserted, server_path: serverPath(inserted.id, inserted.name) });
   const executablePath = path.join(root, 'software', selectedSoftware.executable);
   const mark = writeProfile({ ...inserted, server_path: root }, root, null);
   db.prepare('UPDATE servers SET server_path = ?, executable_path = ?, nexus_mark_profile = ? WHERE id = ?').run(root, executablePath, JSON.stringify(mark), inserted.id);
-
-  res.status(201).json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(inserted.id)) });
+  const created = db.prepare('SELECT * FROM servers WHERE id = ?').get(inserted.id);
+  writeServerMetadata(created, root);
+  res.status(201).json({ server: serverPayload(created) });
 });
 
 app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
@@ -2954,13 +3057,16 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
   );
 
   const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
+  prepareServerIdForCreation(inserted.id);
   const root = ensureServerDirs({ ...inserted, server_path: serverPath(inserted.id, inserted.name) });
   setSettingValue(`server_backup_timezone_${inserted.id}`, getUserTimezone(req.user.id));
   const executablePath = selectedSoftware ? path.join(root, 'software', selectedSoftware.executable) : '';
   const mark = writeProfile({ ...inserted, server_path: root, max_memory_mb: memoryMb, cpu_cores: cpuCores, disk_limit_mb: nexu.resources.diskMb }, root, nexu);
   db.prepare('UPDATE servers SET server_path = ?, executable_path = ?, nexus_mark_profile = ? WHERE id = ?').run(root, executablePath, JSON.stringify(mark), inserted.id);
+  const created = db.prepare('SELECT * FROM servers WHERE id = ?').get(inserted.id);
+  writeServerMetadata(created, root);
   appendLog(inserted.id, `[NexusPanel] Created from Nexu template: ${nexu.name}. Nexus-Mark profile ready.`);
-  res.status(201).json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(inserted.id)) });
+  res.status(201).json({ server: serverPayload(created) });
 });
 
 app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
@@ -2984,6 +3090,9 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
   const memoryMb = ownerOnly(req)
     ? clampMemoryMb(req.body.maxMemoryMb, target.max_memory_mb)
     : target.max_memory_mb;
+  const cpuCores = ownerOnly(req)
+    ? clampNumber(req.body.cpuCores, 1, hostCpuCount(), target.cpu_cores || 1)
+    : target.cpu_cores;
   const ownerUserId = ownerOnly(req)
     ? resolveServerOwnerUserId(req, req.body.ownerUserId, target.owner_user_id)
     : target.owner_user_id;
@@ -2995,7 +3104,7 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
         backup_interval_hours = ?, backup_interval_minutes = ?, backup_retention = ?, wake_on_join = ?, whitelist = ?,
         tunnel_provider = ?, public_alias = ?, startup_delay_sec = ?,
         server_path = ?, software_key = ?, software_version = ?, executable_path = ?,
-        owner_user_id = ?
+        owner_user_id = ?, cpu_cores = ?
     WHERE id = ?
   `).run(
     name,
@@ -3019,23 +3128,36 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
     String(req.body.softwareVersion ?? target.software_version ?? 'latest').trim().slice(0, 32) || 'latest',
     executablePath,
     ownerUserId,
+    cpuCores,
     id,
   );
   setSettingValue(`server_backup_timezone_${id}`, getUserTimezone(ownerUserId || req.user.id));
-
-  res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(id)) });
+  let updated = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
+  const mark = writeProfile(updated, root, parseJsonObject(updated.nexu_payload));
+  db.prepare('UPDATE servers SET nexus_mark_profile = ? WHERE id = ?').run(JSON.stringify(mark), id);
+  updated = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
+  writeServerMetadata(updated, root);
+  res.json({ server: serverPayload(updated) });
 });
 
 app.delete('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   if (runtimeStatus(server.id) === 'online') return res.status(400).json({ error: 'Stop the server before deleting it.' });
-  const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
-  await fs.promises.rm(assertInside(serversRoot, root), { recursive: true, force: true });
+  const root = assertInside(serversRoot, server.server_path || serverPath(server.id, server.name));
+  setSettingValue(serverTombstoneKey(server.id), JSON.stringify({ deletedAt: Date.now(), root }));
+  const pendingRestart = crashRestartTimers.get(server.id);
+  if (pendingRestart) clearTimeout(pendingRestart);
+  crashRestartTimers.delete(server.id);
+  crashHistory.delete(server.id);
+  closeWakeWatcher(server.id);
+  db.prepare('DELETE FROM servers WHERE id = ?').run(server.id);
+  const removalError = await fs.promises.rm(assertInside(serversRoot, root), { recursive: true, force: true })
+    .then(() => null)
+    .catch((error) => error);
   db.prepare('DELETE FROM panel_settings WHERE key = ?').run(`server_backup_timezone_${server.id}`);
   await fs.promises.rm(assertInside(backupsRoot, path.join(backupsRoot, String(server.id))), { recursive: true, force: true }).catch(() => {});
-  db.prepare('DELETE FROM servers WHERE id = ?').run(server.id);
   appendLog(server.id, '[NexusPanel] Server deleted.');
-  res.json({ ok: true });
+  res.json({ ok: true, cleanupPending: Boolean(removalError) });
 }));
 
 app.patch('/api/servers/:id/software', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
@@ -3406,7 +3528,7 @@ app.post('/api/servers/:id/fix', requireAccess(permissions.MANAGE_SERVERS), asyn
   const report = await runServerRepair(server, software);
   const learned = learnRepairPlaybook(server, report);
   appendLog(server.id, `[NexusPanel] Repair & Diagnose completed: ${report.summary}`);
-  if (learned) appendLog(server.id, `[NexusPanel] Learned repair playbook ${learned.signature} from this successful fix.`);
+  if (learned) appendLog(server.id, `[NexusPanel] Repair playbook ${learned.signature} recorded as a candidate; it will be trusted only after 60 seconds of stable runtime.`);
   res.json({ ok: true, ...report, learned, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
 }));
 
@@ -4115,6 +4237,8 @@ async function runAdaptiveMaintenance() {
   if (expiredLinks) actions.push(`Revoked ${expiredLinks} expired public backup link(s)`);
   const validatedRepairs = validateStableTerminalRepairs();
   if (validatedRepairs.length) actions.push(`Validated ${validatedRepairs.length} learned terminal repair(s)`);
+  const validatedPlaybooks = validateStableRepairPlaybooks();
+  if (validatedPlaybooks.length) actions.push(`Validated ${validatedPlaybooks.length} repair playbook(s) after stable runtime`);
   if (now - Number(databaseHealthStatus.checkedAt || 0) >= 5 * 60 * 1000) {
     const verification = verifyDatabase();
     databaseHealthStatus = { ...verification, checkedAt: now, snapshotAt: databaseHealthStatus.snapshotAt || 0 };
@@ -4148,13 +4272,14 @@ function startConfiguredServers() {
     const delayMs = Math.max(0, Number(server.startup_delay_sec || 0)) * 1000;
     const timer = setTimeout(async () => {
       try {
-        if (runtimeStatus(server.id) === 'online') return;
-        if (!hasJavaEula(server)) throw new Error('Minecraft EULA has not been accepted.');
-        const software = softwareForServer(server);
+        const current = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
+        if (!current || isServerTombstoned(server.id) || runtimeStatus(server.id) === 'online') return;
+        if (!hasJavaEula(current)) throw new Error('Minecraft EULA has not been accepted.');
+        const software = softwareForServer(current);
         if (!software) throw new Error('No installed runtime is configured.');
-        if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
-        startServer(resolveInstalledExecutable(server, software), software);
-        appendLog(server.id, '[NexusPanel] Auto-start completed.');
+        if (['java', 'bedrock'].includes(current.type)) await repairPropertiesFile(current);
+        startServer(resolveInstalledExecutable(current, software), software);
+        appendLog(current.id, '[NexusPanel] Auto-start completed.');
       } catch (error) {
         appendLog(server.id, `[NexusPanel] Auto-start failed: ${error.message}`);
       }
@@ -4228,9 +4353,10 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
   const timer = setTimeout(async () => {
     crashRestartTimers.delete(current.id);
     try {
-      if (runtimeStatus(current.id) === 'offline') {
-        if (['java', 'bedrock'].includes(current.type)) await repairPropertiesFile(current);
-        startServer(resolveInstalledExecutable(current, software), software);
+      const latest = db.prepare('SELECT * FROM servers WHERE id = ?').get(current.id);
+      if (latest && !isServerTombstoned(current.id) && runtimeStatus(current.id) === 'offline') {
+        if (['java', 'bedrock'].includes(latest.type)) await repairPropertiesFile(latest);
+        startServer(resolveInstalledExecutable(latest, software), software);
       }
     } catch (error) {
       appendLog(current.id, `[NexusPanel] Auto-restart failed: ${error.message}`);

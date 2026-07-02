@@ -46,6 +46,7 @@ const RULES = [
   ['auth-service', 'network', 'warning', ['authentication servers are down', 'failed to verify username', 'sessionserver.*failed', 'xbox live.*auth'], 'External account authentication is unavailable.', ['Check provider status and DNS.', 'Keep online-mode policy intentional.', 'Retry rather than changing player data.']],
   ['rate-limit', 'network', 'warning', ['http 429', 'too many requests', 'rate limit exceeded', 'retry-after'], 'An external API rate limit was reached.', ['Honor Retry-After.', 'Cache version metadata.', 'Avoid tight update loops.']],
   ['archive-incomplete', 'storage', 'warning', ['unexpected end of archive', 'end-of-central-directory signature not found', 'invalid zip', 'archive.*truncated'], 'A download, upload, or backup archive is incomplete.', ['Resume or re-transfer the file.', 'Validate ZIP before extraction.', 'Remove stale partial suffixes.']],
+  ['live-backup-race', 'storage', 'warning', ['auto backup failed:.*enoent.*worlds?.*db.*\\.ldb', 'no such file or directory.*worlds?.*db.*\\.ldb', 'backup.*leveldb.*(?:vanish|compact|missing)'], 'Bedrock compacted a live LevelDB file while a backup was reading it.', ['Use save hold/query/resume to create a stable Bedrock snapshot.', 'Write the ZIP atomically and remove partial output on failure.', 'Treat vanished compaction files as transient only after snapshot coordination.']],
 ];
 
 const SOFTWARE_FAMILIES = ['java', 'bedrock', 'pocketmine', 'host'];

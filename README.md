@@ -120,6 +120,10 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Password fields on login and dynamically rendered forms receive accessible show/hide controls.
 - Live Bedrock backups use the server save hold/query/resume snapshot protocol before archiving LevelDB worlds. ZIP creation is atomic, processes one file at a time to lower peak RAM, and safely ignores only transient files removed by compaction.
 - Every Nexus-Mark launch receives a unique transient systemd unit name after stale units for that server are stopped and reset, eliminating loaded-unit/fragment collisions and orphan-process overlap.
+- Server RAM and CPU allocations are stored in both SQLite and an atomic per-server recovery manifest. Editing resources regenerates the Nexus-Mark profile, and folder recovery restores the real allocation instead of defaulting to `1024 MB / 1 core`.
+- Deleted servers receive persistent tombstones, pending restart/wake work is cancelled, and leftover folders are removed rather than resurrected during boot recovery.
+- Repair playbooks remain untrusted candidates until the repaired server has stayed online for at least 60 seconds; failed repair attempts are no longer learned as successful fixes.
+- Live server and upload percentages now patch existing UI nodes instead of rebuilding cards, so Alpha Editor positions and software-version selections remain stable during polling.
 - SQLite uses integrity checks, foreign-key checks, verified rotating snapshots, and startup recovery from the latest verified snapshot when the primary database cannot open.
 - Login, password reset, and protected owner-password fields include accessible password reveal controls.
 - Password-reset delivery sends styled multipart HTML through local sendmail and provider-specific Resend, Brevo, SendGrid, or generic API payloads.
