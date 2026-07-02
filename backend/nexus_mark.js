@@ -75,6 +75,8 @@ function wrapCommand(command, args, profile) {
       `CPUQuota=${profile.startupCpuQuotaPercent || profile.cpuQuotaPercent}%`,
       '--property',
       'TasksMax=512',
+      '--property',
+      `WorkingDirectory=${profile.serverRoot}`,
       '--',
       command,
       ...args,

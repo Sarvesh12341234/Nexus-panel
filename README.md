@@ -114,6 +114,7 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Owner-terminal commands can be associated with a crashed server. Exit-zero commands are observed, stability-validated after the game remains online, and replayed only when they are idempotent and confined to that server root; dangerous commands remain redacted evidence.
 - Stored server roots are rediscovered from ID-prefixed folders and real game files. Missing or malformed `server.properties` files are backed up, validated, normalized, and atomically rewritten before startup.
 - Bedrock's `Error opening file: server.properties` startup failure is intercepted live, classified correctly, and repaired automatically. Rebuilt property files are comment-free, restore required defaults, use readable permissions, and are verified before one controlled restart.
+- Nexus-Mark transient systemd services explicitly inherit each server's own `WorkingDirectory`, so Bedrock reads `server.properties`, worlds, permissions, and runtime files from the correct isolated server root. Recovery timers are deduplicated to prevent delayed restart collisions.
 - SQLite uses integrity checks, foreign-key checks, verified rotating snapshots, and startup recovery from the latest verified snapshot when the primary database cannot open.
 - Login, password reset, and protected owner-password fields include accessible password reveal controls.
 - Password-reset delivery sends styled multipart HTML through local sendmail and provider-specific Resend, Brevo, SendGrid, or generic API payloads.

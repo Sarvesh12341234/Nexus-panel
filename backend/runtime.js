@@ -129,6 +129,7 @@ function startServer(server, software) {
   const profile = {
     ...storedProfile,
     serverId: server.id,
+    serverRoot: root,
     cpuCores,
     cpuQuotaPercent: cpuCores * 100,
     startupCpuQuotaPercent: cpuCores <= 3 ? Math.min(totalCpuCores, cpuCores * 4) * 100 : cpuCores * 100,

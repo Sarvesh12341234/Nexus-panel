@@ -49,6 +49,7 @@ const wakeWatchers = new Map();
 const passwordResetRequests = new Map();
 const keyedOperations = new Map();
 const crashHistory = new Map();
+const crashRestartTimers = new Map();
 const adaptiveEngine = new AdaptiveEngine();
 let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
@@ -4098,6 +4099,9 @@ function startConfiguredServers() {
 setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 0, recoveryReason = '' }) => {
   if (intentional) {
     crashHistory.delete(server.id);
+    const pendingRestart = crashRestartTimers.get(server.id);
+    if (pendingRestart) clearTimeout(pendingRestart);
+    crashRestartTimers.delete(server.id);
     return;
   }
   const current = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
@@ -4138,11 +4142,13 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
     appendLog(current.id, '[NexusPanel] Restart storm stopped after 3 failures in 2 minutes. Run Repair & Diagnose, then start manually.');
     return;
   }
-  const learnedRecovery = await replayLearnedRepair(current, software, crash)
-    .catch((error) => {
-      appendLog(current.id, `[NexusPanel] Learned recovery could not complete: ${error.message}`);
-      return null;
-    });
+  const learnedRecovery = targetedPropertyHeal
+    ? null
+    : await replayLearnedRepair(current, software, crash)
+      .catch((error) => {
+        appendLog(current.id, `[NexusPanel] Learned recovery could not complete: ${error.message}`);
+        return null;
+      });
   if (!learnedRecovery && !targetedPropertyHeal) {
     await runServerRepair(current, software)
       .then((report) => appendLog(current.id, `[NexusPanel] Proactive crash repair completed: ${report.summary}`))
@@ -4150,7 +4156,10 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
   }
   const restartDelaySeconds = launchFailure ? 10 * recent.length : 5;
   appendLog(current.id, `[NexusPanel] Unexpected exit detected. Restarting in ${restartDelaySeconds} seconds...`);
+  const previousTimer = crashRestartTimers.get(current.id);
+  if (previousTimer) clearTimeout(previousTimer);
   const timer = setTimeout(async () => {
+    crashRestartTimers.delete(current.id);
     try {
       if (runtimeStatus(current.id) === 'offline') {
         if (['java', 'bedrock'].includes(current.type)) await repairPropertiesFile(current);
@@ -4160,6 +4169,7 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
       appendLog(current.id, `[NexusPanel] Auto-restart failed: ${error.message}`);
     }
   }, restartDelaySeconds * 1000);
+  crashRestartTimers.set(current.id, timer);
   timer.unref();
 });
 
