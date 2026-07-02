@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { externalDataRoot } = require('./paths');
 const { hostCpuCount } = require('./system_info');
+let launchSequence = 0;
 
 function cpuLimitPercent(cpuCores = 1) {
   const total = Math.max(1, hostCpuCount());
@@ -13,6 +14,27 @@ function startupCpuLimitPercent(cpuCores = 1) {
   const total = Math.max(1, hostCpuCount());
   const requested = Math.max(1, Math.min(total, Number(cpuCores) || 1));
   return requested <= 3 ? Math.min(total, requested * 4) * 100 : requested * 100;
+}
+
+function clearStaleUnits(serverId, spawnSync) {
+  const safeId = String(serverId).replace(/[^a-z0-9_.-]/gi, '-');
+  const prefix = `nexusmark-${safeId}`;
+  const listed = spawnSync('systemctl', [
+    'list-units',
+    '--all',
+    '--plain',
+    '--no-legend',
+    `${prefix}*.service`,
+  ], { encoding: 'utf8', windowsHide: true });
+  const units = String(listed.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim().split(/\s+/)[0])
+    .filter((unit) => unit === `${prefix}.service` || unit.startsWith(`${prefix}-`));
+  if (!units.includes(`${prefix}.service`)) units.push(`${prefix}.service`);
+  for (const unit of [...new Set(units)]) {
+    spawnSync('systemctl', ['stop', unit], { stdio: 'ignore', windowsHide: true });
+    spawnSync('systemctl', ['reset-failed', unit], { stdio: 'ignore', windowsHide: true });
+  }
 }
 
 function profileForServer(server, nexu = null) {
@@ -58,9 +80,18 @@ function wrapCommand(command, args, profile) {
   if (process.platform !== 'linux' || process.env.NEXUSPANEL_CGROUPS === '0' || !fs.existsSync('/run/systemd/system')) {
     return { command, args, unit: '' };
   }
-  const probe = require('node:child_process').spawnSync('systemd-run', ['--version'], { stdio: 'ignore' });
+  const { spawnSync } = require('node:child_process');
+  const probe = spawnSync('systemd-run', ['--version'], { stdio: 'ignore' });
   if (probe.status !== 0) return { command, args, unit: '' };
-  const unit = `nexusmark-${String(profile.serverId).replace(/[^a-z0-9_.-]/gi, '-')}`;
+  clearStaleUnits(profile.serverId, spawnSync);
+  launchSequence = (launchSequence + 1) % 1000000;
+  const unit = [
+    'nexusmark',
+    String(profile.serverId).replace(/[^a-z0-9_.-]/gi, '-'),
+    process.pid,
+    Date.now().toString(36),
+    launchSequence,
+  ].join('-');
   return {
     command: 'systemd-run',
     args: [

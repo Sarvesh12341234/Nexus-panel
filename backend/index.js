@@ -1624,6 +1624,35 @@ function backupTimestamp(date, timeZone) {
   return `${parts.year}-${parts.month}-${parts.day}_${parts.hour}-${parts.minute}-${parts.second}_${zone}`;
 }
 
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function holdBedrockWorldForBackup(server) {
+  if (server.software_key !== 'bedrock-vanilla' || runtimeStatus(server.id) !== 'online') return false;
+  const marker = `backup snapshot ${Date.now()}`;
+  appendLog(server.id, `[NexusPanel] Pausing Bedrock world writes for a consistent ${marker}...`);
+  sendCommand(server.id, 'save hold');
+  try {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await wait(attempt === 0 ? 500 : 750);
+      sendCommand(server.id, 'save query');
+      await wait(250);
+      const rows = consoleLogs(server.id);
+      const markerIndex = rows.findLastIndex((line) => line.includes(marker));
+      const recent = rows.slice(markerIndex >= 0 ? markerIndex + 1 : -120).join('\n');
+      if (/files are (?:now )?ready to be copied|data saved\..*ready to be copied/i.test(recent)) {
+        appendLog(server.id, '[NexusPanel] Bedrock snapshot is stable and ready to archive.');
+        return true;
+      }
+    }
+    throw new Error('Bedrock did not confirm a stable save snapshot within 12 seconds.');
+  } catch (error) {
+    try { sendCommand(server.id, 'save resume'); } catch {}
+    throw error;
+  }
+}
+
 async function createServerBackupUnlocked(server, reason = 'manual') {
   const root = ensureServerDirs(server);
   const backupsDir = assertInside(backupsRoot, path.join(backupsRoot, String(server.id)));
@@ -1645,7 +1674,20 @@ async function createServerBackupUnlocked(server, reason = 'manual') {
     .filter((entry) => !entry.name.endsWith('.download') && !entry.name.endsWith('.uploading'))
     .map((entry) => entry.name);
 
-  await createZip(root, entries, archivePath);
+  const heldBedrockWorld = await holdBedrockWorldForBackup(server);
+  let archiveResult;
+  try {
+    archiveResult = await createZip(root, entries, archivePath);
+  } finally {
+    if (heldBedrockWorld) {
+      try {
+        sendCommand(server.id, 'save resume');
+        appendLog(server.id, '[NexusPanel] Bedrock world writes resumed after backup snapshot.');
+      } catch (error) {
+        appendLog(server.id, `[NexusPanel] Warning: save resume failed after backup: ${error.message}`);
+      }
+    }
+  }
 
   const retention = Math.max(1, Number(server.backup_retention) || 4);
   const backups = (await fs.promises.readdir(backupsDir, { withFileTypes: true }))
@@ -1656,6 +1698,9 @@ async function createServerBackupUnlocked(server, reason = 'manual') {
   for (const old of backups.slice(retention)) await fs.promises.rm(old.path, { force: true });
 
   db.prepare('UPDATE servers SET last_backup_at = ? WHERE id = ?').run(Date.now(), server.id);
+  if (archiveResult.skipped) {
+    appendLog(server.id, `[NexusPanel] Backup snapshot skipped ${archiveResult.skipped} transient file(s) that disappeared during compaction.`);
+  }
   appendLog(server.id, `[NexusPanel] Backup created: ${archiveName} (${timeZone})`);
 
   return { name: archiveName, path: archiveName, size: fs.statSync(archivePath).size, createdAt: now.getTime(), timeZone };

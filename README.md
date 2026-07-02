@@ -118,6 +118,8 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Admin access roles now hide every navigation section and command outside the granted level. Start/Stop, logs, console commands, server management, files/backups, and full administration have explicit presets.
 - Panel console history is buffered to protected disk logs and restored after panel restarts, including while game servers are offline. Live polling uses a minimal status payload, samples process metrics less often, skips unchanged DOM renders, and prevents overlapping scheduled backups.
 - Password fields on login and dynamically rendered forms receive accessible show/hide controls.
+- Live Bedrock backups use the server save hold/query/resume snapshot protocol before archiving LevelDB worlds. ZIP creation is atomic, processes one file at a time to lower peak RAM, and safely ignores only transient files removed by compaction.
+- Every Nexus-Mark launch receives a unique transient systemd unit name after stale units for that server are stopped and reset, eliminating loaded-unit/fragment collisions and orphan-process overlap.
 - SQLite uses integrity checks, foreign-key checks, verified rotating snapshots, and startup recovery from the latest verified snapshot when the primary database cannot open.
 - Login, password reset, and protected owner-password fields include accessible password reveal controls.
 - Password-reset delivery sends styled multipart HTML through local sendmail and provider-specific Resend, Brevo, SendGrid, or generic API payloads.
