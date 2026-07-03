@@ -26,15 +26,19 @@ const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
 const {
   SESSION_COOKIE,
   authMiddleware,
+  capabilities,
   clearSession,
   clearSessionCookie,
   createSession,
   createUser,
   hashPassword,
+  hasPermission,
+  normalizePermissionKeys,
+  permissionKeysForUser,
   permissions,
   publicUser,
-  requireAccess,
   requireAuth,
+  requirePermission,
   setSessionCookie,
   verifyPassword,
 } = require('./auth');
@@ -942,7 +946,7 @@ function serverPayload(server, req = null) {
 function userRows() {
   db.prepare('DELETE FROM users WHERE role != ? AND expires_at > 0 AND expires_at <= ?').run('owner', Date.now());
   return db.prepare(`
-    SELECT id, email, name, role, access_level, expires_at, created_at
+    SELECT id, email, name, role, access_level, permissions_json, expires_at, created_at
     FROM users
     ORDER BY role DESC, email ASC
   `).all().map((user) => ({
@@ -951,6 +955,7 @@ function userRows() {
     name: user.name,
     role: user.role,
     accessLevel: user.access_level,
+    permissionKeys: permissionKeysForUser(user),
     expiresAt: user.expires_at || 0,
     createdAt: user.created_at,
   }));
@@ -979,6 +984,14 @@ function durationMs(body, fallbackMinutes = 60, maxMinutes = 1440) {
 
 function randomSixDigitCode() {
   return String(crypto.randomInt(100000, 1000000));
+}
+
+function grantablePermissionKeys(actor, requested) {
+  const normalized = normalizePermissionKeys(requested);
+  if (normalized === null) return null;
+  if (actor.role === 'owner') return normalized;
+  const actorKeys = permissionKeysForUser(actor) || [];
+  return normalized.filter((key) => actorKeys.includes(key));
 }
 
 async function withKeyedOperation(key, task) {
@@ -2192,18 +2205,18 @@ app.get('/api/overview', (req, res) => {
     permissions,
     user: req.user ? publicUser(req.user) : null,
     servers: req.user ? serverRows(req.user, req) : [],
-    plugins: req.user && req.user.access_level >= permissions.MANAGE_FILES
+    plugins: req.user && hasPermission(req.user, capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES)
       ? pluginRows(req.user.role === 'owner' ? null : serverRows(req.user, req).map((server) => server.id))
       : [],
-    softwareCatalog: req.user && req.user.access_level >= permissions.MANAGE_SERVERS ? softwareCatalog() : [],
-    templates: req.user && req.user.access_level >= permissions.MANAGE_SERVERS && isHostEdition() ? templateRows() : [],
+    softwareCatalog: req.user && hasPermission(req.user, capabilities.SOFTWARE_MANAGE, permissions.MANAGE_SERVERS) ? softwareCatalog() : [],
+    templates: req.user && hasPermission(req.user, capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS) && isHostEdition() ? templateRows() : [],
     settings: req.user ? panelSettingsPayload(req.user) : null,
-    users: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? userRows() : [],
-    loginEvents: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? loginEventRows(10) : [],
-    health: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? (fs.existsSync(healthPath) ? readHealthFile() : null) : null,
-    optimizer: req.user && req.user.access_level >= permissions.MANAGE_SERVERS ? optimizerStatus() : null,
+    users: req.user && hasPermission(req.user, capabilities.ADMINS_MANAGE, permissions.MANAGE_ADMINS) ? userRows() : [],
+    loginEvents: req.user && hasPermission(req.user, capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS) ? loginEventRows(10) : [],
+    health: req.user && hasPermission(req.user, capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS) ? (fs.existsSync(healthPath) ? readHealthFile() : null) : null,
+    optimizer: req.user && hasPermission(req.user, capabilities.OPTIMIZER_MANAGE, permissions.MANAGE_SERVERS) ? optimizerStatus() : null,
     adaptiveInsights: req.user ? adaptiveInsights(req.user, req) : [],
-    repairBrain: req.user && req.user.access_level >= permissions.MANAGE_ADMINS ? repairBrainPayload() : null,
+    repairBrain: req.user && hasPermission(req.user, capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS) ? repairBrainPayload() : null,
   };
 
   res.json(payload);
@@ -2231,7 +2244,7 @@ app.get('/api/user/timezone', requireAuth, (req, res) => {
   }
 });
 
-app.post('/api/user/timezone', requireAuth, (req, res) => {
+app.post('/api/user/timezone', requirePermission(capabilities.TIMEZONE_MANAGE, permissions.VIEW_ONLY), (req, res) => {
   try {
     const { timezone } = req.body;
     if (!timezone) return res.status(400).json({ error: 'Timezone is required' });
@@ -2269,23 +2282,23 @@ app.use('/api/servers/:id', (req, res, next) => {
   next();
 });
 
-app.get('/api/optimizer/status', requireAccess(permissions.MANAGE_SERVERS), (_req, res) => {
+app.get('/api/optimizer/status', requirePermission(capabilities.OPTIMIZER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
   res.json(optimizerStatus());
 });
 
-app.post('/api/adaptive/heal', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {
+app.post('/api/adaptive/heal', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {
   res.json(await runAdaptiveMaintenance());
 }));
 
-app.get('/api/optimizer/plan', requireAccess(permissions.MANAGE_SERVERS), (_req, res) => {
+app.get('/api/optimizer/plan', requirePermission(capabilities.OPTIMIZER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
   res.json(planCommands());
 });
 
-app.get('/api/network/metrics', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
+app.get('/api/network/metrics', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
   res.json({ network: await networkStats() });
 }));
 
-app.get('/api/network/download-test', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.get('/api/network/download-test', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const size = clampNumber(req.query.size, 1024 * 1024, 64 * 1024 * 1024, 8 * 1024 * 1024);
   const block = Buffer.allocUnsafe(256 * 1024).fill(0x5a);
   let remaining = size;
@@ -2303,11 +2316,11 @@ app.get('/api/network/download-test', requireAccess(permissions.MANAGE_SERVERS),
   writeMore();
 });
 
-app.post('/api/network/upload-test', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.post('/api/network/upload-test', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   res.json({ bytes: Buffer.isBuffer(req.body) ? req.body.length : 0, receivedAt: Date.now() });
 });
 
-app.get('/api/nginx/accel-config', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+app.get('/api/nginx/accel-config', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_ADMINS), (_req, res) => {
   res.type('text/plain').send(`# NexusPanel optional X-Accel download offload
 # Put this in your Nginx server block, then set:
 # NEXUSPANEL_X_ACCEL_ROOT=${serversRoot.replace(/\\/g, '/')}
@@ -2327,7 +2340,7 @@ location / {
 }`);
 });
 
-app.post('/api/optimizer/apply', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+app.post('/api/optimizer/apply', requirePermission(capabilities.OPTIMIZER_MANAGE, permissions.MANAGE_ADMINS), (_req, res) => {
   const result = applyTweaks();
   if (!result.applied) return res.status(400).json(result);
   res.json(result);
@@ -2417,11 +2430,11 @@ app.get('/api/me', requireAuth, (req, res) => {
   res.json({ user: publicUser(req.user) });
 });
 
-app.get('/api/users', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+app.get('/api/users', requirePermission(capabilities.ADMINS_MANAGE, permissions.MANAGE_ADMINS), (_req, res) => {
   res.json({ users: userRows() });
 });
 
-app.get('/api/audit/logins', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+app.get('/api/audit/logins', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   res.json({ events: loginEventRows(10) });
 });
 
@@ -2438,11 +2451,11 @@ app.post('/api/host/token/regenerate', requireAuth, (req, res) => {
   res.json({ token: reqOwnerSafeHostToken() });
 });
 
-app.get('/api/health', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+app.get('/api/health', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
   res.json({ health: await runHealthCheck(req.query.force === '1') });
 }));
 
-app.get('/api/repair/bundle', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+app.get('/api/repair/bundle', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   const crashes = db.prepare(`
     SELECT crash.server_id, crash.signature, crash.software_key, crash.sample, crash.last_seen_at, server.name
     FROM repair_crash_state crash
@@ -2460,13 +2473,13 @@ app.get('/api/repair/bundle', requireAccess(permissions.MANAGE_ADMINS), (_req, r
   });
 });
 
-app.post('/api/database/snapshot', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+app.post('/api/database/snapshot', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   const snapshot = backupDatabase({ force: true });
   databaseHealthStatus = { ...snapshot.verification, checkedAt: Date.now(), snapshotAt: Date.now() };
   res.json({ ok: true, created: snapshot.created, file: path.basename(snapshot.path), database: databaseHealthStatus });
 });
 
-app.post('/api/servers/:id/repair-preview', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.post('/api/servers/:id/repair-preview', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   const diagnostics = diagnoseRuntime(consoleLogs(server.id));
   res.json({
@@ -2536,26 +2549,31 @@ app.post('/api/host/provision', asyncRoute(async (req, res) => {
   res.status(201).json({ user: publicUser(user), server: serverPayload(provisioned, req) });
 }));
 
-app.post('/api/users', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.post('/api/users', requirePermission(capabilities.ADMINS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  const assignedServerId = Number(req.body.assignedServerId || 0);
+  const assignedServer = assignedServerId
+    ? db.prepare('SELECT * FROM servers WHERE id = ?').get(assignedServerId)
+    : null;
+  if (assignedServerId && !assignedServer) {
+    return res.status(404).json({ error: 'Assigned server not found.' });
+  }
   const user = createUser({
     email: req.body.email,
     name: req.body.name,
     password: req.body.password,
     role: 'admin',
     accessLevel: req.body.accessLevel,
+    permissionKeys: grantablePermissionKeys(req.user, req.body.permissionKeys),
     expiresAt: adminExpiresAt(req.body),
   });
-  const assignedServerId = Number(req.body.assignedServerId || 0);
-  if (assignedServerId && user.role !== 'owner') {
-    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(assignedServerId);
-    if (!server) return res.status(404).json({ error: 'Assigned server not found.' });
-    db.prepare('UPDATE servers SET owner_user_id = ? WHERE id = ?').run(user.id, server.id);
+  if (assignedServer && user.role !== 'owner') {
+    db.prepare('UPDATE servers SET owner_user_id = ? WHERE id = ?').run(user.id, assignedServer.id);
   }
 
   res.status(201).json({ user });
 });
 
-app.patch('/api/users/:id', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.patch('/api/users/:id', requirePermission(capabilities.ADMINS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'User not found.' });
@@ -2567,17 +2585,20 @@ app.patch('/api/users/:id', requireAccess(permissions.MANAGE_ADMINS), (req, res)
     ? 100
     : Math.max(0, Math.min(100, Number(req.body.accessLevel ?? target.access_level) || 0));
   const name = String(req.body.name || target.name).trim();
+  const permissionKeys = target.role === 'owner'
+    ? null
+    : grantablePermissionKeys(req.user, req.body.permissionKeys ?? permissionKeysForUser(target));
 
   db.prepare(`
     UPDATE users
-    SET name = ?, access_level = ?, updated_at = CURRENT_TIMESTAMP
+    SET name = ?, access_level = ?, permissions_json = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(name, accessLevel, id);
+  `).run(name, accessLevel, permissionKeys === null ? null : JSON.stringify(permissionKeys), id);
 
   res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id)) });
 });
 
-app.delete('/api/users/:id', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.delete('/api/users/:id', requirePermission(capabilities.ADMINS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'User not found.' });
@@ -2616,7 +2637,7 @@ app.get('/api/software/:key/versions', requireAuth, asyncRoute(async (req, res) 
   res.json({ versions: await softwareVersions(req.params.key) });
 }));
 
-app.post('/api/software/check-updates', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
+app.post('/api/software/check-updates', requirePermission(capabilities.SOFTWARE_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
   clearSoftwareVersionCache();
   const versions = {};
   for (const item of softwareCatalog()) {
@@ -2629,7 +2650,7 @@ app.get('/api/templates', requireAuth, (_req, res) => {
   res.json({ templates: templateRows(), nexuSchemaVersion: 1, example: nexuExample() });
 });
 
-app.post('/api/templates/import', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.post('/api/templates/import', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
   const normalized = normalizeNexuTemplate(req.body || {});
   const key = normalized.key;
   const name = normalized.name;
@@ -2646,17 +2667,17 @@ app.get('/api/settings', requireAuth, (req, res) => {
   res.json({ settings: panelSettingsPayload(req.user) });
 });
 
-app.get('/api/settings/update-status', requireAccess(permissions.MANAGE_ADMINS), (_req, res) => {
+app.get('/api/settings/update-status', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (_req, res) => {
   res.json({ update: updateStatus });
 });
 
-app.get('/api/servers/:id/nexus-mark', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.get('/api/servers/:id/nexus-mark', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   const nexu = parseJsonObject(server.nexu_payload);
   res.json({ profile: profileForServer(server, nexu), nexu });
 });
 
-app.put('/api/settings', requireAccess(permissions.MANAGE_ADMINS), (req, res) => {
+app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
   setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
@@ -2678,7 +2699,7 @@ app.put('/api/settings', requireAccess(permissions.MANAGE_ADMINS), (req, res) =>
   res.json({ settings: panelSettingsPayload(req.user) });
 });
 
-app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+app.post('/api/settings/update', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
   const repo = FIXED_UPDATE_REPO;
   setSettingValue('update_repo', repo);
   if (updateStatus.running) return res.status(409).json({ error: 'Update is already running.' });
@@ -2735,7 +2756,7 @@ app.post('/api/settings/update', requireAccess(permissions.MANAGE_ADMINS), async
   res.json({ ok: true, message: `Update started for ${panelSettingsPayload(req.user).updateTag}. Protected folders stay untouched.`, repo });
 }));
 
-app.post('/api/terminal/run', requireAccess(permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+app.post('/api/terminal/run', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
   if (settingValue('terminal_enabled', '0') !== '1') return res.status(403).json({ error: 'Terminal is disabled in Settings.' });
   const owner = db.prepare('SELECT * FROM users WHERE id = ? AND role = ?').get(req.user.id, 'owner');
@@ -2953,7 +2974,7 @@ app.delete('/api/terminal/session/:sessionId', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.post('/api/servers', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const name = String(req.body.name || '').trim();
   if (name.length < 2) return res.status(400).json({ error: 'Server name is required.' });
   const type = req.body.type === 'java' ? 'java' : 'bedrock';
@@ -3007,7 +3028,7 @@ app.post('/api/servers', requireAccess(permissions.MANAGE_SERVERS), (req, res) =
   res.status(201).json({ server: serverPayload(created) });
 });
 
-app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.post('/api/templates/:key/create', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const template = findTemplate(req.params.key) || templateRows().find((item) => item.key === req.params.key);
   if (!template) return res.status(404).json({ error: 'Template not found.' });
   const nexu = normalizeNexuTemplate(template.nexu || template);
@@ -3069,7 +3090,7 @@ app.post('/api/templates/:key/create', requireAccess(permissions.MANAGE_SERVERS)
   res.status(201).json({ server: serverPayload(created) });
 });
 
-app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.patch('/api/servers/:id', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
@@ -3140,7 +3161,7 @@ app.patch('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), (req, r
   res.json({ server: serverPayload(updated) });
 });
 
-app.delete('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.delete('/api/servers/:id', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   if (runtimeStatus(server.id) === 'online') return res.status(400).json({ error: 'Stop the server before deleting it.' });
   const root = assertInside(serversRoot, server.server_path || serverPath(server.id, server.name));
@@ -3160,7 +3181,7 @@ app.delete('/api/servers/:id', requireAccess(permissions.MANAGE_SERVERS), asyncR
   res.json({ ok: true, cleanupPending: Boolean(removalError) });
 }));
 
-app.patch('/api/servers/:id/software', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.patch('/api/servers/:id/software', requirePermission(capabilities.SOFTWARE_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
@@ -3179,7 +3200,7 @@ app.patch('/api/servers/:id/software', requireAccess(permissions.MANAGE_SERVERS)
   res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(id)) });
 });
 
-app.post('/api/servers/:id/software/install', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/software/install', requirePermission(capabilities.SOFTWARE_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
@@ -3275,14 +3296,14 @@ app.post('/api/servers/:id/software/install', requireAccess(permissions.MANAGE_S
   res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(id)) });
 }));
 
-app.get('/api/servers/:id/plugins', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.get('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
   res.json({ plugins: pluginRows(id) });
 });
 
-app.post('/api/servers/:id/plugins', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.post('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
@@ -3392,7 +3413,7 @@ app.get('/api/poggit/search', requireAuth, asyncRoute(async (req, res) => {
   res.json({ source: 'poggit', hits });
 }));
 
-app.post('/api/servers/:id/modrinth/install', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/modrinth/install', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   if (!['paper', 'purpur'].includes(software.key)) {
@@ -3430,7 +3451,7 @@ app.post('/api/servers/:id/modrinth/install', requireAccess(permissions.MANAGE_F
   });
 }));
 
-app.post('/api/servers/:id/poggit/install', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/poggit/install', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   if (software.key !== 'pocketmine') {
@@ -3453,7 +3474,7 @@ app.post('/api/servers/:id/poggit/install', requireAccess(permissions.MANAGE_FIL
   });
 }));
 
-app.get('/api/servers/:id/console', requireAccess(permissions.VIEW_CONSOLE), (req, res) => {
+app.get('/api/servers/:id/console', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
@@ -3502,7 +3523,7 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
   });
 });
 
-app.post('/api/servers/:id/start', requireAccess(permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/start', requirePermission(capabilities.SERVER_START, permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
@@ -3520,7 +3541,7 @@ app.post('/api/servers/:id/start', requireAccess(permissions.POWER_SERVERS), asy
   }
 }));
 
-app.post('/api/servers/:id/fix', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   if (runtimeStatus(server.id) === 'online') return res.status(409).json({ error: 'Stop the server before running Fix Server.' });
   const software = softwareForServer(server);
@@ -3532,18 +3553,18 @@ app.post('/api/servers/:id/fix', requireAccess(permissions.MANAGE_SERVERS), asyn
   res.json({ ok: true, ...report, learned, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
 }));
 
-app.post('/api/servers/:id/eula', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/eula', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   await agreeJavaEula(server);
   appendLog(server.id, '[NexusPanel] EULA accepted from panel.');
   res.json({ ok: true, eulaAgreed: true });
 }));
 
-app.post('/api/servers/:id/stop', requireAccess(permissions.POWER_SERVERS), (req, res) => {
+app.post('/api/servers/:id/stop', requirePermission(capabilities.SERVER_STOP, permissions.POWER_SERVERS), (req, res) => {
   res.json(stopServer(Number(req.params.id)));
 });
 
-app.post('/api/servers/:id/restart', requireAccess(permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/restart', requirePermission(capabilities.SERVER_RESTART, permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
@@ -3552,23 +3573,23 @@ app.post('/api/servers/:id/restart', requireAccess(permissions.POWER_SERVERS), a
   res.json(restartServer(resolveInstalledExecutable(server, software), software));
 }));
 
-app.post('/api/servers/:id/kill', requireAccess(permissions.POWER_SERVERS), (req, res) => {
+app.post('/api/servers/:id/kill', requirePermission(capabilities.SERVER_KILL, permissions.POWER_SERVERS), (req, res) => {
   res.json(killServer(Number(req.params.id)));
 });
 
-app.post('/api/servers/:id/command', requireAccess(permissions.SEND_COMMANDS), (req, res) => {
+app.post('/api/servers/:id/command', requirePermission(capabilities.CONSOLE_COMMAND, permissions.SEND_COMMANDS), (req, res) => {
   sendCommand(Number(req.params.id), req.body.command);
   res.json({ ok: true });
 });
 
-app.get('/api/servers/:id/properties', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const values = await readProperties(server);
   const schema = propertySchema.filter((item) => item.editions.includes(server.type));
   res.json({ schema, values });
 }));
 
-app.put('/api/servers/:id/properties', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.put('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const allowed = new Set(propertySchema.filter((item) => item.editions.includes(server.type)).map((item) => item.key));
   const values = {};
@@ -3580,12 +3601,12 @@ app.put('/api/servers/:id/properties', requireAccess(permissions.MANAGE_SERVERS)
   res.json({ values: await readProperties(server) });
 }));
 
-app.get('/api/servers/:id/whitelist', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   res.json({ players: await readWhitelist(server) });
 }));
 
-app.post('/api/servers/:id/whitelist', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   const name = String(req.body.name || '').trim();
@@ -3605,7 +3626,7 @@ app.post('/api/servers/:id/whitelist', requireAccess(permissions.MANAGE_SERVERS)
   res.status(201).json({ players: rows });
 }));
 
-app.delete('/api/servers/:id/whitelist/:name', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.delete('/api/servers/:id/whitelist/:name', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   const name = String(req.params.name || '').toLowerCase();
@@ -3616,7 +3637,7 @@ app.delete('/api/servers/:id/whitelist/:name', requireAccess(permissions.MANAGE_
   res.json({ players: rows });
 }));
 
-app.delete('/api/servers/:id/whitelist', requireAccess(permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+app.delete('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   await writeWhitelist(server, []);
@@ -3625,7 +3646,7 @@ app.delete('/api/servers/:id/whitelist', requireAccess(permissions.MANAGE_SERVER
   res.json({ players: [] });
 }));
 
-app.get('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const canShareOwner = canOwnServerShare(req.user, server);
   const code = canShareOwner ? db.prepare('SELECT code, expires_at FROM backup_share_codes WHERE server_id = ? AND expires_at > ?').get(server.id, Date.now()) : null;
@@ -3677,7 +3698,7 @@ app.get('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), asy
   });
 }));
 
-app.post('/api/servers/:id/backups/public-link', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/backups/public-link', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the server owner can publish backup links.' });
   const expiresAt = Date.now() + durationMs(req.body || {}, 60, 24 * 60);
@@ -3699,7 +3720,7 @@ app.post('/api/servers/:id/backups/public-link', requireAccess(permissions.MANAG
   res.status(201).json({ expiresAt, archives });
 }));
 
-app.delete('/api/servers/:id/backups/public-link', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.delete('/api/servers/:id/backups/public-link', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the server owner can revoke backup links.' });
   db.prepare('UPDATE backup_public_links SET revoked_at = ? WHERE server_id = ? AND revoked_at = 0').run(Date.now(), server.id);
@@ -3726,7 +3747,7 @@ app.post('/api/public/backups/:token/:name', asyncRoute(async (req, res) => {
   return streamDownload(req, res, target, name);
 }));
 
-app.post('/api/servers/:id/backups/import-url', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/backups/import-url', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const url = await validatePublicBackupUrl(req.body.url);
   const response = await fetch(url, {
@@ -3769,21 +3790,21 @@ app.post('/api/servers/:id/backups/import-url', requireAccess(permissions.MANAGE
   res.status(201).json({ ok: true, name, size: received, backups: await backupRows(server) });
 }));
 
-app.post('/api/servers/:id/backups/share-code', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.post('/api/servers/:id/backups/share-code', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can create backup codes.' });
   const code = ensureBackupShareCode(server, req.body || {});
   res.json({ code: code.code, expiresAt: code.expires_at });
 });
 
-app.delete('/api/servers/:id/backups/share-code', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.delete('/api/servers/:id/backups/share-code', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can hide backup codes.' });
   db.prepare('DELETE FROM backup_share_codes WHERE server_id = ?').run(server.id);
   res.json({ ok: true });
 });
 
-app.post('/api/servers/:id/backups/share-request', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.post('/api/servers/:id/backups/share-request', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const target = getServerOr404(req.params.id);
   const code = String(req.body.code || '').trim();
   if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter a 6-digit backup code.' });
@@ -3798,7 +3819,7 @@ app.post('/api/servers/:id/backups/share-request', requireAccess(permissions.MAN
   res.status(201).json({ ok: true, message: 'Backup access request sent to the source server owner.' });
 });
 
-app.post('/api/servers/:id/backups/share-requests/:requestId/approve', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.post('/api/servers/:id/backups/share-requests/:requestId/approve', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can approve backup access.' });
   const request = db.prepare('SELECT * FROM backup_share_requests WHERE id = ? AND source_server_id = ?').get(Number(req.params.requestId), server.id);
@@ -3808,7 +3829,7 @@ app.post('/api/servers/:id/backups/share-requests/:requestId/approve', requireAc
   res.json({ ok: true, expiresAt });
 });
 
-app.delete('/api/servers/:id/backups/share-requests/:requestId', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.delete('/api/servers/:id/backups/share-requests/:requestId', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can remove backup access.' });
   const request = db.prepare('SELECT * FROM backup_share_requests WHERE id = ? AND source_server_id = ?').get(Number(req.params.requestId), server.id);
@@ -3817,12 +3838,12 @@ app.delete('/api/servers/:id/backups/share-requests/:requestId', requireAccess(p
   res.json({ ok: true });
 });
 
-app.post('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   res.status(201).json({ backup: await createServerBackup(server, 'manual'), backups: await backupRows(server) });
 }));
 
-app.delete('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.delete('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const backupPath = String(req.query.path || '').replaceAll('\\', '/').replace(/^\/+/, '');
   if (!backupPath.endsWith('.zip') || backupPath.includes('/')) {
@@ -3833,7 +3854,7 @@ app.delete('/api/servers/:id/backups', requireAccess(permissions.MANAGE_FILES), 
   res.json({ ok: true, backups: await backupRows(server) });
 }));
 
-app.get('/api/servers/:id/backups/download', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/backups/download', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const name = String(req.query.name || '').replaceAll('\\', '/');
   if (!name.endsWith('.zip') || name.includes('/')) return res.status(400).json({ error: 'Choose a backup file.' });
@@ -3841,7 +3862,7 @@ app.get('/api/servers/:id/backups/download', requireAccess(permissions.MANAGE_FI
   await streamDownload(req, res, target, name);
 }));
 
-app.post('/api/servers/:id/backups/restore', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/backups/restore', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const sourceServerId = Number(req.body.sourceServerId || server.id);
   if (sourceServerId !== Number(server.id)) {
@@ -3857,7 +3878,7 @@ app.post('/api/servers/:id/backups/restore', requireAccess(permissions.MANAGE_FI
   res.json({ ok: true, ...result, backups: await backupRows(server) });
 }));
 
-app.put('/api/servers/:id/backups/settings', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.put('/api/servers/:id/backups/settings', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   const intervalMinutes = parseBackupIntervalMinutes(req.body, backupIntervalMinutesFrom(server));
   const intervalHours = Math.max(1, Math.round(intervalMinutes / 60));
@@ -3872,12 +3893,12 @@ app.get('/api/servers/:id/tunnels', requireAuth, (req, res) => {
   res.status(410).json({ error: 'Tunnels were removed. Use Templates or your VPS reverse proxy setup instead.' });
 });
 
-app.put('/api/servers/:id/tunnels', requireAccess(permissions.MANAGE_SERVERS), (req, res) => {
+app.put('/api/servers/:id/tunnels', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   getServerOr404(req.params.id);
   res.status(410).json({ error: 'Tunnels were removed. Use Templates or your VPS reverse proxy setup instead.' });
 });
 
-app.get('/api/servers/:id/files', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   const stats = await fs.promises.stat(target.absolute).catch(() => null);
@@ -3912,7 +3933,7 @@ app.get('/api/servers/:id/files', requireAccess(permissions.MANAGE_FILES), async
   });
 }));
 
-app.put('/api/servers/:id/files', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.put('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a file path inside the server folder.' });
@@ -3921,7 +3942,7 @@ app.put('/api/servers/:id/files', requireAccess(permissions.MANAGE_FILES), async
   res.json({ ok: true, path: target.relative });
 }));
 
-app.post('/api/servers/:id/files/upload', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/files/upload', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
@@ -3931,12 +3952,12 @@ app.post('/api/servers/:id/files/upload', requireAccess(permissions.MANAGE_FILES
   res.status(201).json({ ok: true, path: target.relative, size: req.body.length });
 }));
 
-app.get('/api/servers/:id/files/uploads', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.get('/api/servers/:id/files/uploads', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const server = getServerOr404(req.params.id);
   res.json({ uploads: uploadRows(server.id) });
 });
 
-app.get('/api/servers/:id/files/upload-status', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/files/upload-status', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
@@ -3965,7 +3986,7 @@ app.get('/api/servers/:id/files/upload-status', requireAccess(permissions.MANAGE
   res.json({ uploadedBytes, uploadedChunks: chunks, complete: false });
 }));
 
-app.post('/api/servers/:id/files/upload-chunk', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/files/upload-chunk', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
@@ -4012,7 +4033,7 @@ app.post('/api/servers/:id/files/upload-chunk', requireAccess(permissions.MANAGE
   });
 }));
 
-app.post('/api/servers/:id/files/upload-complete', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/files/upload-complete', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
@@ -4042,7 +4063,7 @@ app.post('/api/servers/:id/files/upload-complete', requireAccess(permissions.MAN
   res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true, sha256: finalHash });
 }));
 
-app.post('/api/servers/:id/files/upload-pause', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/files/upload-pause', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose an upload path.' });
@@ -4053,7 +4074,7 @@ app.post('/api/servers/:id/files/upload-pause', requireAccess(permissions.MANAGE
   res.json({ uploads: uploadRows(server.id) });
 }));
 
-app.delete('/api/servers/:id/files/upload-session', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.delete('/api/servers/:id/files/upload-session', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose an upload path.' });
@@ -4062,7 +4083,7 @@ app.delete('/api/servers/:id/files/upload-session', requireAccess(permissions.MA
   res.json({ uploads: uploadRows(server.id) });
 }));
 
-app.post('/api/servers/:id/files/mkdir', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/files/mkdir', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Folder name is required.' });
@@ -4070,7 +4091,7 @@ app.post('/api/servers/:id/files/mkdir', requireAccess(permissions.MANAGE_FILES)
   res.json({ ok: true, path: target.relative });
 }));
 
-app.delete('/api/servers/:id/files', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.delete('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Cannot delete the server root.' });
@@ -4078,7 +4099,7 @@ app.delete('/api/servers/:id/files', requireAccess(permissions.MANAGE_FILES), as
   res.json({ ok: true });
 }));
 
-app.post('/api/servers/:id/files/copy', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/files/copy', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const destinationDir = safeServerFile(server, req.body.destination || '');
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
@@ -4094,7 +4115,7 @@ app.post('/api/servers/:id/files/copy', requireAccess(permissions.MANAGE_FILES),
   res.json({ ok: true, paths: copied });
 }));
 
-app.post('/api/servers/:id/files/move', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/files/move', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const destinationDir = safeServerFile(server, req.body.destination || '');
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
@@ -4115,7 +4136,7 @@ app.post('/api/servers/:id/files/move', requireAccess(permissions.MANAGE_FILES),
   res.json({ ok: true, paths: moved });
 }));
 
-app.post('/api/servers/:id/files/extract', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const destinationDir = safeServerFile(server, req.body.destination || '');
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
@@ -4146,7 +4167,7 @@ app.post('/api/servers/:id/files/extract', requireAccess(permissions.MANAGE_FILE
   res.json({ ok: true, paths: extracted, destination: destinationDir.relative });
 }));
 
-app.post('/api/servers/:id/files/archive', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.post('/api/servers/:id/files/archive', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
@@ -4164,13 +4185,13 @@ app.post('/api/servers/:id/files/archive', requireAccess(permissions.MANAGE_FILE
   });
 }));
 
-app.get('/api/servers/:id/files/download', requireAccess(permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+app.get('/api/servers/:id/files/download', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   await streamDownload(req, res, target.absolute, path.basename(target.absolute));
 }));
 
-app.patch('/api/plugins/:id', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.patch('/api/plugins/:id', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const id = Number(req.params.id);
   const plugin = db.prepare('SELECT * FROM plugins WHERE id = ?').get(id);
   if (!plugin) return res.status(404).json({ error: 'Plugin not found.' });
@@ -4181,7 +4202,7 @@ app.patch('/api/plugins/:id', requireAccess(permissions.MANAGE_FILES), (req, res
   res.json({ plugin: pluginRows(plugin.server_id).find((row) => row.id === id) });
 });
 
-app.delete('/api/plugins/:id', requireAccess(permissions.MANAGE_FILES), (req, res) => {
+app.delete('/api/plugins/:id', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
   const id = Number(req.params.id);
   const plugin = db.prepare('SELECT * FROM plugins WHERE id = ?').get(id);
   if (!plugin) return res.status(404).json({ error: 'Plugin not found.' });

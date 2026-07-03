@@ -28,6 +28,51 @@ const permissions = {
   MANAGE_ADMINS: 100,
 };
 
+const capabilities = Object.freeze({
+  SERVER_START: 'server.start',
+  SERVER_STOP: 'server.stop',
+  SERVER_RESTART: 'server.restart',
+  SERVER_KILL: 'server.kill',
+  CONSOLE_VIEW: 'console.view',
+  CONSOLE_COMMAND: 'console.command',
+  SERVER_MANAGE: 'server.manage',
+  SOFTWARE_MANAGE: 'software.manage',
+  PROPERTIES_MANAGE: 'properties.manage',
+  WHITELIST_MANAGE: 'whitelist.manage',
+  PLUGINS_MANAGE: 'plugins.manage',
+  FILES_MANAGE: 'files.manage',
+  BACKUPS_MANAGE: 'backups.manage',
+  OPTIMIZER_MANAGE: 'optimizer.manage',
+  NETWORK_MANAGE: 'network.manage',
+  ADMINS_MANAGE: 'admins.manage',
+  SECURITY_VIEW: 'security.view',
+  SETTINGS_MANAGE: 'settings.manage',
+  TIMEZONE_MANAGE: 'timezone.manage',
+});
+const capabilityValues = new Set(Object.values(capabilities));
+
+function normalizePermissionKeys(value) {
+  if (!Array.isArray(value)) return null;
+  return [...new Set(value.map((key) => String(key)).filter((key) => capabilityValues.has(key)))];
+}
+
+function permissionKeysForUser(user) {
+  if (!user || user.permissions_json == null) return null;
+  try {
+    return normalizePermissionKeys(JSON.parse(user.permissions_json)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function hasPermission(user, permission, fallbackLevel = 0) {
+  if (!user) return false;
+  if (user.role === 'owner') return true;
+  const keys = permissionKeysForUser(user);
+  if (keys !== null) return keys.includes(permission);
+  return Number(user.access_level || 0) >= Number(fallbackLevel || 0);
+}
+
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
@@ -82,11 +127,12 @@ function publicUser(user) {
     name: user.name,
     role: user.role,
     accessLevel: user.access_level,
+    permissionKeys: permissionKeysForUser(user),
     expiresAt: user.expires_at || 0,
   };
 }
 
-function createUser({ email, name, password, role = 'admin', accessLevel = 0, expiresAt = 0 }) {
+function createUser({ email, name, password, role = 'admin', accessLevel = 0, permissionKeys = null, expiresAt = 0 }) {
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail.includes('@')) throw new Error('A valid email is required.');
   if (!name || String(name).trim().length < 2) throw new Error('Name must be at least 2 characters.');
@@ -94,12 +140,21 @@ function createUser({ email, name, password, role = 'admin', accessLevel = 0, ex
 
   const cleanRole = role === 'owner' ? 'owner' : 'admin';
   const cleanAccessLevel = cleanRole === 'owner' ? 100 : Math.max(0, Math.min(100, Number(accessLevel) || 0));
+  const cleanPermissionKeys = cleanRole === 'owner' ? null : normalizePermissionKeys(permissionKeys);
   const cleanExpiresAt = cleanRole === 'owner' ? 0 : Math.max(0, Number(expiresAt) || 0);
 
   const result = db.prepare(`
-    INSERT INTO users (email, name, password_hash, role, access_level, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(normalizedEmail, String(name).trim(), hashPassword(password), cleanRole, cleanAccessLevel, cleanExpiresAt);
+    INSERT INTO users (email, name, password_hash, role, access_level, permissions_json, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    normalizedEmail,
+    String(name).trim(),
+    hashPassword(password),
+    cleanRole,
+    cleanAccessLevel,
+    cleanPermissionKeys === null ? null : JSON.stringify(cleanPermissionKeys),
+    cleanExpiresAt,
+  );
 
   return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid));
 }
@@ -167,8 +222,19 @@ function requireAccess(level) {
   };
 }
 
+function requirePermission(permission, fallbackLevel = 0) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'Login required.' });
+    if (!hasPermission(req.user, permission, fallbackLevel)) {
+      return res.status(403).json({ error: 'This account does not have that permission.' });
+    }
+    next();
+  };
+}
+
 module.exports = {
   SESSION_COOKIE,
+  capabilities,
   permissions,
   authMiddleware,
   clearSession,
@@ -176,9 +242,13 @@ module.exports = {
   createSession,
   createUser,
   hashPassword,
+  hasPermission,
+  normalizePermissionKeys,
+  permissionKeysForUser,
   publicUser,
   requireAccess,
   requireAuth,
+  requirePermission,
   setSessionCookie,
   verifyPassword,
 };

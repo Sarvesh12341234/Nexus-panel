@@ -67,6 +67,7 @@ db.exec(`
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('owner', 'admin')),
     access_level INTEGER NOT NULL DEFAULT 0 CHECK (access_level BETWEEN 0 AND 100),
+    permissions_json TEXT,
     expires_at INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -303,6 +304,7 @@ const serverColumns = {
 
 const userColumns = {
   expires_at: 'INTEGER NOT NULL DEFAULT 0',
+  permissions_json: 'TEXT',
 };
 
 const uploadColumns = {

@@ -126,6 +126,62 @@ const timeZones = [...new Set([
   'Asia/Kolkata',
   'Asia/Calcutta',
 ])].sort();
+const CAPABILITIES = Object.freeze({
+  SERVER_START: 'server.start',
+  SERVER_STOP: 'server.stop',
+  SERVER_RESTART: 'server.restart',
+  SERVER_KILL: 'server.kill',
+  CONSOLE_VIEW: 'console.view',
+  CONSOLE_COMMAND: 'console.command',
+  SERVER_MANAGE: 'server.manage',
+  SOFTWARE_MANAGE: 'software.manage',
+  PROPERTIES_MANAGE: 'properties.manage',
+  WHITELIST_MANAGE: 'whitelist.manage',
+  PLUGINS_MANAGE: 'plugins.manage',
+  FILES_MANAGE: 'files.manage',
+  BACKUPS_MANAGE: 'backups.manage',
+  OPTIMIZER_MANAGE: 'optimizer.manage',
+  NETWORK_MANAGE: 'network.manage',
+  ADMINS_MANAGE: 'admins.manage',
+  SECURITY_VIEW: 'security.view',
+  SETTINGS_MANAGE: 'settings.manage',
+  TIMEZONE_MANAGE: 'timezone.manage',
+});
+const ADMIN_PERMISSION_PRESETS = {
+  0: [],
+  5: [CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART],
+  20: [CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART, CAPABILITIES.CONSOLE_VIEW],
+  40: [CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART, CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.CONSOLE_COMMAND],
+  60: [
+    CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART, CAPABILITIES.SERVER_KILL,
+    CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.CONSOLE_COMMAND, CAPABILITIES.SERVER_MANAGE,
+    CAPABILITIES.SOFTWARE_MANAGE, CAPABILITIES.PROPERTIES_MANAGE, CAPABILITIES.WHITELIST_MANAGE,
+    CAPABILITIES.OPTIMIZER_MANAGE, CAPABILITIES.NETWORK_MANAGE,
+  ],
+  80: Object.values(CAPABILITIES).filter((key) => ![CAPABILITIES.ADMINS_MANAGE, CAPABILITIES.SECURITY_VIEW, CAPABILITIES.SETTINGS_MANAGE].includes(key)),
+  100: Object.values(CAPABILITIES),
+};
+const ADMIN_PERMISSION_LABELS = {
+  [CAPABILITIES.SERVER_START]: 'Start',
+  [CAPABILITIES.SERVER_STOP]: 'Stop',
+  [CAPABILITIES.SERVER_RESTART]: 'Restart',
+  [CAPABILITIES.SERVER_KILL]: 'Force kill',
+  [CAPABILITIES.CONSOLE_VIEW]: 'Console view',
+  [CAPABILITIES.CONSOLE_COMMAND]: 'Console commands',
+  [CAPABILITIES.SERVER_MANAGE]: 'Servers',
+  [CAPABILITIES.SOFTWARE_MANAGE]: 'Software',
+  [CAPABILITIES.PROPERTIES_MANAGE]: 'Properties',
+  [CAPABILITIES.WHITELIST_MANAGE]: 'Whitelist',
+  [CAPABILITIES.PLUGINS_MANAGE]: 'Plugins',
+  [CAPABILITIES.FILES_MANAGE]: 'Files',
+  [CAPABILITIES.BACKUPS_MANAGE]: 'Backups',
+  [CAPABILITIES.OPTIMIZER_MANAGE]: 'Optimizer',
+  [CAPABILITIES.NETWORK_MANAGE]: 'Network',
+  [CAPABILITIES.ADMINS_MANAGE]: 'Admins',
+  [CAPABILITIES.SECURITY_VIEW]: 'Security',
+  [CAPABILITIES.SETTINGS_MANAGE]: 'Settings',
+  [CAPABILITIES.TIMEZONE_MANAGE]: 'Timezone',
+};
 const themes = [
   { key: 'nexus', name: 'Plain · Nexus Mint', mode: 'plain' },
   { key: 'ember', name: 'Plain · Ember Arena', mode: 'plain' },
@@ -169,22 +225,22 @@ const viewTitles = {
   terminal: ['Owner', 'VPS Terminal'],
 };
 const viewAccess = {
-  dashboard: 'VIEW_ONLY',
-  servers: 'POWER_SERVERS',
-  console: 'VIEW_CONSOLE',
-  files: 'MANAGE_FILES',
-  templates: 'MANAGE_SERVERS',
-  software: 'MANAGE_SERVERS',
-  properties: 'MANAGE_SERVERS',
-  whitelist: 'MANAGE_SERVERS',
-  plugins: 'MANAGE_FILES',
-  backups: 'MANAGE_FILES',
-  optimizer: 'MANAGE_SERVERS',
-  network: 'MANAGE_SERVERS',
-  admins: 'MANAGE_ADMINS',
-  security: 'MANAGE_ADMINS',
-  settings: 'MANAGE_ADMINS',
-  terminal: 'MANAGE_ADMINS',
+  dashboard: { keys: [], level: 'VIEW_ONLY' },
+  servers: { keys: [CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART, CAPABILITIES.SERVER_KILL, CAPABILITIES.SERVER_MANAGE], level: 'POWER_SERVERS' },
+  console: { keys: [CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.CONSOLE_COMMAND], level: 'VIEW_CONSOLE' },
+  files: { keys: [CAPABILITIES.FILES_MANAGE], level: 'MANAGE_FILES' },
+  templates: { keys: [CAPABILITIES.SERVER_MANAGE], level: 'MANAGE_SERVERS' },
+  software: { keys: [CAPABILITIES.SOFTWARE_MANAGE], level: 'MANAGE_SERVERS' },
+  properties: { keys: [CAPABILITIES.PROPERTIES_MANAGE], level: 'MANAGE_SERVERS' },
+  whitelist: { keys: [CAPABILITIES.WHITELIST_MANAGE], level: 'MANAGE_SERVERS' },
+  plugins: { keys: [CAPABILITIES.PLUGINS_MANAGE], level: 'MANAGE_FILES' },
+  backups: { keys: [CAPABILITIES.BACKUPS_MANAGE], level: 'MANAGE_FILES' },
+  optimizer: { keys: [CAPABILITIES.OPTIMIZER_MANAGE], level: 'MANAGE_SERVERS' },
+  network: { keys: [CAPABILITIES.NETWORK_MANAGE], level: 'MANAGE_SERVERS' },
+  admins: { keys: [CAPABILITIES.ADMINS_MANAGE], level: 'MANAGE_ADMINS' },
+  security: { keys: [CAPABILITIES.SECURITY_VIEW], level: 'MANAGE_ADMINS' },
+  settings: { keys: [CAPABILITIES.SETTINGS_MANAGE, CAPABILITIES.TIMEZONE_MANAGE], level: 'MANAGE_ADMINS' },
+  terminal: { keys: [CAPABILITIES.SETTINGS_MANAGE], level: 'MANAGE_ADMINS' },
 };
 const defaultNavOrder = Object.keys(viewTitles);
 
@@ -1108,15 +1164,23 @@ function formData(form) {
   return data;
 }
 
-function can(level) {
-  return state.user && state.user.accessLevel >= level;
+function can(capability, legacyLevel = 0) {
+  if (!state.user) return false;
+  if (state.user.role === 'owner') return true;
+  if (Array.isArray(state.user.permissionKeys)) {
+    const keys = Array.isArray(capability) ? capability : [capability];
+    return keys.filter(Boolean).some((key) => state.user.permissionKeys.includes(key));
+  }
+  return state.user.accessLevel >= legacyLevel;
 }
 
 function canView(view) {
   if (!state.user || !Object.hasOwn(viewAccess, view)) return false;
   if (view === 'templates' && state.settings?.edition !== 'host') return false;
   if (view === 'terminal') return Boolean(state.settings?.terminalEnabled && state.user.role === 'owner');
-  return can(Number(state.permissions[viewAccess[view]] || 0));
+  const access = viewAccess[view];
+  if (!access.keys.length) return true;
+  return can(access.keys, Number(state.permissions[access.level] || 0));
 }
 
 function firstAllowedView() {
@@ -1488,8 +1552,8 @@ function renderServerRows() {
     elements.serverRowsGrid.innerHTML = '<p class="empty-state">No servers yet. Create one from Dashboard or Templates.</p>';
     return;
   }
-  const canOpenConsole = can(state.permissions.VIEW_CONSOLE);
-  const canManageServers = can(state.permissions.MANAGE_SERVERS);
+  const canOpenConsole = can(CAPABILITIES.CONSOLE_VIEW, state.permissions.VIEW_CONSOLE);
+  const canManageServers = can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
   elements.serverRowsGrid.innerHTML = state.servers.map((server) => `
     <article class="server-row-card ${server.id === state.activeServerId ? 'is-selected' : ''}" data-server-id="${server.id}" data-live-server-id="${server.id}">
       <div>
@@ -1507,15 +1571,17 @@ function renderServerRows() {
 }
 
 function renderServers() {
-  elements.serverForm.hidden = !can(state.permissions.MANAGE_SERVERS);
+  elements.serverForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
   if (!state.servers.length) {
     elements.serverGrid.innerHTML = '<p class="empty-state">No servers yet. Create one above, then install software from the Software tab.</p>';
     return;
   }
 
-  const canPower = can(state.permissions.POWER_SERVERS);
-  const canOpenConsole = can(state.permissions.VIEW_CONSOLE);
-  const canManageServers = can(state.permissions.MANAGE_SERVERS);
+  const canStart = can(CAPABILITIES.SERVER_START, state.permissions.POWER_SERVERS);
+  const canStop = can(CAPABILITIES.SERVER_STOP, state.permissions.POWER_SERVERS);
+  const canRestart = can(CAPABILITIES.SERVER_RESTART, state.permissions.POWER_SERVERS);
+  const canOpenConsole = can(CAPABILITIES.CONSOLE_VIEW, state.permissions.VIEW_CONSOLE);
+  const canManageServers = can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
   elements.serverGrid.innerHTML = state.servers.map((server) => {
     const isOnline = server.status === 'online';
     const installed = server.installStatus === 'installed';
@@ -1533,9 +1599,9 @@ function renderServers() {
         <div class="server-actions">
           <button type="button" data-action="select-server" ${canManageServers ? '' : 'hidden'}>Manage</button>
           <button class="secondary" type="button" data-action="open-console" ${canOpenConsole ? '' : 'hidden'}>Console</button>
-          <button class="secondary" type="button" data-action="start-server" ${canPower ? '' : 'hidden'} ${isOnline || !installed ? 'disabled' : ''}>Start</button>
-          <button class="secondary" type="button" data-action="stop-server" ${canPower ? '' : 'hidden'} ${isOnline ? '' : 'disabled'}>Stop</button>
-          <button class="secondary" type="button" data-action="restart-server" ${canPower ? '' : 'hidden'} ${isOnline ? '' : 'disabled'}>Restart</button>
+          <button class="secondary" type="button" data-action="start-server" ${canStart ? '' : 'hidden'} ${isOnline || !installed ? 'disabled' : ''}>Start</button>
+          <button class="secondary" type="button" data-action="stop-server" ${canStop ? '' : 'hidden'} ${isOnline ? '' : 'disabled'}>Stop</button>
+          <button class="secondary" type="button" data-action="restart-server" ${canRestart ? '' : 'hidden'} ${isOnline ? '' : 'disabled'}>Restart</button>
           <button class="danger" type="button" data-action="delete-server" ${canManageServers ? '' : 'hidden'} ${isOnline ? 'disabled' : ''}>Delete</button>
         </div>
       </article>
@@ -1685,7 +1751,7 @@ function animateCommandButton(button) {
 }
 
 function renderPlugins() {
-  const canManagePlugins = can(state.permissions.MANAGE_FILES);
+  const canManagePlugins = can(CAPABILITIES.PLUGINS_MANAGE, state.permissions.MANAGE_FILES);
   if (elements.pluginForm) elements.pluginForm.hidden = true;
   elements.pluginAccessNote.hidden = canManagePlugins;
   if (elements.pluginServerSelect) elements.pluginServerSelect.innerHTML = state.servers.map((server) => `<option value="${server.id}">${escapeHtml(server.name)} (${escapeHtml(server.softwareName)})</option>`).join('') || '<option value="">Create a server first</option>';
@@ -1740,8 +1806,8 @@ async function renderConsole() {
   const data = await api(`/api/servers/${server.id}/console`).catch((error) => ({ lines: [], error: error.message }));
   if (renderToken !== consoleRenderToken || state.activeServerId !== serverId) return;
   fillServerConfigForm(server);
-  elements.serverConfigForm.hidden = !can(state.permissions.MANAGE_SERVERS);
-  elements.commandForm.hidden = !can(state.permissions.SEND_COMMANDS);
+  elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
+  elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
   if (data.status && server.status !== data.status) {
     server.status = data.status;
     renderStats();
@@ -1757,7 +1823,7 @@ async function renderConsole() {
         : [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] No panel logs have been recorded yet. Press Start to begin.'];
   const consoleSignature = `${lines.length}:${lines.at(-1) || ''}`;
   if (elements.consoleBox.dataset.rendered !== consoleSignature) {
-    const consoleHtml = lines.map((line) => `<div>${escapeHtml(line)}</div>`).join('');
+    const consoleHtml = lines.map((line) => `<div>${escapeHtml(formatConsoleLine(line))}</div>`).join('');
     elements.consoleBox.innerHTML = consoleHtml;
     elements.consoleBox.dataset.rendered = consoleSignature;
   }
@@ -1785,11 +1851,11 @@ function syncConsoleActionButtons(server, status) {
     const button = surface.querySelector(`[data-action="${action}"]`);
     if (button) button.hidden = !visible;
   };
-  show('start-server', can(state.permissions.POWER_SERVERS));
-  show('stop-server', can(state.permissions.POWER_SERVERS));
-  show('restart-server', can(state.permissions.POWER_SERVERS));
-  show('kill-server', can(state.permissions.POWER_SERVERS));
-  show('fix-server', can(state.permissions.MANAGE_SERVERS));
+  show('start-server', can(CAPABILITIES.SERVER_START, state.permissions.POWER_SERVERS));
+  show('stop-server', can(CAPABILITIES.SERVER_STOP, state.permissions.POWER_SERVERS));
+  show('restart-server', can(CAPABILITIES.SERVER_RESTART, state.permissions.POWER_SERVERS));
+  show('kill-server', can(CAPABILITIES.SERVER_KILL, state.permissions.POWER_SERVERS));
+  show('fix-server', can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS));
   set('start-server', isOnline || !installed);
   set('stop-server', !isOnline);
   set('restart-server', !isOnline);
@@ -1904,7 +1970,7 @@ async function renderFiles() {
         <span class="file-icon">${entry.type === 'directory' ? '📁' : '📄'}</span>
         <span class="file-main"><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === 'directory' ? 'Folder' : formatBytes(entry.size)}</small></span>
       </button>
-      <div class="file-meta"><code>${escapeHtml(entry.path)}</code><time>${entry.modifiedAt ? escapeHtml(new Date(entry.modifiedAt).toLocaleString()) : ''}</time></div>
+      <div class="file-meta"><code>${escapeHtml(entry.path)}</code><time>${entry.modifiedAt ? escapeHtml(formatPanelDate(entry.modifiedAt)) : ''}</time></div>
     </div>
   `).join('') || '<p class="empty-state">Folder is empty. Create a file or paste config here.</p>';
 }
@@ -1914,6 +1980,7 @@ function renderSettings() {
   const settings = state.settings || {};
   const update = settings.updateStatus || {};
   const isHost = settings.edition === 'host';
+  const canManageSettings = can(CAPABILITIES.SETTINGS_MANAGE, state.permissions.MANAGE_ADMINS);
   const selectedZone = settings.timeZone || 'UTC';
   const zoneOptions = timeZones.map((zone) => `<option value="${escapeHtml(zone)}" ${zone === selectedZone ? 'selected' : ''}>${escapeHtml(zone)}</option>`).join('');
   const visibleNavOrder = [...document.querySelectorAll('.nav-list [data-view]')].map((button) => ({
@@ -1922,8 +1989,9 @@ function renderSettings() {
   }));
 
   elements.settingsPanel.innerHTML = `
-    <div class="section-head"><div><p class="eyebrow">Settings</p><h2>Panel engine</h2></div><button type="button" data-action="run-panel-update">Update from GitHub</button></div>
+    <div class="section-head"><div><p class="eyebrow">Settings</p><h2>${canManageSettings ? 'Panel engine' : 'Account preferences'}</h2></div>${canManageSettings ? '<button type="button" data-action="run-panel-update">Update from GitHub</button>' : ''}</div>
     <form class="settings-form" id="settingsForm">
+      ${canManageSettings ? `
       <label class="switch"><input name="terminalEnabled" type="checkbox" ${settings.terminalEnabled ? 'checked' : ''}><span></span>Owner terminal row</label>
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.2.0')}"></label>
@@ -1934,7 +2002,7 @@ function renderSettings() {
       <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
       <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
       ${isHost ? `<label class="switch"><input name="hostMaintenanceMode" type="checkbox" ${settings.hostMaintenanceMode ? 'checked' : ''}><span></span>Host maintenance mode</label>
-      <label>Servers per hosted account <input name="hostServerQuota" type="number" min="1" max="500" value="${Number(settings.hostServerQuota || 10)}"></label>` : ''}
+      <label>Servers per hosted account <input name="hostServerQuota" type="number" min="1" max="500" value="${Number(settings.hostServerQuota || 10)}"></label>` : ''}` : ''}
 
       <!-- Timezone with Save Button -->
       <div class="settings-group">
@@ -1944,8 +2012,9 @@ function renderSettings() {
         <button type="button" class="secondary" data-action="save-timezone" style="margin-top: 8px;">Save Timezone</button>
         <span id="timezoneStatus" style="margin-left: 10px;"></span>
       </div>
-      <button class="save-wide" type="submit">Save Settings</button>
+      ${canManageSettings ? '<button class="save-wide" type="submit">Save Panel Settings</button>' : ''}
     </form>
+    ${canManageSettings ? `
     <div class="upload-panel">
       <span id="panelUpdateMessage">${escapeHtml(update.message || 'Updater idle')}</span>
       <div class="install-track"><span id="panelUpdateProgress" style="width:${Number(update.progress || 0)}%"></span></div>
@@ -1960,7 +2029,7 @@ function renderSettings() {
     ${isHost ? `<details class="nexu-details">
       <summary>Example Template JSON</summary>
       <pre>${escapeHtml(JSON.stringify(settings.nexuExample || {}, null, 2))}</pre>
-    </details>` : ''}
+    </details>` : ''}` : ''}
     <details class="nexu-details alpha-lab" open>
       <summary>Alpha UI studio</summary>
       <p class="help-text">Boxes and Buttons choose what to edit. Free mode gives bounded X/Y placement, 1px arrow-key nudging, snap control, and independent desktop/mobile coordinates; Flow mode reorders the responsive layout.</p>
@@ -2237,7 +2306,7 @@ function renderBackups() {
 }
 
 async function renderOptimizer() {
-  if (!can(state.permissions.MANAGE_SERVERS)) return;
+  if (!can(CAPABILITIES.OPTIMIZER_MANAGE, state.permissions.MANAGE_SERVERS)) return;
 
   try {
     const optimizer = state.optimizer || await api('/api/optimizer/status').catch(() => ({}));
@@ -2283,24 +2352,33 @@ async function renderNetwork(speed = null) {
 }
 
 function renderAdmins() {
-  elements.adminPanel.hidden = !can(state.permissions.MANAGE_ADMINS);
-  if (!can(state.permissions.MANAGE_ADMINS)) return;
+  elements.adminPanel.hidden = !can(CAPABILITIES.ADMINS_MANAGE, state.permissions.MANAGE_ADMINS);
+  if (!can(CAPABILITIES.ADMINS_MANAGE, state.permissions.MANAGE_ADMINS)) return;
 
   if (!state.users || state.users.length === 0) {
     elements.userList.innerHTML = '<p class="empty-state">No admin users yet.</p>';
     return;
   }
 
-  elements.userList.innerHTML = '<p class="muted access-help">Access guide: 0 view, 5 start/stop/restart/kill, 20 console view, 40 send commands, 60 manage servers, 80 files/config/backups, 100 owner/admin controls.</p>' + state.users.map((user) => `
+  elements.userList.innerHTML = '<p class="muted access-help">Each checked permission is independent. Existing legacy accounts keep their numeric access until exact permissions are saved.</p>' + state.users.map((user) => {
+    const selected = user.role === 'owner'
+      ? Object.values(CAPABILITIES)
+      : (Array.isArray(user.permissionKeys) ? user.permissionKeys : (ADMIN_PERMISSION_PRESETS[user.accessLevel] || []));
+    const permissionEditor = Object.entries(ADMIN_PERMISSION_LABELS).map(([key, label]) => `
+      <label><input type="checkbox" data-user-permission value="${escapeHtml(key)}" ${selected.includes(key) ? 'checked' : ''} ${user.role === 'owner' ? 'disabled' : ''}> ${escapeHtml(label)}</label>
+    `).join('');
+    return `
     <div class="user-row" data-user-id="${user.id}">
-      <div><strong>${escapeHtml(user.name)}</strong><div class="muted">${escapeHtml(user.email)} | ${user.role} | ${accessName(user.accessLevel)} | ${user.expiresAt ? `expires ${escapeHtml(new Date(user.expiresAt).toLocaleString())}` : 'permanent'}</div></div>
-      <div class="user-actions"><input type="number" min="0" max="100" step="5" value="${user.accessLevel}" ${user.role === 'owner' ? 'disabled' : ''}><button class="secondary" type="button" data-action="update-user" ${user.role === 'owner' ? 'disabled' : ''}>Save</button><button class="danger" type="button" data-action="delete-user" ${user.role === 'owner' ? 'disabled' : ''}>Delete</button></div>
+      <div><strong>${escapeHtml(user.name)}</strong><div class="muted">${escapeHtml(user.email)} | ${user.role} | ${Array.isArray(user.permissionKeys) ? `${user.permissionKeys.length} exact permissions` : accessName(user.accessLevel)} | ${user.expiresAt ? `expires ${escapeHtml(formatPanelDate(user.expiresAt))}` : 'permanent'}</div></div>
+      <details class="user-permission-editor"><summary>Edit exact permissions</summary><div class="permission-grid">${permissionEditor}</div></details>
+      <div class="user-actions"><input type="number" data-user-access-level min="0" max="100" step="5" value="${user.accessLevel}" ${user.role === 'owner' ? 'disabled' : ''}><button class="secondary" type="button" data-action="update-user" ${user.role === 'owner' ? 'disabled' : ''}>Save</button><button class="danger" type="button" data-action="delete-user" ${user.role === 'owner' ? 'disabled' : ''}>Delete</button></div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 async function renderSecurity(forceHealth = false) {
-  if (!can(state.permissions.MANAGE_ADMINS)) {
+  if (!can(CAPABILITIES.SECURITY_VIEW, state.permissions.MANAGE_ADMINS)) {
     if (elements.auditPanel) elements.auditPanel.innerHTML = '<p class="empty-state">Security audit needs owner/admin access.</p>';
     return;
   }
@@ -2325,7 +2403,7 @@ async function renderSecurity(forceHealth = false) {
           <button type="button" data-action="run-health-check">Run check now</button>
         </div>
       </div>
-      <p class="muted">Last checked: ${escapeHtml(state.health?.checkedAtText ? new Date(state.health.checkedAtText).toLocaleString() : 'never')}</p>
+      <p class="muted">Last checked: ${escapeHtml(state.health?.checkedAtText ? formatPanelDate(state.health.checkedAtText) : 'never')}</p>
       <div class="health-grid">
         ${checks.map((check) => `<article class="${check.ok ? 'is-ok' : 'is-bad'}"><strong>${escapeHtml(check.name)}</strong><span>${escapeHtml(check.message)}</span></article>`).join('') || '<p class="empty-state">Run a health check to verify panel folders, database, software, and Java.</p>'}
       </div>
@@ -2354,7 +2432,7 @@ async function renderSecurity(forceHealth = false) {
           <article class="audit-row">
             <div><strong>${escapeHtml(event.email)}</strong><span>${escapeHtml(event.browser)} · ${escapeHtml(event.device)}</span></div>
             <code>${escapeHtml(event.ip || 'unknown IP')}</code>
-            <time>${escapeHtml(new Date(event.createdAt).toLocaleString())}</time>
+            <time>${escapeHtml(formatPanelDate(event.createdAt))}</time>
           </article>
         `).join('') || '<p class="empty-state">No login events recorded yet.</p>'}
       </div>
@@ -2536,6 +2614,11 @@ function setView(view) {
   }
   renderView();
   renderActiveView().catch((error) => showToast(error.message));
+  window.requestAnimationFrame(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+    document.querySelector('.workspace')?.scrollTo?.({ top: 0, left: 0, behavior: 'auto' });
+  });
 }
 
 function accessName(level) {
@@ -2582,23 +2665,39 @@ function formatBytes(bytes) {
   return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
+function parsePanelTimestamp(timestamp) {
+  if (typeof timestamp === 'number') return new Date(timestamp);
+  let value = String(timestamp || '').trim();
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)) {
+    value = `${value.replace(' ', 'T')}Z`;
+  }
+  return new Date(value);
+}
+
+function formatPanelDate(timestamp, options = {}) {
+  const date = parsePanelTimestamp(timestamp);
+  if (Number.isNaN(date.getTime())) return 'Invalid Date';
+  return date.toLocaleString('en-US', {
+    timeZone: state.settings?.timeZone || 'UTC',
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: options.seconds === false ? undefined : '2-digit',
+    hour12: true,
+  });
+}
+
+function formatConsoleLine(line) {
+  return String(line).replace(/^\[([0-9]{4}-\d{2}-\d{2}T[^\]]+Z)\]\s*/, (_match, timestamp) => (
+    `[${formatPanelDate(timestamp)}] `
+  ));
+}
+
 // ===== BACKUP DATE FORMATTER (12-HOUR FORMAT) =====
 function formatBackupDate(timestamp) {
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return 'Invalid Date';
-
-  const timezone = state.settings?.timeZone || 'UTC';
-
-  // Format: Dec 25, 2026 | 10:30 PM
-  return date.toLocaleString('en-US', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: 'short',      // Dec
-    day: '2-digit',      // 25
-    hour: '2-digit',     // 10
-    minute: '2-digit',   // 30
-    hour12: true,        // AM/PM
-  }).replace(',', ' |'); // Replace comma with separator
+  return formatPanelDate(timestamp, { seconds: false });
 }
 
 // ===== FORMAT BACKUP FILENAME FOR DISPLAY =====
@@ -3313,18 +3412,25 @@ window.addEventListener('resize', () => {
   });
 });
 
-elements.adminForm.addEventListener('input', () => {
-  if (elements.accessOutput) elements.accessOutput.value = elements.adminForm.accessLevel.value;
-});
+function applyAdminPermissionPreset(level = elements.adminForm.accessLevel.value) {
+  const selected = new Set(ADMIN_PERMISSION_PRESETS[Number(level)] || []);
+  elements.adminForm.querySelectorAll('[name="permissionKey"]').forEach((checkbox) => {
+    checkbox.checked = selected.has(checkbox.value);
+  });
+}
+
+elements.adminForm.accessLevel.addEventListener('change', () => applyAdminPermissionPreset());
 
 elements.adminForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const payload = formData(elements.adminForm);
   payload.accessLevel = Number(payload.accessLevel);
+  payload.permissionKeys = [...elements.adminForm.querySelectorAll('[name="permissionKey"]:checked')]
+    .map((checkbox) => checkbox.value);
   try {
     await api('/api/users', { method: 'POST', body: JSON.stringify(payload) });
     elements.adminForm.reset();
-    if (elements.accessOutput) elements.accessOutput.value = '5';
+    applyAdminPermissionPreset(5);
     showToast('Admin created.');
     await refresh();
   } catch (error) {
@@ -4062,7 +4168,14 @@ document.addEventListener('click', async (event) => {
 
     const row = event.target.closest('[data-user-id]');
     if (row && action === 'update-user') {
-      await api(`/api/users/${row.dataset.userId}`, { method: 'PATCH', body: JSON.stringify({ accessLevel: Number(row.querySelector('input').value) }) });
+      const permissionKeys = [...row.querySelectorAll('[data-user-permission]:checked')].map((input) => input.value);
+      await api(`/api/users/${row.dataset.userId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          accessLevel: Number(row.querySelector('[data-user-access-level]').value),
+          permissionKeys,
+        }),
+      });
       showToast('Admin access updated.');
       await refresh();
       return;
@@ -4079,6 +4192,7 @@ document.addEventListener('click', async (event) => {
 
 initThemes();
 applyUiPreferences();
+applyAdminPermissionPreset(5);
 enableDeveloperModeGuard();
 
 refresh().then(startRefreshLoop).catch((error) => {

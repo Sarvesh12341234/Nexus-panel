@@ -268,7 +268,7 @@
               <select name="adminDurationMode"><option value="permanent">Permanent</option><option value="temporary">Temporary</option></select>
               <input name="adminDurationValue" type="number" min="1" max="525600" value="60">
               <select name="adminDurationUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select>
-              <label>Access
+              <label>Permission preset
                 <select name="accessLevel">
                   <option value="0">View only</option>
                   <option value="5" selected>Start / stop servers</option>
@@ -279,6 +279,30 @@
                   <option value="100">Full administrator</option>
                 </select>
               </label>
+              <fieldset class="admin-permissions">
+                <legend>Exact permissions</legend>
+                <div class="permission-grid">
+                  <label><input type="checkbox" name="permissionKey" value="server.start"> Start server</label>
+                  <label><input type="checkbox" name="permissionKey" value="server.stop"> Stop server</label>
+                  <label><input type="checkbox" name="permissionKey" value="server.restart"> Restart server</label>
+                  <label><input type="checkbox" name="permissionKey" value="server.kill"> Force kill</label>
+                  <label><input type="checkbox" name="permissionKey" value="console.view"> View console</label>
+                  <label><input type="checkbox" name="permissionKey" value="console.command"> Send commands</label>
+                  <label><input type="checkbox" name="permissionKey" value="server.manage"> Manage servers</label>
+                  <label><input type="checkbox" name="permissionKey" value="software.manage"> Manage software</label>
+                  <label><input type="checkbox" name="permissionKey" value="properties.manage"> Server properties</label>
+                  <label><input type="checkbox" name="permissionKey" value="whitelist.manage"> Whitelist</label>
+                  <label><input type="checkbox" name="permissionKey" value="plugins.manage"> Plugins and packs</label>
+                  <label><input type="checkbox" name="permissionKey" value="files.manage"> File manager</label>
+                  <label><input type="checkbox" name="permissionKey" value="backups.manage"> Backups</label>
+                  <label><input type="checkbox" name="permissionKey" value="optimizer.manage"> Optimizer</label>
+                  <label><input type="checkbox" name="permissionKey" value="network.manage"> Network</label>
+                  <label><input type="checkbox" name="permissionKey" value="admins.manage"> Admin accounts</label>
+                  <label><input type="checkbox" name="permissionKey" value="security.view"> Security and audit</label>
+                  <label><input type="checkbox" name="permissionKey" value="settings.manage"> Panel settings</label>
+                  <label><input type="checkbox" name="permissionKey" value="timezone.manage"> Timezone</label>
+                </div>
+              </fieldset>
               <button type="submit">Create admin</button>
             </form>
             <div class="user-list" id="userList"></div>

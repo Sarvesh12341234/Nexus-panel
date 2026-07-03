@@ -58,7 +58,7 @@ setInterval(flushLogWrites, 750).unref();
 
 function appendLog(serverId, line) {
   const rows = logs.has(serverId) ? logs.get(serverId) : persistedLogLines(serverId);
-  const rendered = `[${new Date().toLocaleTimeString()}] ${line}`;
+  const rendered = `[${new Date().toISOString()}] ${line}`;
   rows.push(rendered);
   while (rows.length > MAX_LOG_LINES) rows.shift();
   logs.set(serverId, rows);

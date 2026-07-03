@@ -1,9 +1,15 @@
 # Changelog
 
-## 1.2.0 Reliability Revision - 2026-06-29
+## 1.2.0 Reliability Revision - 2026-07-03
 
 ### Fixed
 
+- Live server/upload percentages update existing nodes, preserving Alpha Editor positions and selected software versions.
+- RAM/core edits persist in SQLite plus atomic per-server recovery manifests; folder recovery no longer resets them to `1024 MB / 1 core`.
+- Deleted-server tombstones prevent delayed restarts or leftover folders from resurrecting removed servers.
+- Security, admin expiry, file, backup, health, and console timestamps use the signed-in account's IANA timezone.
+- Opening any panel section resets the main page scroll position to the top.
+- Repair playbooks are trusted only after 60 seconds of stable runtime.
 - Runtime no longer trusts a stale stored server path; it discovers the strongest ID-matched folder and synchronizes `server_path`.
 - Missing, malformed, duplicated, or invalid `server.properties` values are backed up and repaired before launch.
 - Local sendmail password resets now include styled multipart HTML instead of plain text only.
@@ -30,7 +36,8 @@
 
 ### Added
 
-- Repair brain catalog with 748 diagnostic signals across 47 crash and VPS cause families.
+- Granular admin permissions for Start, Stop, Restart, Kill, console view/commands, servers, software, properties, whitelist, plugins, files, backups, optimizer, network, admins, security, settings, and timezone.
+- Repair brain catalog with 1,116 diagnostic signals across 70 crash and VPS cause families.
 - Terminal fix learning with real command exit markers, crash/server association, online stability validation, redacted evidence, and restricted idempotent replay.
 - Proactive safe Repair & Diagnose execution before automatic crash restart when no learned playbook exists.
 - SQLite quick/foreign-key checks, eight rotating verified snapshots, manual snapshot controls, and startup recovery.
