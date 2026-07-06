@@ -13,9 +13,11 @@ const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
 const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
 const { AdaptiveEngine } = require('./adaptive_engine');
+const { RepairAgent } = require('./repair_agent');
+const { RepairWebResearch } = require('./repair_web');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
-const { assertInside, backupsRoot, displayPath, ensureServerDirs, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
+const { assertInside, backupsRoot, displayPath, ensureServerDirs, findServerRoot, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
 const { clearSoftwareVersionCache, defaultSoftware, findSoftware, pluginKindForFile, resolveDownload, softwareCatalog, softwareVersions } = require('./software');
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { profileForServer, writeProfile } = require('./nexus_mark');
@@ -56,6 +58,8 @@ const crashHistory = new Map();
 const crashRestartTimers = new Map();
 const autoBackupInFlight = new Set();
 const adaptiveEngine = new AdaptiveEngine();
+const repairAgent = new RepairAgent(db);
+const repairWeb = new RepairWebResearch(db);
 let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
@@ -173,6 +177,7 @@ function panelSettingsPayload(user = null) {
     updateStatus,
     hostApiTokenPreview: edition === 'host' && user?.role === 'owner' ? `${hostToken.slice(0, 8)}....${hostToken.slice(-6)}` : '',
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
+    repairWebEnabled: settingValue('repair_web_enabled', '1') === '1',
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
     maxCpuCores: hostCpuCount(),
     platform: process.platform,
@@ -412,6 +417,32 @@ function validateStableRepairPlaybooks() {
     `).run(Date.now(), candidate.signature);
     appendLog(candidate.learned_from_server_id, `[NexusPanel] Repair learner validated playbook ${candidate.signature.slice(0, 12)} after 60 seconds of stable runtime.`);
     validated.push(candidate.signature);
+  }
+  return validated;
+}
+
+function validateStableAgentEpisodes() {
+  const candidates = db.prepare(`
+    SELECT episode.id, episode.server_id, episode.diagnoses_json
+    FROM repair_agent_episodes episode
+    WHERE episode.status = 'planned' AND episode.created_at <= ?
+    ORDER BY episode.created_at ASC
+    LIMIT 20
+  `).all(Date.now() - 60 * 1000);
+  const validated = [];
+  for (const candidate of candidates) {
+    if (runtimeStatus(candidate.server_id) !== 'online') continue;
+    const diagnoses = parseJsonObject(candidate.diagnoses_json);
+    let labels = Array.isArray(diagnoses)
+      ? diagnoses
+        .filter((item) => item?.source === 'knowledge+neural' || Number(item?.confidence || 0) >= 0.7)
+        .slice(0, 4)
+        .map((item) => item.id)
+      : [];
+    if (!labels.length && Array.isArray(diagnoses) && diagnoses[0]?.id) labels = [diagnoses[0].id];
+    const learned = repairAgent.reinforce(candidate.id, labels);
+    appendLog(candidate.server_id, `[NexusPanel] Repair agent validated episode ${candidate.id} after stable runtime and updated ${learned.updated} neural weight(s).`);
+    validated.push(candidate.id);
   }
   return validated;
 }
@@ -1699,11 +1730,39 @@ function repairBrainPayload() {
     replayCount: row.replay_count,
     observedAt: row.observed_at,
   }));
+  const agentEpisodes = db.prepare(`
+    SELECT episode.id, episode.server_id, episode.status, episode.confidence,
+      episode.reward, episode.feedback_source, episode.created_at, episode.validated_at,
+      episode.diagnoses_json, server.name AS server_name
+    FROM repair_agent_episodes episode
+    JOIN servers server ON server.id = episode.server_id
+    ORDER BY episode.created_at DESC
+    LIMIT 8
+  `).all().map((row) => {
+    const diagnoses = parseJsonObject(row.diagnoses_json);
+    return {
+      id: row.id,
+      serverId: row.server_id,
+      serverName: row.server_name,
+      status: row.status,
+      confidence: row.confidence,
+      reward: row.reward,
+      feedbackSource: row.feedback_source,
+      createdAt: row.created_at,
+      validatedAt: row.validated_at,
+      diagnoses: Array.isArray(diagnoses) ? diagnoses.slice(0, 3) : [],
+    };
+  });
   return {
     knowledge: knowledgeStatus(),
     playbooks,
     commands,
     recent,
+    agent: {
+      ...repairAgent.status(),
+      web: repairWeb.status(),
+      recentEpisodes: agentEpisodes,
+    },
     database: databaseHealthStatus,
   };
 }
@@ -1930,27 +1989,115 @@ async function repairMissingExecutable(server, software) {
   return { repaired: true, path: targetPath, message: `Repaired executable at ${displayPath(targetPath)}` };
 }
 
-async function runServerRepair(server, software) {
+function publicAgentAnalysis(analysis) {
+  const { featureVector: _featureVector, ...payload } = analysis;
+  return payload;
+}
+
+async function analyzeServerWithAgent(server, software, diagnostics, { allowWeb = false } = {}) {
+  const root = findServerRoot({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  const logs = consoleLogs(server.id);
+  const analysis = repairAgent.analyze({
+    server,
+    software,
+    logs,
+    root,
+    runtime: runtimeStatus(server.id),
+    deterministic: diagnostics,
+  });
+  if (allowWeb && settingValue('repair_web_enabled', '1') === '1') {
+    const query = repairWeb.queryFromLogs(logs, server, software);
+    const research = await repairWeb.research(query).catch((error) => ({
+      query,
+      results: [],
+      cached: false,
+      errors: [error.message],
+    }));
+    const researchText = research.results.map((item) => `${item.title}\n${item.excerpt}`).join('\n');
+    analysis.webResearch = {
+      ...research,
+      matchedDiagnoses: diagnoseRuntime(researchText, { limit: 6 }),
+      trust: 'untrusted-reference-only',
+      executable: false,
+    };
+  } else {
+    analysis.webResearch = {
+      query: '',
+      results: [],
+      cached: false,
+      errors: [],
+      matchedDiagnoses: [],
+      trust: 'disabled',
+      executable: false,
+    };
+  }
+  return analysis;
+}
+
+async function applyAgentOptimizations(server, root, analysis) {
+  if (runtimeStatus(server.id) === 'online') {
+    return { applied: [], skipped: ['Server is online; optimization changes require an offline server.'] };
+  }
+  if (!['java', 'bedrock'].includes(server.type)) return { applied: [], skipped: [] };
+  const changes = {};
+  for (const item of analysis.optimizations || []) {
+    if (!['view-distance', 'simulation-distance', 'tick-distance'].includes(item.key)) continue;
+    const current = Number(item.current);
+    const suggested = Number(item.suggested);
+    if (!Number.isFinite(current) || !Number.isFinite(suggested) || suggested >= current) continue;
+    changes[item.key] = String(suggested);
+  }
+  if (!Object.keys(changes).length) return { applied: [], skipped: [] };
+  const filePath = propertiesPath(server);
+  const existing = await fs.promises.readFile(filePath, 'utf8').catch(() => '');
+  if (existing) {
+    const recoveryDir = assertInside(root, path.join(root, 'runtime', 'agent-optimization'));
+    await fs.promises.mkdir(recoveryDir, { recursive: true });
+    await fs.promises.writeFile(path.join(recoveryDir, `server.properties.${Date.now()}.bak`), existing, 'utf8');
+  }
+  await writeProperties(server, changes);
+  const applied = Object.entries(changes).map(([key, value]) => `${key}=${value}`);
+  appendLog(server.id, `[NexusPanel] Repair agent applied bounded optimization: ${applied.join(', ')}`);
+  return { applied, skipped: [] };
+}
+
+async function runServerRepair(server, software, { applyOptimizations = false } = {}) {
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const actions = [];
   const warnings = [];
   const checks = [];
   const diagnostics = diagnoseRuntime(consoleLogs(server.id));
   const knowledge = knowledgeStatus();
+  const agentAnalysis = await analyzeServerWithAgent(server, software, diagnostics, {
+    allowWeb: applyOptimizations,
+  });
+  const crash = db.prepare('SELECT signature FROM repair_crash_state WHERE server_id = ?').get(server.id);
+  const episodeId = repairAgent.recordEpisode({
+    serverId: server.id,
+    signature: crash?.signature || crashSignature(server, software, null, null).signature,
+    analysis: agentAnalysis,
+  });
   checks.push({
-    name: 'Crash intelligence',
+    name: 'Agent intelligence',
     ok: true,
     detail: diagnostics.length
-      ? `${diagnostics.length} likely cause(s) matched from ${knowledge.diagnosticSignals} signals.`
-      : `No known crash signature matched across ${knowledge.diagnosticSignals} signals.`,
+      ? `${diagnostics.length} direct cause(s); neural ranker produced ${agentAnalysis.diagnoses.length} candidate(s).`
+      : `Neural ranker analyzed ${agentAnalysis.featureCount} features across ${knowledge.diagnosticSignals} signals.`,
   });
   diagnostics.forEach((diagnostic) => {
     warnings.push(`${diagnostic.severity.toUpperCase()} ${diagnostic.summary} ${diagnostic.techniques[0]}`);
   });
 
-  const repair = await repairMissingExecutable(server, software);
-  actions.push(repair.message);
-  checks.push({ name: 'Executable', ok: true, detail: displayPath(repair.path) });
+  let repair;
+  try {
+    repair = await repairMissingExecutable(server, software);
+    actions.push(repair.message);
+    checks.push({ name: 'Executable', ok: true, detail: displayPath(repair.path) });
+  } catch (error) {
+    repair = { repaired: false, path: server.executable_path || '', message: error.message };
+    checks.push({ name: 'Executable', ok: false, detail: error.message });
+    warnings.push(`Executable repair could not finish: ${error.message}`);
+  }
   if (['java', 'bedrock'].includes(server.type)) {
     const properties = await repairPropertiesFile(server);
     checks.push({
@@ -2011,6 +2158,14 @@ async function runServerRepair(server, software) {
     }
   }
 
+  const optimization = applyOptimizations
+    ? await applyAgentOptimizations(server, root, agentAnalysis)
+    : { applied: [], skipped: ['Previewed only; optimization changes were not requested.'] };
+  if (optimization.applied.length) {
+    actions.push(`Applied ${optimization.applied.length} bounded game setting optimization(s): ${optimization.applied.join(', ')}.`);
+  }
+  optimization.skipped.forEach((item) => warnings.push(item));
+
   return {
     repair,
     checks,
@@ -2018,6 +2173,7 @@ async function runServerRepair(server, software) {
     warnings,
     diagnostics,
     knowledge,
+    agent: { episodeId, ...publicAgentAnalysis(agentAnalysis), optimization },
     summary: `${checks.filter((check) => check.ok).length}/${checks.length} checks passed, ${actions.length} repair action(s), ${warnings.length} warning(s).`,
   };
 }
@@ -2473,23 +2629,42 @@ app.get('/api/repair/bundle', requirePermission(capabilities.SECURITY_VIEW, perm
   });
 });
 
+app.get('/api/repair/agent/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ agent: repairBrainPayload().agent });
+});
+
+app.post('/api/repair/agent/episodes/:episodeId/feedback', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can train the repair agent.' });
+  const reward = String(req.body.feedback || '').toLowerCase() === 'helpful' ? 1
+    : String(req.body.feedback || '').toLowerCase() === 'wrong' ? -1
+      : 0;
+  if (!reward) return res.status(400).json({ error: 'Feedback must be helpful or wrong.' });
+  const episode = db.prepare('SELECT id FROM repair_agent_episodes WHERE id = ?').get(Number(req.params.episodeId));
+  if (!episode) return res.status(404).json({ error: 'Repair episode not found.' });
+  const learning = repairAgent.feedback(episode.id, reward, `owner-${reward > 0 ? 'helpful' : 'wrong'}`);
+  res.json({ ok: true, learning, agent: repairAgent.status() });
+});
+
 app.post('/api/database/snapshot', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   const snapshot = backupDatabase({ force: true });
   databaseHealthStatus = { ...snapshot.verification, checkedAt: Date.now(), snapshotAt: Date.now() };
   res.json({ ok: true, created: snapshot.created, file: path.basename(snapshot.path), database: databaseHealthStatus });
 });
 
-app.post('/api/servers/:id/repair-preview', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+app.post('/api/servers/:id/repair-preview', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const diagnostics = diagnoseRuntime(consoleLogs(server.id));
+  const software = softwareForServer(server);
+  const agent = await analyzeServerWithAgent(server, software, diagnostics, { allowWeb: true });
   res.json({
     server: server.name,
-    signature: crashSignature(server, softwareForServer(server), null, null).signature.slice(0, 12),
+    signature: crashSignature(server, software, null, null).signature.slice(0, 12),
     diagnostics,
+    agent: publicAgentAnalysis(agent),
     knowledge: knowledgeStatus(),
     changesApplied: false,
   });
-});
+}));
 
 app.post('/api/host/provision', asyncRoute(async (req, res) => {
   if (!isHostApiAuthorized(req)) return res.status(401).json({ error: 'Host API token required.' });
@@ -2680,6 +2855,7 @@ app.get('/api/servers/:id/nexus-mark', requirePermission(capabilities.SERVER_MAN
 app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
   setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
+  setSettingValue('repair_web_enabled', toBool(req.body.repairWebEnabled, true) ? '1' : '0');
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
   if (publicBaseUrl) {
@@ -3546,7 +3722,7 @@ app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, p
   if (runtimeStatus(server.id) === 'online') return res.status(409).json({ error: 'Stop the server before running Fix Server.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This server has no repairable software runtime.' });
-  const report = await runServerRepair(server, software);
+  const report = await runServerRepair(server, software, { applyOptimizations: true });
   const learned = learnRepairPlaybook(server, report);
   appendLog(server.id, `[NexusPanel] Repair & Diagnose completed: ${report.summary}`);
   if (learned) appendLog(server.id, `[NexusPanel] Repair playbook ${learned.signature} recorded as a candidate; it will be trusted only after 60 seconds of stable runtime.`);
@@ -4260,6 +4436,8 @@ async function runAdaptiveMaintenance() {
   if (validatedRepairs.length) actions.push(`Validated ${validatedRepairs.length} learned terminal repair(s)`);
   const validatedPlaybooks = validateStableRepairPlaybooks();
   if (validatedPlaybooks.length) actions.push(`Validated ${validatedPlaybooks.length} repair playbook(s) after stable runtime`);
+  const validatedAgentEpisodes = validateStableAgentEpisodes();
+  if (validatedAgentEpisodes.length) actions.push(`Trained repair agent from ${validatedAgentEpisodes.length} stable recovery episode(s)`);
   if (now - Number(databaseHealthStatus.checkedAt || 0) >= 5 * 60 * 1000) {
     const verification = verifyDatabase();
     databaseHealthStatus = { ...verification, checkedAt: now, snapshotAt: databaseHealthStatus.snapshotAt || 0 };
@@ -4324,6 +4502,10 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
   recent.push(now);
   crashHistory.set(server.id, recent);
   const launchFailure = uptimeMs < 10 * 1000;
+  const penalty = repairAgent.penalizeLatest(current.id, launchFailure ? 'launch-failed' : 'repeat-crash');
+  if (penalty.updated) {
+    appendLog(current.id, `[NexusPanel] Repair agent applied negative reward to the last failed recovery (${penalty.updated} neural weight updates).`);
+  }
   const crash = rememberCrash(current, software, code, signal);
   const crashDiagnostics = diagnoseRuntime(consoleLogs(current.id), { limit: 5 });
   if (crashDiagnostics.length) {

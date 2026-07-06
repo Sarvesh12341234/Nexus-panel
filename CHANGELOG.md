@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.2.0 Repair Agent Revision - 2026-07-06
+
+### Added
+
+- A bounded 299,598-parameter neural diagnosis ranker blended with the deterministic repair catalog.
+- Persistent reinforcement episodes with positive rewards for stable recoveries and negative rewards for repeated crashes or owner-marked wrong diagnoses.
+- Live VPS, panel, game-process, disk, Linux pressure, properties, world, and runtime telemetry in every agent diagnosis.
+- A cause-and-action knowledge graph, confidence-ranked repair plan, and conservative offline-only optimization recommendations.
+- Owner Helpful/Wrong controls, reward history, memory estimates, and model health in Security.
+- Optional redacted web research through allowlisted Stack Exchange and GitHub issue APIs. References and code snippets are cached but never executed.
+- Eight-source repair research spanning Minecraft, Linux, server administration, GitHub issues, Microsoft Learn, and Wikipedia, with stable error-signature extraction and source-quality ranking.
+- Per-source health telemetry and circuit breakers prevent repeated failures or rate limits from blocking repair analysis.
+- Eight panel/UI/security diagnosis families, bringing the repair catalog to 1,248 signals across 78 cause families.
+
+### Fixed
+
+- Low-confidence unknown crashes now retain one hypothesis so later stable or failed outcomes can teach the ranker.
+- Repeated owner feedback cannot reward or punish the same episode more than once.
+- Episode feature persistence is capped and learned sparse weights are bounded to keep agent memory predictable.
+- Web lookups reject local/private targets, enforce response and time limits, redact secrets and identifiers, and filter weakly related results.
+- Credential/JWT/query-secret redaction now runs before research, and each source is isolated behind its own failure threshold and cooldown.
+- An unavailable software download no longer aborts the remaining Repair & Diagnose checks.
+
 ## 1.2.0 Reliability Revision - 2026-07-03
 
 ### Fixed

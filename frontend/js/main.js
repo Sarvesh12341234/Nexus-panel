@@ -1994,6 +1994,7 @@ function renderSettings() {
       ${canManageSettings ? `
       <label class="switch"><input name="terminalEnabled" type="checkbox" ${settings.terminalEnabled ? 'checked' : ''}><span></span>Owner terminal row</label>
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
+      <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.2.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v1.2.0"></label>
@@ -2413,13 +2414,18 @@ async function renderSecurity(forceHealth = false) {
       </div>
       <h3>Repair brain</h3>
       <div class="health-grid">
+        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.parameterCount || 0).toLocaleString()}-parameter agent</strong><span>${Number(state.repairBrain?.agent?.modelMemoryMb || 0)} MB model · ${Number(state.repairBrain?.agent?.featureDimensions || 0).toLocaleString()} neural features · ${escapeHtml(state.repairBrain?.agent?.architecture || 'loading')}</span></article>
+        <article class="${state.repairBrain?.agent?.bounded ? 'is-ok' : 'is-bad'}"><strong>${Number(state.repairBrain?.agent?.episodes || 0)} agent episodes</strong><span>${Number(state.repairBrain?.agent?.validatedEpisodes || 0)} stable validation(s) · ${Number(state.repairBrain?.agent?.learnedWeights || 0)} learned weights · ${Number(state.repairBrain?.agent?.estimatedStateMemoryMb || 0)} MB bounded agent state.</span></article>
+        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.cumulativeReward || 0)} reinforcement reward</strong><span>${Number(state.repairBrain?.agent?.failedEpisodes || 0)} negative episode(s) · repeat crashes weaken failed paths and stable uptime strengthens them.</span></article>
+        <article class="${state.settings?.repairWebEnabled ? 'is-ok' : ''}"><strong>Web research ${state.settings?.repairWebEnabled ? 'enabled' : 'disabled'}</strong><span>${(state.repairBrain?.agent?.web?.enabledSources || []).length} bounded sources · ${Object.values(state.repairBrain?.agent?.web?.sourceHealth || {}).filter((source) => source.healthy).length} recently healthy · ${Number(state.repairBrain?.agent?.web?.cachedQueries || 0)} cached search(es) · web code execution never.</span></article>
         <article class="is-ok"><strong>${Number(state.repairBrain?.knowledge?.diagnosticSignals || 0)} crash signals</strong><span>${Number(state.repairBrain?.knowledge?.rules || 0)} cause families across game, world, network, storage, runtime, and VPS health.</span></article>
         <article class="is-ok"><strong>${Number(state.repairBrain?.playbooks?.count || 0)} repair playbooks</strong><span>${Number(state.repairBrain?.playbooks?.replays || 0)} automatic replay(s) completed.</span></article>
         <article class="${state.repairBrain?.commands?.validated ? 'is-ok' : ''}"><strong>${Number(state.repairBrain?.commands?.observed || 0)} terminal fixes observed</strong><span>${Number(state.repairBrain?.commands?.validated || 0)} stability-validated; ${Number(state.repairBrain?.commands?.safe || 0)} eligible for safe replay.</span></article>
         <article class="${state.repairBrain?.database?.ok ? 'is-ok' : 'is-bad'}"><strong>SQLite ${state.repairBrain?.database?.ok ? 'verified' : 'warning'}</strong><span>${escapeHtml(state.repairBrain?.database?.quickCheck || 'not checked')} · ${Number(state.repairBrain?.database?.foreignKeyErrors || 0)} foreign-key issue(s).</span></article>
       </div>
       <div class="plugin-list">
-        ${(state.repairBrain?.recent || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)}</strong><div class="muted">${escapeHtml(item.commandPreview)} · exit ${item.exitCode ?? 'pending'}</div></div><span class="badge ${item.validated ? 'is-on' : ''}">${item.validated ? `learned · ${item.replayCount} replay(s)` : item.safeToReplay ? 'validating' : 'evidence only'}</span></div>`).join('') || '<p class="empty-state">Terminal fixes will appear here after a crash is associated with a repair command.</p>'}
+        ${(state.repairBrain?.agent?.recentEpisodes || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)} · agent episode ${item.id}</strong><div class="muted">${escapeHtml(item.diagnoses?.[0]?.summary || 'VPS and server evidence analyzed')} · ${Math.round(Number(item.confidence || 0) * 100)}% confidence · reward ${Number(item.reward || 0)}</div></div><div class="row-actions"><span class="badge ${item.status === 'validated' ? 'is-on' : ''}">${escapeHtml(item.status)}</span>${state.user?.role === 'owner' && !String(item.feedbackSource || '').startsWith('owner-') ? `<button class="secondary" type="button" data-action="agent-feedback" data-episode-id="${item.id}" data-feedback="helpful">Helpful</button><button class="danger" type="button" data-action="agent-feedback" data-episode-id="${item.id}" data-feedback="wrong">Wrong</button>` : ''}</div></div>`).join('')}
+        ${(state.repairBrain?.recent || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)}</strong><div class="muted">${escapeHtml(item.commandPreview)} · exit ${item.exitCode ?? 'pending'}</div></div><span class="badge ${item.validated ? 'is-on' : ''}">${item.validated ? `learned · ${item.replayCount} replay(s)` : item.safeToReplay ? 'validating' : 'evidence only'}</span></div>`).join('') || ((state.repairBrain?.agent?.recentEpisodes || []).length ? '' : '<p class="empty-state">Validated repair and agent learning episodes will appear here.</p>')}
       </div>
     `;
   }
@@ -3753,9 +3759,22 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       if (!server) return showToast('Select a server first.');
       const result = await api(`/api/servers/${server.id}/repair-preview`, { method: 'POST', body: '{}' });
-      const summary = result.diagnostics?.length
-        ? result.diagnostics.map((item) => `${item.severity.toUpperCase()}: ${item.summary}`).join('\n')
-        : `No known cause matched ${result.knowledge?.diagnosticSignals || 0} signals.`;
+      const diagnoses = (result.agent?.diagnoses || result.diagnostics || []).slice(0, 6)
+        .map((item) => `${String(item.severity || 'info').toUpperCase()} ${Math.round(Number(item.confidence || 0) * 100)}%: ${item.summary}`)
+        .join('\n');
+      const actions = (result.agent?.actions || []).slice(0, 6).map((item) => `- ${item.description}`).join('\n');
+      const optimizations = (result.agent?.optimizations || []).slice(0, 4)
+        .map((item) => `- ${item.key}: ${item.current} -> ${item.suggested} (${item.reason})`)
+        .join('\n');
+      const research = (result.agent?.webResearch?.results || []).slice(0, 5)
+        .map((item) => `- ${item.source}: ${item.title}${item.codeSnippets?.length ? ` (${item.codeSnippets.length} redacted code snippet(s))` : ''}\n  ${item.url}`)
+        .join('\n');
+      const summary = [
+        diagnoses || `No known cause matched ${result.knowledge?.diagnosticSignals || 0} signals.`,
+        actions ? `\nSafe plan:\n${actions}` : '',
+        optimizations ? `\nOptimization plan:\n${optimizations}` : '',
+        research ? `\nUntrusted web references (never auto-executed):\n${research}` : '',
+      ].join('');
       prompt(`Repair preview ${result.signature} (no changes applied):`, summary);
       return;
     }
@@ -3780,6 +3799,18 @@ document.addEventListener('click', async (event) => {
     if (action === 'adaptive-heal') {
       const result = await api('/api/adaptive/heal', { method: 'POST', body: '{}' });
       showToast(result.actions?.length ? `Adaptive heal completed ${result.actions.length} action(s).` : 'Adaptive heal found no safe repairs.');
+      await refresh();
+      if (state.activeView === 'security') await renderSecurity();
+      return;
+    }
+    if (action === 'agent-feedback') {
+      const feedback = actionTarget.dataset.feedback;
+      if (!confirm(`Mark this repair-agent episode as ${feedback}? This changes its learned neural weights.`)) return;
+      const result = await api(`/api/repair/agent/episodes/${encodeURIComponent(actionTarget.dataset.episodeId)}/feedback`, {
+        method: 'POST',
+        body: JSON.stringify({ feedback }),
+      });
+      showToast(`Agent feedback recorded: ${feedback} (${result.learning?.updated || 0} weight updates).`);
       await refresh();
       if (state.activeView === 'security') await renderSecurity();
       return;
@@ -4009,7 +4040,7 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
       if (server.status === 'online') return showToast('Stop the server before running Repair & Diagnose.');
-      if (!confirm(`Repair and diagnose "${server.name}"? This validates its runtime, cleans stale transfers, checks world storage and disk space, and rebuilds isolation metadata.`)) return;
+      if (!confirm(`Run the repair agent for "${server.name}"? It will inspect VPS pressure, validate the runtime, clean stale transfers, check world storage and disk space, rebuild isolation metadata, and apply only bounded offline Minecraft distance optimizations after saving a recovery copy.`)) return;
       const result = await api(`/api/servers/${server.id}/fix`, { method: 'POST' });
       const learned = result.learned ? ` Learned playbook ${result.learned.signature}.` : '';
       showToast(`${result.summary || result.repair?.message || 'Repair & Diagnose completed.'}${learned}`);

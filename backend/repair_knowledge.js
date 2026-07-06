@@ -69,6 +69,14 @@ const RULES = [
   ['pack-uuid-conflict', 'content', 'warning', ['duplicate.*uuid.*pack', 'pack uuid.*already', 'dependency.*uuid.*not found', 'missing pack dependency'], 'Bedrock resource or behavior pack UUIDs conflict or reference missing dependencies.', ['Validate manifest UUIDs and versions.', 'Install required dependency packs.', 'Remove duplicate pack folders without changing world references.']],
   ['sqlite-wal', 'database', 'critical', ['wal file.*(?:corrupt|invalid)', 'database table is locked', 'sqlite_busy', 'checkpoint.*failed'], 'SQLite WAL checkpointing or writer coordination failed.', ['Stop duplicate panel processes.', 'Run integrity checks before touching WAL files.', 'Use a verified database snapshot for corruption recovery.']],
   ['clock-timezone-confusion', 'host', 'info', ['timezone.*incorrect', 'display time.*wrong', 'backup time.*wrong', 'login time.*wrong'], 'Displayed local time and the VPS system clock are being confused.', ['Keep stored timestamps in UTC.', 'Apply the user-selected IANA timezone only when formatting.', 'Verify NTP separately from display timezone.']],
+  ['panel-ui-assets', 'panel', 'critical', ['panel ui asset missing', 'frontend.*(?:index|main\\.js|main\\.css).*(?:missing|not found)', 'failed to load resource.*(?:main\\.js|main\\.css)', 'unexpected token.*main\\.js'], 'A required panel UI asset is missing, truncated, or unreadable.', ['Verify the checked-out frontend files against the release tag.', 'Restore only the missing code asset without touching data.', 'Check reverse-proxy static-file routing and content type.']],
+  ['panel-render-loop', 'panel', 'warning', ['page refreshes every .*second', 'selection.*(?:reset|jumps back)', 'render loop', 'maximum update depth', 'too much recursion.*render'], 'A live refresh is rebuilding interactive UI state.', ['Patch live values in place.', 'Preserve focused inputs and selected values.', 'Use stable component identities before applying saved layout positions.']],
+  ['panel-api-route', 'panel', 'warning', ['api.*(?:404|500)', 'request failed.*\\/api\\/', 'cannot (?:get|post|put|patch|delete) \\/api', 'headers already sent'], 'A panel API route failed or was registered incorrectly.', ['Match frontend method and path to the backend route.', 'Inspect the first server exception.', 'Return structured JSON errors without exposing secrets.']],
+  ['panel-upload-state', 'panel', 'warning', ['ranges\\.map is not a function', 'upload.*progress.*(?:wrong|stuck|reset)', 'chunks_json.*(?:invalid|malformed)', 'upload session.*corrupt'], 'Upload session state is malformed or inconsistent across clients.', ['Normalize legacy range data to arrays.', 'Calculate progress from committed chunks.', 'Broadcast or poll one canonical server-side session state.']],
+  ['panel-permission-map', 'security', 'critical', ['permission.*(?:wrong section|invisible|still visible)', 'not enough access.*incorrect', 'account.*can access.*should not', 'capability.*mismatch'], 'Frontend visibility and backend permission enforcement disagree.', ['Treat backend capability checks as authoritative.', 'Use the same capability key for navigation and endpoint middleware.', 'Test both allowed and denied operations with a limited account.']],
+  ['panel-updater-drift', 'panel', 'warning', ['updater.*(?:old version|switches back|wrong tag)', 'would clobber existing tag', 'update tag.*not found', 'head is now at.*old'], 'The updater target, Git tag, and selected edition are out of sync.', ['Resolve the edition tag explicitly.', 'Fetch tags with safe forced tag refresh.', 'Verify the resulting commit before restarting the service.']],
+  ['panel-event-loop', 'panel', 'critical', ['event loop.*(?:blocked|delay|lag)', 'javascript heap out of memory', 'panel node heap memory pressure', 'fatal process out of memory'], 'The panel process is under Node.js heap or event-loop pressure.', ['Keep archive and upload paths streaming.', 'Reduce full overview polling and repeated DOM rebuilds.', 'Bound learned state and inspect process RSS before increasing limits.']],
+  ['panel-database-state', 'database', 'critical', ['deleted server.*(?:came back|resurrect)', 'resource.*reset.*1024', 'database recovery.*wrong server', 'tombstone.*missing'], 'Panel database recovery disagrees with durable server metadata.', ['Honor deletion tombstones before folder recovery.', 'Recover resources from the atomic per-server manifest.', 'Verify SQLite integrity before rebuilding rows.']],
 ];
 
 const SOFTWARE_FAMILIES = ['java', 'bedrock', 'pocketmine', 'host'];
@@ -94,7 +102,19 @@ function knowledgeStatus() {
   };
 }
 
+function knowledgeRules() {
+  return RULES.map(([id, category, severity, patterns, summary, techniques]) => ({
+    id,
+    category,
+    severity,
+    patterns: [...patterns],
+    summary,
+    techniques: [...techniques],
+  }));
+}
+
 module.exports = {
   diagnoseRuntime,
+  knowledgeRules,
   knowledgeStatus,
 };

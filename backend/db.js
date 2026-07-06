@@ -265,6 +265,40 @@ db.exec(`
     UNIQUE(server_id, signature, command_hash),
     FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS repair_agent_episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    signature TEXT NOT NULL DEFAULT '',
+    context_json TEXT NOT NULL DEFAULT '{}',
+    features_json TEXT NOT NULL DEFAULT '[]',
+    diagnoses_json TEXT NOT NULL DEFAULT '[]',
+    plan_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'planned',
+    confidence REAL NOT NULL DEFAULT 0,
+    reward REAL NOT NULL DEFAULT 0,
+    feedback_source TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    validated_at INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS repair_agent_weights (
+    label TEXT NOT NULL,
+    feature_index INTEGER NOT NULL,
+    weight REAL NOT NULL DEFAULT 0,
+    updates INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (label, feature_index)
+  );
+
+  CREATE TABLE IF NOT EXISTS repair_web_cache (
+    query_hash TEXT PRIMARY KEY,
+    query_text TEXT NOT NULL,
+    results_json TEXT NOT NULL DEFAULT '[]',
+    fetched_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
 `);
 
 // Insert default timezone
@@ -316,6 +350,12 @@ const repairPlaybookColumns = {
   validated_at: 'INTEGER NOT NULL DEFAULT 0',
 };
 
+const repairAgentEpisodeColumns = {
+  features_json: "TEXT NOT NULL DEFAULT '[]'",
+  reward: 'REAL NOT NULL DEFAULT 0',
+  feedback_source: "TEXT NOT NULL DEFAULT ''",
+};
+
 const existingServerColumns = new Set(db.prepare('PRAGMA table_info(servers)').all().map((column) => column.name));
 for (const [name, definition] of Object.entries(serverColumns)) {
   if (!existingServerColumns.has(name)) {
@@ -345,6 +385,13 @@ const existingRepairPlaybookColumns = new Set(db.prepare('PRAGMA table_info(repa
 for (const [name, definition] of Object.entries(repairPlaybookColumns)) {
   if (!existingRepairPlaybookColumns.has(name)) {
     db.exec(`ALTER TABLE repair_playbooks ADD COLUMN ${name} ${definition}`);
+  }
+}
+
+const existingRepairAgentEpisodeColumns = new Set(db.prepare('PRAGMA table_info(repair_agent_episodes)').all().map((column) => column.name));
+for (const [name, definition] of Object.entries(repairAgentEpisodeColumns)) {
+  if (!existingRepairAgentEpisodeColumns.has(name)) {
+    db.exec(`ALTER TABLE repair_agent_episodes ADD COLUMN ${name} ${definition}`);
   }
 }
 
