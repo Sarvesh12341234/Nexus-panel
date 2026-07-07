@@ -53,7 +53,7 @@ install_panel() {
   cd "$INSTALL_DIR"
   mkdir -p data
   printf '%s\n' "$EDITION" > data/edition
-  npm install --omit=optional
+  npm install
   printf '#!/usr/bin/env sh\nexec "%s" "%s" "$@"\n' "$(command -v node)" "$INSTALL_DIR/backend/cli.js" > /usr/local/bin/nexuspanel
   chmod 755 /usr/local/bin/nexuspanel
   NEXUSPANEL_SERVICE_USER="$SERVICE_USER" nexuspanel install

@@ -299,6 +299,36 @@ db.exec(`
     fetched_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS repair_agent_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id INTEGER NOT NULL,
+    server_id INTEGER NOT NULL,
+    plan_key TEXT NOT NULL,
+    plan_json TEXT NOT NULL DEFAULT '{}',
+    sandbox_json TEXT NOT NULL DEFAULT '{}',
+    rollback_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'candidate',
+    score REAL NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    applied_at INTEGER NOT NULL DEFAULT 0,
+    validated_at INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (episode_id) REFERENCES repair_agent_episodes(id) ON DELETE CASCADE,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS repair_agent_terminal_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER,
+    command_key TEXT NOT NULL,
+    command_preview TEXT NOT NULL DEFAULT '',
+    purpose TEXT NOT NULL DEFAULT '',
+    exit_code INTEGER,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    output_preview TEXT NOT NULL DEFAULT '',
+    access_hash TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
 `);
 
 // Insert default timezone

@@ -117,7 +117,7 @@ install_panel() {
   cd "${INSTALL_DIR}"
 
   echo "📦 Installing Node.js dependencies..."
-  npm install --omit=optional --no-audit --no-fund
+  npm install --no-audit --no-fund
   chmod 755 update/update.sh
 
   echo "📁 Creating data directory..."

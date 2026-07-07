@@ -1995,6 +1995,7 @@ function renderSettings() {
       <label class="switch"><input name="terminalEnabled" type="checkbox" ${settings.terminalEnabled ? 'checked' : ''}><span></span>Owner terminal row</label>
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
       <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
+      <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>AI terminal tools</label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.2.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v1.2.0"></label>
@@ -2137,7 +2138,7 @@ function renderTerminal() {
 function appendTerminalOutput(text) {
   const output = document.querySelector('#terminalOutput');
   if (!output || !text) return;
-  output.textContent = `${output.textContent}${text}`.slice(-80000);
+  output.textContent = `${output.textContent}${text}`.slice(-160000);
   output.scrollTop = output.scrollHeight;
 }
 
@@ -2158,7 +2159,7 @@ function startTerminalPolling() {
       window.clearInterval(terminalSession.timer);
       terminalSession = { id: '', cursor: 0, timer: 0 };
     }
-  }, 650);
+    }, 250);
 }
 
 async function closeTerminalSession() {
@@ -2418,12 +2419,15 @@ async function renderSecurity(forceHealth = false) {
         <article class="${state.repairBrain?.agent?.bounded ? 'is-ok' : 'is-bad'}"><strong>${Number(state.repairBrain?.agent?.episodes || 0)} agent episodes</strong><span>${Number(state.repairBrain?.agent?.validatedEpisodes || 0)} stable validation(s) · ${Number(state.repairBrain?.agent?.learnedWeights || 0)} learned weights · ${Number(state.repairBrain?.agent?.estimatedStateMemoryMb || 0)} MB bounded agent state.</span></article>
         <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.cumulativeReward || 0)} reinforcement reward</strong><span>${Number(state.repairBrain?.agent?.failedEpisodes || 0)} negative episode(s) · repeat crashes weaken failed paths and stable uptime strengthens them.</span></article>
         <article class="${state.settings?.repairWebEnabled ? 'is-ok' : ''}"><strong>Web research ${state.settings?.repairWebEnabled ? 'enabled' : 'disabled'}</strong><span>${(state.repairBrain?.agent?.web?.enabledSources || []).length} bounded sources · ${Object.values(state.repairBrain?.agent?.web?.sourceHealth || {}).filter((source) => source.healthy).length} recently healthy · ${Number(state.repairBrain?.agent?.web?.cachedQueries || 0)} cached search(es) · web code execution never.</span></article>
+        <article class="${state.repairBrain?.agent?.terminal?.enabled ? 'is-ok' : ''}"><strong>AI terminal ${state.repairBrain?.agent?.terminal?.enabled ? 'enabled' : 'disabled'}</strong><span>${Number(state.repairBrain?.agent?.terminal?.auditedCommands || 0)} audited probe(s) · ${Number(state.repairBrain?.agent?.terminal?.averageMs || 0)} ms average · key ${escapeHtml(state.repairBrain?.agent?.terminal?.accessHashPreview || 'hidden')}.</span></article>
+        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.plans || 0)} repair plans</strong><span>${Number(state.repairBrain?.agent?.sandboxVerifiedPlans || 0)} sandbox-verified · ${Number(state.repairBrain?.agent?.sandboxBlockedPlans || 0)} blocked before production.</span></article>
         <article class="is-ok"><strong>${Number(state.repairBrain?.knowledge?.diagnosticSignals || 0)} crash signals</strong><span>${Number(state.repairBrain?.knowledge?.rules || 0)} cause families across game, world, network, storage, runtime, and VPS health.</span></article>
         <article class="is-ok"><strong>${Number(state.repairBrain?.playbooks?.count || 0)} repair playbooks</strong><span>${Number(state.repairBrain?.playbooks?.replays || 0)} automatic replay(s) completed.</span></article>
         <article class="${state.repairBrain?.commands?.validated ? 'is-ok' : ''}"><strong>${Number(state.repairBrain?.commands?.observed || 0)} terminal fixes observed</strong><span>${Number(state.repairBrain?.commands?.validated || 0)} stability-validated; ${Number(state.repairBrain?.commands?.safe || 0)} eligible for safe replay.</span></article>
         <article class="${state.repairBrain?.database?.ok ? 'is-ok' : 'is-bad'}"><strong>SQLite ${state.repairBrain?.database?.ok ? 'verified' : 'warning'}</strong><span>${escapeHtml(state.repairBrain?.database?.quickCheck || 'not checked')} · ${Number(state.repairBrain?.database?.foreignKeyErrors || 0)} foreign-key issue(s).</span></article>
       </div>
       <div class="plugin-list">
+        ${(state.repairBrain?.agent?.recentPlans || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)} · ${escapeHtml(item.title)}</strong><div class="muted">${escapeHtml(item.risk || 'unknown risk')} · score ${Number(item.score || 0).toFixed(2)} · ${item.sandboxChecks?.filter((check) => check.ok).length || 0}/${item.sandboxChecks?.length || 0} sandbox checks</div></div><span class="badge ${item.sandboxOk ? 'is-on' : ''}">${escapeHtml(item.status)}</span></div>`).join('')}
         ${(state.repairBrain?.agent?.recentEpisodes || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)} · agent episode ${item.id}</strong><div class="muted">${escapeHtml(item.diagnoses?.[0]?.summary || 'VPS and server evidence analyzed')} · ${Math.round(Number(item.confidence || 0) * 100)}% confidence · reward ${Number(item.reward || 0)}</div></div><div class="row-actions"><span class="badge ${item.status === 'validated' ? 'is-on' : ''}">${escapeHtml(item.status)}</span>${state.user?.role === 'owner' && !String(item.feedbackSource || '').startsWith('owner-') ? `<button class="secondary" type="button" data-action="agent-feedback" data-episode-id="${item.id}" data-feedback="helpful">Helpful</button><button class="danger" type="button" data-action="agent-feedback" data-episode-id="${item.id}" data-feedback="wrong">Wrong</button>` : ''}</div></div>`).join('')}
         ${(state.repairBrain?.recent || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)}</strong><div class="muted">${escapeHtml(item.commandPreview)} · exit ${item.exitCode ?? 'pending'}</div></div><span class="badge ${item.validated ? 'is-on' : ''}">${item.validated ? `learned · ${item.replayCount} replay(s)` : item.safeToReplay ? 'validating' : 'evidence only'}</span></div>`).join('') || ((state.repairBrain?.agent?.recentEpisodes || []).length ? '' : '<p class="empty-state">Validated repair and agent learning episodes will appear here.</p>')}
       </div>

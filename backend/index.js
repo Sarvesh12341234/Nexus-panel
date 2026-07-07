@@ -25,6 +25,7 @@ const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runti
 const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
+const { runAgentTerminal } = require('./agent_terminal');
 const {
   SESSION_COOKIE,
   authMiddleware,
@@ -145,6 +146,10 @@ function ensureSettingValue(key, factory) {
   return value;
 }
 
+function repairAgentSecret() {
+  return ensureSettingValue('repair_agent_secret', () => crypto.randomBytes(32).toString('hex'));
+}
+
 function panelEdition() {
   return (process.env.NEXUSPANEL_EDITION || (fs.existsSync(editionPath) ? fs.readFileSync(editionPath, 'utf8').trim() : '') || 'normal').replace(/[^a-z0-9-]/gi, '').toLowerCase() || 'normal';
 }
@@ -178,6 +183,7 @@ function panelSettingsPayload(user = null) {
     hostApiTokenPreview: edition === 'host' && user?.role === 'owner' ? `${hostToken.slice(0, 8)}....${hostToken.slice(-6)}` : '',
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
     repairWebEnabled: settingValue('repair_web_enabled', '1') === '1',
+    repairAgentTerminalEnabled: settingValue('repair_agent_terminal_enabled', '1') === '1',
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
     maxCpuCores: hostCpuCount(),
     platform: process.platform,
@@ -1753,6 +1759,35 @@ function repairBrainPayload() {
       diagnoses: Array.isArray(diagnoses) ? diagnoses.slice(0, 3) : [],
     };
   });
+  const plans = db.prepare(`
+    SELECT plan.id, plan.episode_id, plan.server_id, plan.plan_key, plan.status,
+      plan.score, plan.plan_json, plan.sandbox_json, server.name AS server_name
+    FROM repair_agent_plans plan
+    JOIN servers server ON server.id = plan.server_id
+    ORDER BY plan.created_at DESC
+    LIMIT 8
+  `).all().map((row) => {
+    const plan = parseJsonObject(row.plan_json);
+    const sandbox = parseJsonObject(row.sandbox_json);
+    return {
+      id: row.id,
+      episodeId: row.episode_id,
+      serverId: row.server_id,
+      serverName: row.server_name,
+      key: row.plan_key,
+      status: row.status,
+      score: row.score,
+      title: plan.title || row.plan_key,
+      risk: plan.risk || '',
+      sandboxOk: Boolean(sandbox.ok),
+      sandboxChecks: Array.isArray(sandbox.checks) ? sandbox.checks.slice(0, 4) : [],
+    };
+  });
+  const agentTerminal = db.prepare(`
+    SELECT COUNT(*) AS count, COALESCE(MAX(created_at), 0) AS last_run_at,
+      COALESCE(AVG(duration_ms), 0) AS average_ms
+    FROM repair_agent_terminal_audit
+  `).get();
   return {
     knowledge: knowledgeStatus(),
     playbooks,
@@ -1762,6 +1797,14 @@ function repairBrainPayload() {
       ...repairAgent.status(),
       web: repairWeb.status(),
       recentEpisodes: agentEpisodes,
+      recentPlans: plans,
+      terminal: {
+        enabled: settingValue('repair_agent_terminal_enabled', '1') === '1',
+        auditedCommands: Number(agentTerminal.count || 0),
+        lastRunAt: Number(agentTerminal.last_run_at || 0),
+        averageMs: Math.round(Number(agentTerminal.average_ms || 0)),
+        accessHashPreview: crypto.createHash('sha256').update(repairAgentSecret()).digest('hex').slice(0, 12),
+      },
     },
     database: databaseHealthStatus,
   };
@@ -2034,6 +2077,54 @@ async function analyzeServerWithAgent(server, software, diagnostics, { allowWeb 
   return analysis;
 }
 
+async function collectAgentTerminalTelemetry(server) {
+  if (settingValue('repair_agent_terminal_enabled', '1') !== '1') {
+    return { enabled: false, commands: [], summary: 'AI terminal tools are disabled.' };
+  }
+  const secret = repairAgentSecret();
+  const probes = [
+    { command: 'df', args: ['-h', '.'], purpose: 'disk-free-for-repair' },
+    { command: 'df', args: ['-i', '.'], purpose: 'inode-free-for-repair' },
+    { command: 'free', args: ['-m'], purpose: 'memory-free-for-repair' },
+    { command: 'uptime', args: [], purpose: 'load-average-for-repair' },
+    { command: 'java', args: ['-version'], purpose: 'java-runtime-for-repair' },
+  ];
+  if (process.platform === 'linux') {
+    probes.push(
+      { command: 'systemctl', args: ['list-units', '--all', 'nexusmark*.service', '--no-pager'], purpose: 'nexusmark-unit-scan' },
+      { command: 'ss', args: ['-lntu'], purpose: 'port-listen-scan' },
+    );
+  }
+  const commands = [];
+  for (const probe of probes) {
+    try {
+      const result = await runAgentTerminal(db, secret, { ...probe, server, timeoutMs: 8000 });
+      commands.push({
+        command: result.command,
+        args: result.args,
+        code: result.code,
+        durationMs: result.durationMs,
+        outputPreview: result.output.slice(-1200),
+        accessHashPreview: result.accessHashPreview,
+      });
+    } catch (error) {
+      commands.push({
+        command: probe.command,
+        args: probe.args,
+        code: 1,
+        durationMs: 0,
+        outputPreview: error.message,
+        accessHashPreview: '',
+      });
+    }
+  }
+  return {
+    enabled: true,
+    commands,
+    summary: `${commands.filter((item) => item.code === 0).length}/${commands.length} AI terminal telemetry probe(s) passed.`,
+  };
+}
+
 async function applyAgentOptimizations(server, root, analysis) {
   if (runtimeStatus(server.id) === 'online') {
     return { applied: [], skipped: ['Server is online; optimization changes require an offline server.'] };
@@ -2071,6 +2162,8 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   const agentAnalysis = await analyzeServerWithAgent(server, software, diagnostics, {
     allowWeb: applyOptimizations,
   });
+  const terminalTelemetry = await collectAgentTerminalTelemetry(server);
+  agentAnalysis.terminalTelemetry = terminalTelemetry;
   const crash = db.prepare('SELECT signature FROM repair_crash_state WHERE server_id = ?').get(server.id);
   const episodeId = repairAgent.recordEpisode({
     serverId: server.id,
@@ -2083,6 +2176,11 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     detail: diagnostics.length
       ? `${diagnostics.length} direct cause(s); neural ranker produced ${agentAnalysis.diagnoses.length} candidate(s).`
       : `Neural ranker analyzed ${agentAnalysis.featureCount} features across ${knowledge.diagnosticSignals} signals.`,
+  });
+  checks.push({
+    name: 'AI terminal telemetry',
+    ok: !terminalTelemetry.enabled || terminalTelemetry.commands.some((item) => item.code === 0),
+    detail: terminalTelemetry.summary,
   });
   diagnostics.forEach((diagnostic) => {
     warnings.push(`${diagnostic.severity.toUpperCase()} ${diagnostic.summary} ${diagnostic.techniques[0]}`);
@@ -2856,6 +2954,7 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
   setSettingValue('repair_web_enabled', toBool(req.body.repairWebEnabled, true) ? '1' : '0');
+  setSettingValue('repair_agent_terminal_enabled', toBool(req.body.repairAgentTerminalEnabled, true) ? '1' : '0');
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
   if (publicBaseUrl) {
@@ -2965,6 +3064,59 @@ function terminalShell() {
   return { command: shell, args: shell.endsWith('bash') ? ['-l'] : [] };
 }
 
+function loadNodePty() {
+  try {
+    return require('node-pty');
+  } catch {
+    return null;
+  }
+}
+
+function createTerminalProcess(cwd, onData, onClose) {
+  const shell = terminalShell();
+  const pty = loadNodePty();
+  if (pty && process.platform !== 'win32') {
+    const term = pty.spawn(shell.command, shell.args, {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 32,
+      cwd,
+      env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '1' },
+    });
+    term.onData(onData);
+    term.onExit((event) => onClose(event.exitCode));
+    return {
+      mode: 'pty',
+      pid: term.pid,
+      write: (value) => term.write(value),
+      kill: () => term.kill(),
+      resize: (cols, rows) => {
+        try { term.resize(cols, rows); } catch {}
+      },
+    };
+  }
+  const child = spawn(shell.command, shell.args, {
+    cwd,
+    env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '1' },
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', onData);
+  child.stderr.on('data', onData);
+  child.on('error', (error) => {
+    onData(`\n[NexusPanel terminal error] ${error.message}\n`);
+    onClose(1);
+  });
+  child.on('close', onClose);
+  return {
+    mode: 'pipe',
+    pid: child.pid,
+    write: (value) => child.stdin.write(value),
+    kill: () => child.kill(),
+    resize: () => {},
+  };
+}
+
 function wrappedTerminalInput(input, token) {
   if (process.platform === 'win32') {
     return `${input}\n$__nexusCode = if ($?) { 0 } else { 1 }\nWrite-Output "__NEXUS_CMD_END_${token}:$($__nexusCode)__"\n`;
@@ -3035,6 +3187,7 @@ function terminalSessionPayload(session) {
     cursor: session.buffer.length,
     active: !session.closed,
     cwd: session.cwd,
+    mode: session.mode || 'pipe',
   };
 }
 
@@ -3068,13 +3221,12 @@ app.post('/api/terminal/session', requireAuth, (req, res) => {
   const existing = [...terminalSessions.values()].find((session) => session.userId === req.user.id && !session.closed);
   if (existing) return res.json({ session: terminalSessionPayload(existing) });
 
-  const shell = terminalShell();
   const cwd = path.join(__dirname, '..');
-  const child = spawn(shell.command, shell.args, { cwd, env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const session = {
     id: crypto.randomUUID(),
     userId: req.user.id,
-    child,
+    child: null,
+    mode: 'pipe',
     buffer: [],
     markerBuffer: '',
     pendingCommands: new Map(),
@@ -3083,8 +3235,12 @@ app.post('/api/terminal/session', requireAuth, (req, res) => {
     lastSeen: Date.now(),
   };
   const push = (chunk) => {
-    const clean = String(chunk).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-    session.markerBuffer = `${session.markerBuffer}${clean}`.slice(-12000);
+    const clean = String(chunk)
+      .replace(/\r(?!\n)/g, '\n')
+      .replace(/\x1b\]0;[^\x07]*(?:\x07|\x1b\\)/g, '')
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+    const markerClean = clean;
+    session.markerBuffer = `${session.markerBuffer}${markerClean}`.slice(-12000);
     const markerPattern = /__NEXUS_CMD_END_([a-f0-9]+):(\d+)__/g;
     let marker;
     while ((marker = markerPattern.exec(session.markerBuffer))) {
@@ -3097,12 +3253,14 @@ app.post('/api/terminal/session', requireAuth, (req, res) => {
     session.markerBuffer = session.markerBuffer.replace(markerPattern, '').slice(-4000);
     const visible = clean.replace(markerPattern, '');
     if (visible) session.buffer.push(visible);
-    if (session.buffer.length > 2000) session.buffer.splice(0, session.buffer.length - 2000);
+    if (session.buffer.length > 4000) session.buffer.splice(0, session.buffer.length - 4000);
   };
-  child.stdout.on('data', push);
-  child.stderr.on('data', push);
-  child.on('error', (error) => { push(`\n[NexusPanel terminal error] ${error.message}\n`); session.closed = true; });
-  child.on('close', (code) => { push(`\n[NexusPanel terminal closed] exit=${code}\n`); session.closed = true; });
+  session.child = createTerminalProcess(cwd, push, (code) => {
+    push(`\n[NexusPanel terminal closed] exit=${code ?? 'none'}\n`);
+    session.closed = true;
+  });
+  session.mode = session.child.mode;
+  push(`[NexusPanel] Persistent terminal opened in ${session.mode.toUpperCase()} mode.\n`);
   terminalSessions.set(session.id, session);
   res.status(201).json({ session: terminalSessionPayload(session) });
 });
@@ -3134,9 +3292,9 @@ app.post('/api/terminal/session/:sessionId/input', requireAuth, (req, res) => {
   if (canObserve) {
     const token = crypto.randomBytes(8).toString('hex');
     session.pendingCommands.set(token, { serverId: server.id, command: input.trim() });
-    session.child.stdin.write(wrappedTerminalInput(input, token));
+    session.child.write(wrappedTerminalInput(input, token));
   } else {
-    session.child.stdin.write(input.endsWith('\n') ? input : `${input}\n`);
+    session.child.write(input.endsWith('\n') ? input : `${input}\n`);
   }
   res.json({ ok: true, learning: canObserve, serverId: server?.id || null });
 });

@@ -354,12 +354,14 @@ class RepairAgent {
       }
     }
     const graph = this.graph(ranked, actions, evidence, context);
+    const plans = this.competingPlans(ranked, actions, context);
     return {
       model: this.status(),
       context,
       evidence,
       diagnoses: ranked,
       actions,
+      plans,
       optimizations: optimizationPlan(context),
       graph,
       featureCount: features.length,
@@ -386,6 +388,98 @@ class RepairAgent {
     return { nodes, edges };
   }
 
+  competingPlans(diagnoses, actions, context) {
+    const primary = diagnoses[0];
+    const actionIds = new Set(actions.map((action) => action.id));
+    const plans = [];
+    const addPlan = (plan) => {
+      const key = `${plan.mode}:${plan.steps.join('|')}`;
+      if (plans.some((existing) => existing.key === key)) return;
+      plans.push({ key, ...plan });
+    };
+
+    addPlan({
+      mode: 'safe-diagnose',
+      title: 'Read-only diagnosis and evidence capture',
+      risk: 'read-only',
+      score: Number((0.55 + Number(primary?.confidence || 0) * 0.25).toFixed(3)),
+      steps: ['telemetry-snapshot', 'database-integrity-check', 'file-layout-check', 'console-signature-capture'],
+      rollback: ['no-write-operation'],
+      productionGate: 'always-safe',
+    });
+
+    if (actionIds.has('repair-properties')) {
+      addPlan({
+        mode: 'properties-rebuild',
+        title: 'Rebuild server.properties with atomic backup',
+        risk: 'low',
+        score: Number((0.7 + Number(primary?.confidence || 0) * 0.2).toFixed(3)),
+        steps: ['backup-server-properties', 'parse-valid-key-values', 'rewrite-utf8-no-bom', 'verify-active-root'],
+        rollback: ['restore-server-properties-backup'],
+        productionGate: context.runtime === 'offline' ? 'offline-ready' : 'requires-offline',
+      });
+    }
+
+    if (actionIds.has('repair-executable')) {
+      addPlan({
+        mode: 'runtime-reinstall',
+        title: 'Verify or reinstall selected runtime',
+        risk: 'medium',
+        score: Number((0.62 + Number(primary?.confidence || 0) * 0.18).toFixed(3)),
+        steps: ['snapshot-runtime-metadata', 'verify-download-source', 'download-to-repair-temp', 'atomic-executable-replace'],
+        rollback: ['restore-previous-executable-if-present'],
+        productionGate: context.diskFreeMb > 1024 ? 'disk-ready' : 'blocked-low-disk',
+      });
+    }
+
+    if (actionIds.has('optimize-game-distance')) {
+      addPlan({
+        mode: 'bounded-optimization',
+        title: 'Lower heavy game distances conservatively',
+        risk: 'medium',
+        score: Number((0.58 + Number(primary?.confidence || 0) * 0.14).toFixed(3)),
+        steps: ['snapshot-properties', 'apply-only-smaller-distance-values', 'record-performance-before-after'],
+        rollback: ['restore-properties-snapshot'],
+        productionGate: context.runtime === 'offline' ? 'offline-ready' : 'requires-offline',
+      });
+    }
+
+    addPlan({
+      mode: 'rollback-first',
+      title: 'Create rollback point before controlled repair',
+      risk: 'low',
+      score: Number((0.6 + (context.worldExists ? 0.12 : 0)).toFixed(3)),
+      steps: ['create-config-rollback-point', 'verify-backup-directory', 'apply-low-risk-repairs-only'],
+      rollback: ['latest-rollback-point'],
+      productionGate: context.diskFreeMb > 512 ? 'rollback-ready' : 'blocked-low-disk',
+    });
+
+    return plans.sort((a, b) => b.score - a.score).slice(0, 6);
+  }
+
+  sandboxPlan(plan, context) {
+    const checks = [
+      { name: 'bounded-memory', ok: this.status().bounded, detail: `${this.status().estimatedStateMemoryMb} MB estimated agent state` },
+      { name: 'disk-reserve', ok: Number(context.diskFreeMb || -1) !== 0 && Number(context.diskFreeMb || -1) > 256, detail: `${context.diskFreeMb} MB free` },
+      { name: 'root-present', ok: Boolean(context.rootExists), detail: context.rootExists ? 'server root exists' : 'server root missing' },
+      { name: 'production-gate', ok: !String(plan.productionGate || '').startsWith('blocked'), detail: plan.productionGate || 'not specified' },
+    ];
+    const destructive = ['runtime-reinstall', 'bounded-optimization'].includes(plan.mode);
+    if (destructive) {
+      checks.push({
+        name: 'offline-write-gate',
+        ok: context.runtime === 'offline',
+        detail: context.runtime === 'offline' ? 'server offline' : 'server is online',
+      });
+    }
+    return {
+      ok: checks.every((check) => check.ok),
+      checks,
+      verifiedAt: Date.now(),
+      note: 'Sandbox check verifies preconditions only; web research and model output are never executed directly.',
+    };
+  }
+
   recordEpisode({ serverId, signature = '', analysis, status = 'planned' }) {
     const result = this.db.prepare(`
       INSERT INTO repair_agent_episodes (
@@ -406,7 +500,32 @@ class RepairAgent {
       DELETE FROM repair_agent_episodes
       WHERE id NOT IN (SELECT id FROM repair_agent_episodes ORDER BY id DESC LIMIT ?)
     `).run(MAX_EPISODES);
-    return Number(result.lastInsertRowid);
+    const episodeId = Number(result.lastInsertRowid);
+    this.recordPlans(episodeId, serverId, analysis);
+    return episodeId;
+  }
+
+  recordPlans(episodeId, serverId, analysis) {
+    const insert = this.db.prepare(`
+      INSERT INTO repair_agent_plans (
+        episode_id, server_id, plan_key, plan_json, sandbox_json,
+        rollback_json, status, score, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const plan of (analysis.plans || []).slice(0, 6)) {
+      const sandbox = this.sandboxPlan(plan, analysis.context || {});
+      insert.run(
+        Number(episodeId),
+        Number(serverId),
+        plan.key,
+        JSON.stringify(plan),
+        JSON.stringify(sandbox),
+        JSON.stringify({ strategy: plan.rollback || [], created: false }),
+        sandbox.ok ? 'sandbox-verified' : 'sandbox-blocked',
+        Number(plan.score || 0),
+        Date.now(),
+      );
+    }
   }
 
   reinforce(episodeId, successfulDiagnosisIds, { reward = 1, source = 'stable-runtime' } = {}) {
@@ -492,6 +611,12 @@ class RepairAgent {
       FROM repair_agent_episodes
     `).get();
     const modelBytes = this.weights.byteLength + this.bias.byteLength;
+    const plans = this.db.prepare(`
+      SELECT COUNT(*) AS count,
+        COALESCE(SUM(CASE WHEN status = 'sandbox-verified' THEN 1 ELSE 0 END), 0) AS verified,
+        COALESCE(SUM(CASE WHEN status = 'sandbox-blocked' THEN 1 ELSE 0 END), 0) AS blocked
+      FROM repair_agent_plans
+    `).get();
     const estimatedStateBytes = modelBytes
       + MAX_LEARNED_WEIGHTS * 32
       + MAX_EPISODES * 2048
@@ -515,6 +640,9 @@ class RepairAgent {
       failedEpisodes: Number(episodes.failed || 0),
       cumulativeReward: Number(episodes.reward || 0),
       processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      plans: Number(plans.count || 0),
+      sandboxVerifiedPlans: Number(plans.verified || 0),
+      sandboxBlockedPlans: Number(plans.blocked || 0),
       bounded: estimatedStateBytes < MAX_AGENT_MEMORY_BYTES,
     };
   }

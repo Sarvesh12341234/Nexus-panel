@@ -13,6 +13,9 @@
 - Eight-source repair research spanning Minecraft, Linux, server administration, GitHub issues, Microsoft Learn, and Wikipedia, with stable error-signature extraction and source-quality ranking.
 - Per-source health telemetry and circuit breakers prevent repeated failures or rate limits from blocking repair analysis.
 - Eight panel/UI/security diagnosis families, bringing the repair catalog to 1,248 signals across 78 cause families.
+- Persistent owner terminal now uses `node-pty` when available, with a pipe fallback, faster polling, and progress-friendly output handling.
+- Hidden AI terminal tools collect bounded VPS telemetry through an allowlisted, timeout-capped, redacted, audited command channel.
+- The repair agent now stores competing repair plans, sandbox preflight results, rollback strategy metadata, and production gates before controlled fixes.
 
 ### Fixed
 
@@ -22,6 +25,7 @@
 - Web lookups reject local/private targets, enforce response and time limits, redact secrets and identifiers, and filter weakly related results.
 - Credential/JWT/query-secret redaction now runs before research, and each source is isolated behind its own failure threshold and cooldown.
 - An unavailable software download no longer aborts the remaining Repair & Diagnose checks.
+- Linux installers and the safe updater install optional dependencies so PTY terminal support is available on capable VPS hosts.
 
 ## 1.2.0 Reliability Revision - 2026-07-03
 

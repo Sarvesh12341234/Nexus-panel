@@ -61,7 +61,7 @@ else
 fi
 
 if [ -f package.json ]; then
-  npm install --omit=optional
+  npm install
 fi
 echo "[NexusPanel][85%] Dependencies verified."
 
