@@ -22,6 +22,45 @@ const STACK_SITES = Object.freeze([
   ['gaming', 'Arqade'],
 ]);
 
+const ENGLISH_INTENTS = Object.freeze([
+  {
+    id: 'apt-progress-stuck',
+    patterns: [/apt (?:update|upgrade|install).*stuck/i, /terminal.*(?:progress|percent).*not.*show/i],
+    query: 'apt update progress stuck non interactive terminal pseudo tty node pty',
+    concepts: ['terminal', 'pty', 'apt', 'progress'],
+  },
+  {
+    id: 'minecraft-memory-sizing',
+    patterns: [/(\d+)\s*(?:gb|gib).*ram/i, /memory.*(?:turns|reset).*1000\s*mb/i],
+    query: 'minecraft server memory allocation cgroup xmx native memory headroom',
+    concepts: ['memory', 'xmx', 'cgroup'],
+  },
+  {
+    id: 'cpu-core-limit',
+    patterns: [/(\d+)\s*core/i, /cpu.*(?:quota|limit|throttle)/i],
+    query: 'systemd CPUQuota multi core cgroup minecraft server',
+    concepts: ['cpu', 'systemd', 'cgroup'],
+  },
+  {
+    id: 'bedrock-leveldb-corruption',
+    patterns: [/bedrock.*(?:world|leveldb|db).*corrupt/i, /missing.*\.ldb/i],
+    query: 'Minecraft Bedrock LevelDB corruption backup save hold save query',
+    concepts: ['bedrock', 'leveldb', 'backup'],
+  },
+  {
+    id: 'server-properties-missing',
+    patterns: [/server\.properties.*(?:not found|missing|invalid|syntax)/i],
+    query: 'Minecraft server.properties not found working directory invalid syntax',
+    concepts: ['server.properties', 'working-directory'],
+  },
+  {
+    id: 'sqlite-corruption',
+    patterns: [/sqlite|database.*(?:corrupt|malformed|locked)/i],
+    query: 'SQLite WAL database disk image malformed recovery backup integrity check',
+    concepts: ['sqlite', 'wal', 'recovery'],
+  },
+]);
+
 function isPrivateAddress(address) {
   if (!net.isIP(address)) return true;
   if (address === '::1' || address === '0.0.0.0') return true;
@@ -175,6 +214,41 @@ function researchTokens(value) {
   return new Set(tokens.flatMap((token) => [token, ...token.split(/[._+-]/)]).filter((token) => token.length >= 3 && !ignored.has(token)));
 }
 
+function unitToMb(amount, unit) {
+  const number = Number(amount);
+  if (!Number.isFinite(number)) return null;
+  const normalized = String(unit || 'mb').toLowerCase();
+  if (normalized.startsWith('g')) return Math.round(number * 1024);
+  if (normalized.startsWith('t')) return Math.round(number * 1024 * 1024);
+  return Math.round(number);
+}
+
+function simpleMathFacts(value) {
+  const text = String(value || '');
+  const facts = [];
+  for (const match of text.matchAll(/\b(\d+(?:\.\d+)?)\s*(gb|gib|mb|mib|tb|tib)\b/gi)) {
+    const mb = unitToMb(match[1], match[2]);
+    if (mb != null) facts.push(`${match[0]}=${mb}MB`);
+  }
+  for (const match of text.matchAll(/\b(\d+(?:\.\d+)?)\s*(?:core|cores|cpu)\b/gi)) {
+    facts.push(`${match[1]}cores=${Number(match[1]) * 100}% CPUQuota`);
+  }
+  for (const match of text.matchAll(/\b(\d+)\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\b/gi)) {
+    facts.push(`duration:${match[0].toLowerCase()}`);
+  }
+  return [...new Set(facts)].slice(0, 8);
+}
+
+function englishIntent(value) {
+  const text = String(value || '');
+  const matches = ENGLISH_INTENTS.filter((intent) => intent.patterns.some((pattern) => pattern.test(text)));
+  return {
+    ids: matches.map((item) => item.id),
+    concepts: [...new Set(matches.flatMap((item) => item.concepts))],
+    query: matches.map((item) => item.query).join(' '),
+  };
+}
+
 function relevantResults(results, query) {
   const queryTokens = researchTokens(query);
   const normalizedQuery = String(query).toLowerCase();
@@ -194,6 +268,8 @@ function relevantResults(results, query) {
 
 function focusedResearchQuery(query) {
   const text = String(query);
+  const intent = englishIntent(text);
+  const math = simpleMathFacts(text);
   const exceptions = text.match(/(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:Exception|Error)\b/g) || [];
   const phrases = [
     /class file version/i,
@@ -209,7 +285,10 @@ function focusedResearchQuery(query) {
     /failed to start transient (?:service )?unit/i,
   ].map((pattern) => text.match(pattern)?.[0]).filter(Boolean);
   if (exceptions.length || phrases.length) {
-    return [...new Set([...exceptions.slice(-2), ...phrases.slice(0, 2)])].join(' ').slice(0, 180);
+    return [...new Set([...exceptions.slice(-2), ...phrases.slice(0, 2), intent.query, ...math])].filter(Boolean).join(' ').slice(0, 220);
+  }
+  if (intent.query || math.length) {
+    return [...new Set([intent.query, ...math, text.split(/\r?\n/).at(-1)])].filter(Boolean).join(' ').slice(0, 220);
   }
   const lines = text.split(/\s*\|\s*|\r?\n/).map((line) => line.trim()).filter(Boolean);
   return (lines.at(-1) || text).replace(/\b(?:0x)?[a-f0-9]{12,}\b/gi, '<id>').slice(0, 180);
@@ -252,13 +331,15 @@ class RepairWebResearch {
       .filter((line) => line && !line.includes('[NexusPanel]'))
       .slice(-8);
     const exact = candidates.slice(-3).join(' | ') || `${software?.key || server.software_key || server.type} server failed`;
-    return redactResearchText(`${server.type} ${software?.key || server.software_key || ''} ${exact}`);
+    const math = simpleMathFacts(exact).join(' ');
+    const intent = englishIntent(exact);
+    return redactResearchText(`${server.type} ${software?.key || server.software_key || ''} ${intent.query} ${math} ${exact}`);
   }
 
   async research(query) {
     const safeQuery = redactResearchText(query);
     if (safeQuery.length < 8) return { query: safeQuery, results: [], cached: false, errors: ['Error text was too short to research.'] };
-    const queryHash = crypto.createHash('sha256').update(`v4|${safeQuery}`).digest('hex');
+    const queryHash = crypto.createHash('sha256').update(`v5|${safeQuery}`).digest('hex');
     const cached = this.db.prepare('SELECT * FROM repair_web_cache WHERE query_hash = ? AND expires_at > ?').get(queryHash, Date.now());
     if (cached) {
       return { query: cached.query_text, results: JSON.parse(cached.results_json || '[]'), cached: true, errors: [] };
@@ -272,6 +353,8 @@ class RepairWebResearch {
   async fetchResearch(query, queryHash) {
     const errors = [];
     const compact = focusedResearchQuery(query);
+    const intent = englishIntent(query);
+    const mathFacts = simpleMathFacts(query);
     const githubUrl = new URL('https://api.github.com/search/issues');
     githubUrl.search = new URLSearchParams({
       q: `"${compact.slice(0, 120)}" in:title,body is:issue`,
@@ -348,7 +431,16 @@ class RepairWebResearch {
         expires_at = excluded.expires_at
     `).run(queryHash, query, JSON.stringify(unique), Date.now(), Date.now() + ttl);
     this.db.prepare('DELETE FROM repair_web_cache WHERE expires_at <= ?').run(Date.now());
-    return { query, focusedQuery: compact, results: unique, cached: false, errors };
+    return {
+      query,
+      focusedQuery: compact,
+      intentIds: intent.ids,
+      concepts: intent.concepts,
+      mathFacts,
+      results: unique,
+      cached: false,
+      errors,
+    };
   }
 
   status() {
@@ -369,6 +461,10 @@ class RepairWebResearch {
       maxResponseKb: MAX_RESPONSE_BYTES / 1024,
       timeoutMs: REQUEST_TIMEOUT_MS,
       maxResults: MAX_RESULTS,
+      languageUnderstanding: {
+        naturalLanguageIntents: ENGLISH_INTENTS.length,
+        simpleMath: ['memory-unit-conversion', 'cpuquota-percent', 'duration-extraction'],
+      },
       privacy: 'redacted-errors-only',
       execution: 'never',
     };

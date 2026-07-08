@@ -2102,14 +2102,21 @@ async function collectAgentTerminalTelemetry(server) {
   }
   const secret = repairAgentSecret();
   const probes = [
+    { command: 'whoami', args: [], purpose: 'panel-user-for-repair' },
+    { command: 'id', args: [], purpose: 'panel-user-groups-for-repair' },
+    { command: 'uname', args: ['-a'], purpose: 'kernel-platform-for-repair' },
     { command: 'df', args: ['-h', '.'], purpose: 'disk-free-for-repair' },
     { command: 'df', args: ['-i', '.'], purpose: 'inode-free-for-repair' },
     { command: 'free', args: ['-m'], purpose: 'memory-free-for-repair' },
     { command: 'uptime', args: [], purpose: 'load-average-for-repair' },
     { command: 'java', args: ['-version'], purpose: 'java-runtime-for-repair' },
+    { command: 'which', args: ['java'], purpose: 'java-path-for-repair' },
   ];
   if (process.platform === 'linux') {
     probes.push(
+      { command: 'findmnt', args: ['-T', '.'], purpose: 'mount-info-for-server-root' },
+      { command: 'lsblk', args: ['-f'], purpose: 'block-device-map' },
+      { command: 'dmesg', args: ['--level', 'err'], purpose: 'kernel-error-scan' },
       { command: 'systemctl', args: ['list-units', '--all', 'nexusmark*.service', '--no-pager'], purpose: 'nexusmark-unit-scan' },
       { command: 'ss', args: ['-lntu'], purpose: 'port-listen-scan' },
     );

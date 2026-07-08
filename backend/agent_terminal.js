@@ -5,30 +5,44 @@ const { assertInside, ensureServerDirs } = require('./paths');
 
 const MAX_OUTPUT = 24000;
 const DEFAULT_TIMEOUT_MS = 12000;
+const FLAG = /^--?[A-Za-z0-9][A-Za-z0-9=-]*$/;
+const SAFE_TOKEN = /^[A-Za-z0-9_./:=,+-]+$/;
+const SAFE_FILTER = /^[A-Za-z0-9_.*+?()[\]{}|^$\\/:=-]+$/;
+const SYSTEMD_TOKEN = /^[A-Za-z0-9_.@*-]+(?:\.service)?$/;
 
 const ALLOWED_COMMANDS = new Map([
-  ['df', { args: /^-[A-Za-z0-9]+$|^[A-Za-z0-9_./:-]+$/ }],
-  ['du', { args: /^-[A-Za-z0-9]+$|^[A-Za-z0-9_./:-]+$/ }],
-  ['free', { args: /^-[A-Za-z0-9]+$/ }],
+  ['df', { args: FLAG, token: SAFE_TOKEN }],
+  ['du', { args: FLAG, token: SAFE_TOKEN }],
+  ['free', { args: FLAG }],
   ['uptime', { args: /^$/ }],
-  ['uname', { args: /^-[A-Za-z0-9]+$/ }],
+  ['uname', { args: FLAG }],
+  ['whoami', { args: /^$/ }],
+  ['id', { args: FLAG, token: /^[A-Za-z0-9_.-]+$/ }],
+  ['which', { args: /^[A-Za-z0-9_.+-]+$/ }],
+  ['cat', { args: FLAG, token: SAFE_TOKEN }],
   ['java', { args: /^-(?:version|XshowSettings:properties)$/ }],
   ['node', { args: /^-(?:v|e)$/ }],
   ['npm', { args: /^(?:-v|--version)$/ }],
-  ['systemctl', { args: /^(?:status|show|list-units|list-unit-files|reset-failed|is-active|is-enabled|cat|daemon-reload|stop)$/ }],
-  ['journalctl', { args: /^(?:-u|--unit|--since|--no-pager|-n|--lines|-o|cat|short-iso|--boot)$/ }],
-  ['ss', { args: /^-[A-Za-z0-9]+$|^sport$|^dport$|^=$|^:\d+$/ }],
-  ['ps', { args: /^-[A-Za-z0-9]+$|^[A-Za-z0-9_,=.-]+$/ }],
-  ['pgrep', { args: /^-[A-Za-z0-9]+$|^[A-Za-z0-9_.:-]+$/ }],
-  ['ls', { args: /^-[A-Za-z0-9]+$|^[A-Za-z0-9_./:-]+$/ }],
-  ['stat', { args: /^-[A-Za-z0-9%]+$|^[A-Za-z0-9_./:-]+$/ }],
-  ['file', { args: /^-[A-Za-z0-9]+$|^[A-Za-z0-9_./:-]+$/ }],
-  ['tail', { args: /^-[A-Za-z0-9]+$|^\d+$|^[A-Za-z0-9_./:-]+$/ }],
-  ['head', { args: /^-[A-Za-z0-9]+$|^\d+$|^[A-Za-z0-9_./:-]+$/ }],
-  ['grep', { args: /^-[A-Za-z0-9]+$|^[A-Za-z0-9_.*+?()[\]{}|^$\\/:=-]+$/ }],
-  ['chmod', { args: /^-[A-Za-z0-9]+$|^[0-7]{3,4}$|^[ugoa]*[+-][rwxXst]+$|^[A-Za-z0-9_./:-]+$/ }],
-  ['mkdir', { args: /^-[A-Za-z0-9]+$|^[A-Za-z0-9_./:-]+$/ }],
-  ['touch', { args: /^-[A-Za-z0-9]+$|^[A-Za-z0-9_./:-]+$/ }],
+  ['mount', { args: FLAG, token: SAFE_TOKEN }],
+  ['findmnt', { args: FLAG, token: SAFE_TOKEN }],
+  ['lsblk', { args: FLAG, token: /^[A-Za-z0-9_,+.-]+$/ }],
+  ['blkid', { args: FLAG, token: SAFE_TOKEN }],
+  ['dmesg', { args: FLAG, token: /^(?:err|warn|crit|alert|emerg|info|debug)$/ }],
+  ['systemctl', { args: /^(?:status|show|list-units|list-unit-files|reset-failed|is-active|is-enabled|cat|daemon-reload|stop)$/, token: new RegExp(`${FLAG.source}|${SYSTEMD_TOKEN.source}`) }],
+  ['journalctl', { args: /^(?:cat|short-iso|nexuspanel|nexusmark[A-Za-z0-9_.@*-]*\.service)$/, token: FLAG }],
+  ['ss', { args: FLAG, token: /^(?:sport|dport|=|:\d+)$/ }],
+  ['ps', { args: FLAG, token: /^[A-Za-z0-9_,=.-]+$/ }],
+  ['pgrep', { args: FLAG, token: /^[A-Za-z0-9_.:-]+$/ }],
+  ['ls', { args: FLAG, token: SAFE_TOKEN }],
+  ['stat', { args: /^--?[A-Za-z0-9%][A-Za-z0-9%=-]*$/, token: SAFE_TOKEN }],
+  ['file', { args: FLAG, token: SAFE_TOKEN }],
+  ['tail', { args: FLAG, token: /^\d+$|^[A-Za-z0-9_./:-]+$/ }],
+  ['head', { args: FLAG, token: /^\d+$|^[A-Za-z0-9_./:-]+$/ }],
+  ['grep', { args: FLAG, token: SAFE_FILTER }],
+  ['wc', { args: FLAG, token: SAFE_TOKEN }],
+  ['chmod', { args: FLAG, token: /^[0-7]{3,4}$|^[ugoa]*[+-][rwxXst]+$|^[A-Za-z0-9_./:-]+$/ }],
+  ['mkdir', { args: FLAG, token: SAFE_TOKEN }],
+  ['touch', { args: FLAG, token: SAFE_TOKEN }],
 ]);
 
 function redact(value) {
@@ -54,7 +68,8 @@ function normalizeCommand(command, args = [], server = null) {
   const cleanArgs = Array.isArray(args) ? args.map((arg) => String(arg)) : [];
   if (cleanArgs.length > 32) throw new Error('AI terminal argument list is too long.');
   for (const arg of cleanArgs) {
-    if (!arg || arg.length > 220 || /[\r\n;&|`$<>]/.test(arg) || !rule.args.test(arg)) {
+    const allowed = rule.args.test(arg) || (rule.token && rule.token.test(arg));
+    if (!arg || arg.length > 220 || /[\r\n;&|`$<>]/.test(arg) || !allowed) {
       throw new Error(`AI terminal argument is not allowed for ${executable}.`);
     }
   }

@@ -17,6 +17,8 @@
 - Hidden AI terminal tools collect bounded VPS telemetry through an allowlisted, timeout-capped, redacted, audited command channel.
 - The repair agent now stores competing repair plans, sandbox preflight results, rollback strategy metadata, and production gates before controlled fixes.
 - A dedicated Fixed section records repair, AI terminal, backup, server-control, and maintenance actions with automatic seven-day retention.
+- Web research now understands common plain-English panel/Minecraft/VPS problem reports, extracts simple memory/core/time math, and builds stronger focused technical searches.
+- AI terminal diagnostics now include broader safe probes such as `whoami`, `id`, `uname`, `which`, `findmnt`, `lsblk`, and bounded `dmesg` scans.
 
 ### Fixed
 
@@ -28,6 +30,7 @@
 - An unavailable software download no longer aborts the remaining Repair & Diagnose checks.
 - Linux installers and the safe updater install optional dependencies so PTY terminal support is available on capable VPS hosts.
 - Owner Terminal is always visible to the owner; when disabled, the Terminal page now includes an enable button instead of disappearing from navigation.
+- Long command flags in AI terminal probes are accepted correctly, so systemd and Linux diagnostic probes no longer fail on normal options such as `--no-pager`.
 
 ## 1.2.0 Reliability Revision - 2026-07-03
 
