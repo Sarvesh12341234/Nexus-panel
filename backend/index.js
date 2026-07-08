@@ -150,6 +150,25 @@ function repairAgentSecret() {
   return ensureSettingValue('repair_agent_secret', () => crypto.randomBytes(32).toString('hex'));
 }
 
+function pruneFixedLogs() {
+  db.prepare('DELETE FROM fixed_logs WHERE created_at < ?').run(Date.now() - 7 * 24 * 60 * 60 * 1000);
+}
+
+function logFixed({ serverId = null, category = 'panel', title = '', detail = '', source = 'panel' }) {
+  pruneFixedLogs();
+  db.prepare(`
+    INSERT INTO fixed_logs (server_id, category, title, detail, source, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    serverId ? Number(serverId) : null,
+    String(category || 'panel').slice(0, 40),
+    String(title || '').slice(0, 160),
+    String(detail || '').slice(0, 1200),
+    String(source || 'panel').slice(0, 80),
+    Date.now(),
+  );
+}
+
 function panelEdition() {
   return (process.env.NEXUSPANEL_EDITION || (fs.existsSync(editionPath) ? fs.readFileSync(editionPath, 'utf8').trim() : '') || 'normal').replace(/[^a-z0-9-]/gi, '').toLowerCase() || 'normal';
 }
@@ -2164,6 +2183,15 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   });
   const terminalTelemetry = await collectAgentTerminalTelemetry(server);
   agentAnalysis.terminalTelemetry = terminalTelemetry;
+  if (terminalTelemetry.enabled) {
+    logFixed({
+      serverId: server.id,
+      category: 'ai-terminal',
+      title: 'AI terminal telemetry collected',
+      detail: terminalTelemetry.summary,
+      source: 'repair-agent',
+    });
+  }
   const crash = db.prepare('SELECT signature FROM repair_crash_state WHERE server_id = ?').get(server.id);
   const episodeId = repairAgent.recordEpisode({
     serverId: server.id,
@@ -2263,6 +2291,14 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     actions.push(`Applied ${optimization.applied.length} bounded game setting optimization(s): ${optimization.applied.join(', ')}.`);
   }
   optimization.skipped.forEach((item) => warnings.push(item));
+  const summary = `${checks.filter((check) => check.ok).length}/${checks.length} checks passed, ${actions.length} repair action(s), ${warnings.length} warning(s).`;
+  logFixed({
+    serverId: server.id,
+    category: applyOptimizations ? 'repair' : 'repair-preview',
+    title: applyOptimizations ? 'Repair & Diagnose completed' : 'Repair preview completed',
+    detail: `${summary}\n${actions.slice(0, 8).join('\n')}`,
+    source: 'repair-agent',
+  });
 
   return {
     repair,
@@ -2272,7 +2308,7 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     diagnostics,
     knowledge,
     agent: { episodeId, ...publicAgentAnalysis(agentAnalysis), optimization },
-    summary: `${checks.filter((check) => check.ok).length}/${checks.length} checks passed, ${actions.length} repair action(s), ${warnings.length} warning(s).`,
+    summary,
   };
 }
 
@@ -2731,6 +2767,36 @@ app.get('/api/repair/agent/status', requirePermission(capabilities.SECURITY_VIEW
   res.json({ agent: repairBrainPayload().agent });
 });
 
+app.get('/api/fixed/logs', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  pruneFixedLogs();
+  const logs = db.prepare(`
+    SELECT fixed.id, fixed.server_id, fixed.category, fixed.title, fixed.detail,
+      fixed.source, fixed.created_at, server.name AS server_name
+    FROM fixed_logs fixed
+    LEFT JOIN servers server ON server.id = fixed.server_id
+    ORDER BY fixed.created_at DESC
+    LIMIT 200
+  `).all().map((row) => ({
+    id: row.id,
+    serverId: row.server_id,
+    serverName: row.server_name || '',
+    category: row.category,
+    title: row.title,
+    detail: row.detail,
+    source: row.source,
+    createdAt: row.created_at,
+  }));
+  res.json({
+    retentionDays: 7,
+    logs,
+    consoleLogPolicy: {
+      memoryLinesPerServer: 600,
+      diskRotateBytes: 4 * 1024 * 1024,
+      lagRisk: 'low',
+    },
+  });
+});
+
 app.post('/api/repair/agent/episodes/:episodeId/feedback', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can train the repair agent.' });
   const reward = String(req.body.feedback || '').toLowerCase() === 'helpful' ? 1
@@ -2740,6 +2806,12 @@ app.post('/api/repair/agent/episodes/:episodeId/feedback', requirePermission(cap
   const episode = db.prepare('SELECT id FROM repair_agent_episodes WHERE id = ?').get(Number(req.params.episodeId));
   if (!episode) return res.status(404).json({ error: 'Repair episode not found.' });
   const learning = repairAgent.feedback(episode.id, reward, `owner-${reward > 0 ? 'helpful' : 'wrong'}`);
+  logFixed({
+    category: 'learning',
+    title: reward > 0 ? 'Owner marked agent diagnosis helpful' : 'Owner marked agent diagnosis wrong',
+    detail: `Episode ${episode.id}; updated ${learning.updated || 0} weight(s).`,
+    source: 'owner-feedback',
+  });
   res.json({ ok: true, learning, agent: repairAgent.status() });
 });
 
@@ -3864,13 +3936,16 @@ app.post('/api/servers/:id/start', requirePermission(capabilities.SERVER_START, 
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can start.' });
   if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
   try {
-    return res.json(startServer(resolveInstalledExecutable(server, software), software));
+    const result = startServer(resolveInstalledExecutable(server, software), software);
+    logFixed({ serverId: server.id, category: 'server', title: 'Server start requested', detail: result.message || '', source: 'owner-action' });
+    return res.json(result);
   } catch (error) {
     if (!/install server software|executable/i.test(error.message)) throw error;
     appendLog(server.id, `[NexusPanel] Smart fix: ${error.message}`);
     const repaired = await repairMissingExecutable(server, software);
     const fixedServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
     const result = startServer(resolveInstalledExecutable(fixedServer, software), software);
+    logFixed({ serverId: server.id, category: 'repair', title: 'Smart start repair applied', detail: repaired.message || error.message, source: 'smart-start' });
     return res.json({ ...result, repaired });
   }
 }));
@@ -3884,6 +3959,7 @@ app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, p
   const learned = learnRepairPlaybook(server, report);
   appendLog(server.id, `[NexusPanel] Repair & Diagnose completed: ${report.summary}`);
   if (learned) appendLog(server.id, `[NexusPanel] Repair playbook ${learned.signature} recorded as a candidate; it will be trusted only after 60 seconds of stable runtime.`);
+  if (learned) logFixed({ serverId: server.id, category: 'learning', title: 'Repair playbook candidate recorded', detail: `Signature ${learned.signature}; ${learned.actions} action(s).`, source: 'repair-agent' });
   res.json({ ok: true, ...report, learned, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
 }));
 
@@ -3895,7 +3971,10 @@ app.post('/api/servers/:id/eula', requirePermission(capabilities.SERVER_MANAGE, 
 }));
 
 app.post('/api/servers/:id/stop', requirePermission(capabilities.SERVER_STOP, permissions.POWER_SERVERS), (req, res) => {
-  res.json(stopServer(Number(req.params.id)));
+  const id = Number(req.params.id);
+  const result = stopServer(id);
+  logFixed({ serverId: id, category: 'server', title: 'Server stop requested', detail: result.message || '', source: 'owner-action' });
+  res.json(result);
 });
 
 app.post('/api/servers/:id/restart', requirePermission(capabilities.SERVER_RESTART, permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
@@ -3904,11 +3983,16 @@ app.post('/api/servers/:id/restart', requirePermission(capabilities.SERVER_RESTA
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can restart.' });
   if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
-  res.json(restartServer(resolveInstalledExecutable(server, software), software));
+  const result = restartServer(resolveInstalledExecutable(server, software), software);
+  logFixed({ serverId: server.id, category: 'server', title: 'Server restart requested', detail: result.message || '', source: 'owner-action' });
+  res.json(result);
 }));
 
 app.post('/api/servers/:id/kill', requirePermission(capabilities.SERVER_KILL, permissions.POWER_SERVERS), (req, res) => {
-  res.json(killServer(Number(req.params.id)));
+  const id = Number(req.params.id);
+  const result = killServer(id);
+  logFixed({ serverId: id, category: 'server', title: 'Server kill requested', detail: result.message || '', source: 'owner-action' });
+  res.json(result);
 });
 
 app.post('/api/servers/:id/command', requirePermission(capabilities.CONSOLE_COMMAND, permissions.SEND_COMMANDS), (req, res) => {
@@ -4174,7 +4258,9 @@ app.delete('/api/servers/:id/backups/share-requests/:requestId', requirePermissi
 
 app.post('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
-  res.status(201).json({ backup: await createServerBackup(server, 'manual'), backups: await backupRows(server) });
+  const backup = await createServerBackup(server, 'manual');
+  logFixed({ serverId: server.id, category: 'backup', title: 'Manual backup created', detail: backup.name, source: 'backup' });
+  res.status(201).json({ backup, backups: await backupRows(server) });
 }));
 
 app.delete('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
@@ -4209,6 +4295,7 @@ app.post('/api/servers/:id/backups/restore', requirePermission(capabilities.BACK
   const result = sourceServerId === Number(server.id)
     ? await restoreServerBackup(server, req.body.name)
     : await restoreBackupFileIntoServer(server, sourceServerId, req.body.name);
+  logFixed({ serverId: server.id, category: 'backup', title: 'Backup restored', detail: `Restored ${req.body.name || 'backup'} from server ${sourceServerId}.`, source: 'backup' });
   res.json({ ok: true, ...result, backups: await backupRows(server) });
 }));
 
@@ -4611,6 +4698,14 @@ async function runAdaptiveMaintenance() {
   await runAutoBackups();
   refreshWakeWatchers();
   adaptiveMaintenanceStatus = { lastRunAt: now, actions };
+  if (actions.length) {
+    logFixed({
+      category: 'maintenance',
+      title: 'Adaptive maintenance completed',
+      detail: actions.slice(0, 20).join('\n'),
+      source: 'adaptive-engine',
+    });
+  }
   return { ok: true, ...adaptiveMaintenanceStatus };
 }
 

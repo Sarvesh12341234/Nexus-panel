@@ -68,6 +68,7 @@ const elements = {
   optimizerPlan: document.querySelector('#optimizerPlan'),
   healthPanel: document.querySelector('#healthPanel'),
   auditPanel: document.querySelector('#auditPanel'),
+  fixedPanel: document.querySelector('#fixedPanel'),
   consoleBox: document.querySelector('#consoleBox'),
   consoleMetrics: document.querySelector('#consoleMetrics'),
   commandForm: document.querySelector('#commandForm'),
@@ -221,6 +222,7 @@ const viewTitles = {
   network: ['Host', 'Network'],
   admins: ['Owner', 'Admin Access'],
   security: ['Security', 'Health and Login Audit'],
+  fixed: ['Fixed', 'Repair History'],
   settings: ['Panel', 'Settings'],
   terminal: ['Owner', 'VPS Terminal'],
 };
@@ -239,6 +241,7 @@ const viewAccess = {
   network: { keys: [CAPABILITIES.NETWORK_MANAGE], level: 'MANAGE_SERVERS' },
   admins: { keys: [CAPABILITIES.ADMINS_MANAGE], level: 'MANAGE_ADMINS' },
   security: { keys: [CAPABILITIES.SECURITY_VIEW], level: 'MANAGE_ADMINS' },
+  fixed: { keys: [CAPABILITIES.SECURITY_VIEW], level: 'MANAGE_ADMINS' },
   settings: { keys: [CAPABILITIES.SETTINGS_MANAGE, CAPABILITIES.TIMEZONE_MANAGE], level: 'MANAGE_ADMINS' },
   terminal: { keys: [CAPABILITIES.SETTINGS_MANAGE], level: 'MANAGE_ADMINS' },
 };
@@ -1177,7 +1180,7 @@ function can(capability, legacyLevel = 0) {
 function canView(view) {
   if (!state.user || !Object.hasOwn(viewAccess, view)) return false;
   if (view === 'templates' && state.settings?.edition !== 'host') return false;
-  if (view === 'terminal') return Boolean(state.settings?.terminalEnabled && state.user.role === 'owner');
+  if (view === 'terminal') return state.user.role === 'owner';
   const access = viewAccess[view];
   if (!access.keys.length) return true;
   return can(access.keys, Number(state.permissions[access.level] || 0));
@@ -1737,6 +1740,7 @@ async function renderActiveView() {
   if (state.activeView === 'network') await renderNetwork();
   if (state.activeView === 'admins') renderAdmins();
   if (state.activeView === 'security') await renderSecurity();
+  if (state.activeView === 'fixed') await renderFixed();
   if (state.activeView === 'settings') renderSettings();
   if (state.activeView === 'terminal') renderTerminal();
   applyUiPreferences(alphaDraft);
@@ -2113,7 +2117,9 @@ function updateSettingsLiveStatus() {
 function renderTerminal() {
   if (!elements.terminalPanel) return;
   if (!state.settings?.terminalEnabled || state.user?.role !== 'owner') {
-    elements.terminalPanel.innerHTML = '<p class="empty-state">No permission. Terminal is owner-only and must be enabled in Settings.</p>';
+    elements.terminalPanel.innerHTML = state.user?.role === 'owner'
+      ? '<div class="section-head"><div><p class="eyebrow">Owner Terminal</p><h2>Persistent VPS shell</h2></div><button type="button" data-action="terminal-enable">Enable Terminal</button></div><p class="empty-state">Terminal is owner-only and currently disabled. Enable it here or in Settings.</p>'
+      : '<p class="empty-state">No permission. Terminal is owner-only.</p>';
     return;
   }
   elements.terminalPanel.innerHTML = `
@@ -2377,6 +2383,42 @@ function renderAdmins() {
     </div>
   `;
   }).join('');
+}
+
+async function renderFixed() {
+  if (!elements.fixedPanel) return;
+  if (!can(CAPABILITIES.SECURITY_VIEW, state.permissions.MANAGE_ADMINS)) {
+    elements.fixedPanel.innerHTML = '<p class="empty-state">Fixed history needs security access.</p>';
+    return;
+  }
+  const data = await api('/api/fixed/logs').catch((error) => ({
+    error: error.message,
+    logs: [],
+    retentionDays: 7,
+    consoleLogPolicy: {},
+  }));
+  const policy = data.consoleLogPolicy || {};
+  elements.fixedPanel.innerHTML = `
+    <div class="section-head"><div><p class="eyebrow">Fixed</p><h2>Repair and action history</h2></div><button class="secondary" type="button" data-action="refresh-fixed">Refresh</button></div>
+    <div class="quick-stats">
+      <article><span>Retention</span><strong>${Number(data.retentionDays || 7)} days</strong></article>
+      <article><span>Console memory cap</span><strong>${Number(policy.memoryLinesPerServer || 600)} lines</strong></article>
+      <article><span>Disk log rotation</span><strong>${formatBytes(Number(policy.diskRotateBytes || 4 * 1024 * 1024))}</strong></article>
+      <article><span>Lag risk</span><strong>${escapeHtml(policy.lagRisk || 'low')}</strong></article>
+    </div>
+    <div class="plugin-list">
+      ${(data.logs || []).map((item) => `
+        <div class="plugin-row">
+          <div>
+            <strong>${escapeHtml(item.title || 'Fixed event')}</strong>
+            <div class="muted">${escapeHtml(item.serverName || 'Panel')} · ${escapeHtml(item.category || 'panel')} · ${escapeHtml(item.source || 'system')} · ${escapeHtml(formatPanelDate(item.createdAt))}</div>
+            ${item.detail ? `<div class="muted">${escapeHtml(item.detail).replaceAll('\n', '<br>')}</div>` : ''}
+          </div>
+          <span class="badge is-on">fixed</span>
+        </div>
+      `).join('') || `<p class="empty-state">${escapeHtml(data.error || 'No fixed events recorded in the last 7 days.')}</p>`}
+    </div>
+  `;
 }
 
 async function renderSecurity(forceHealth = false) {
@@ -3575,6 +3617,20 @@ document.addEventListener('click', async (event) => {
       } catch (error) {
         showToast(`Layout import failed: ${error.message}`);
       }
+      return;
+    }
+    if (action === 'terminal-enable') {
+      await api('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ ...state.settings, terminalEnabled: true }),
+      });
+      showToast('Terminal enabled.');
+      await refresh();
+      return setView('terminal');
+    }
+    if (action === 'refresh-fixed') {
+      await renderFixed();
+      showToast('Fixed history refreshed.');
       return;
     }
     if (action === 'manage-server') {

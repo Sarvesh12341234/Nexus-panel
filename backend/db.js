@@ -329,6 +329,16 @@ db.exec(`
     access_hash TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS fixed_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER,
+    category TEXT NOT NULL DEFAULT 'panel',
+    title TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
 `);
 
 // Insert default timezone
