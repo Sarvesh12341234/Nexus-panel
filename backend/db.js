@@ -339,6 +339,24 @@ db.exec(`
     source TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS repair_agent_command_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER,
+    command_text TEXT NOT NULL DEFAULT '',
+    command_preview TEXT NOT NULL DEFAULT '',
+    purpose TEXT NOT NULL DEFAULT '',
+    risk TEXT NOT NULL DEFAULT 'high',
+    status TEXT NOT NULL DEFAULT 'pending',
+    requested_by TEXT NOT NULL DEFAULT 'repair-agent',
+    requested_at INTEGER NOT NULL,
+    approved_by_user_id INTEGER,
+    approved_at INTEGER NOT NULL DEFAULT 0,
+    executed_at INTEGER NOT NULL DEFAULT 0,
+    exit_code INTEGER,
+    output_preview TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  );
 `);
 
 // Insert default timezone

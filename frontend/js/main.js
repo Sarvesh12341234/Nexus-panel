@@ -2397,6 +2397,9 @@ async function renderFixed() {
     retentionDays: 7,
     consoleLogPolicy: {},
   }));
+  const agentData = await api('/api/repair/agent/status').catch(() => ({ agent: state.repairBrain?.agent || {} }));
+  const agent = agentData.agent || {};
+  const terminal = agent.terminal || {};
   const policy = data.consoleLogPolicy || {};
   elements.fixedPanel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Fixed</p><h2>Repair and action history</h2></div><button class="secondary" type="button" data-action="refresh-fixed">Refresh</button></div>
@@ -2405,7 +2408,29 @@ async function renderFixed() {
       <article><span>Console memory cap</span><strong>${Number(policy.memoryLinesPerServer || 600)} lines</strong></article>
       <article><span>Disk log rotation</span><strong>${formatBytes(Number(policy.diskRotateBytes || 4 * 1024 * 1024))}</strong></article>
       <article><span>Lag risk</span><strong>${escapeHtml(policy.lagRisk || 'low')}</strong></article>
+      <article><span>Full access</span><strong>${terminal.fullAccessEnabled ? 'Unlocked' : 'Locked'}</strong></article>
+      <article><span>Live agent</span><strong>${terminal.liveEnabled ? 'On' : 'Off'}</strong></article>
+      <article><span>Pending commands</span><strong>${Number(terminal.pendingFullAccessCommands || 0)}</strong></article>
     </div>
+    ${state.user?.role === 'owner' ? `<div class="backup-settings">
+      <button class="${terminal.fullAccessEnabled ? 'danger' : 'secondary'}" type="button" data-action="${terminal.fullAccessEnabled ? 'agent-full-access-lock' : 'agent-full-access-unlock'}">${terminal.fullAccessEnabled ? 'Lock Full Access' : 'Unlock Full Access'}</button>
+      <button class="secondary" type="button" data-action="${terminal.liveEnabled ? 'agent-live-disable' : 'agent-live-enable'}">${terminal.liveEnabled ? 'Disable Live Agent' : 'Enable Live Agent'}</button>
+      <button class="secondary" type="button" data-action="agent-queue-command">Queue Command</button>
+    </div>` : ''}
+    <h3>Full access queue</h3>
+    <div class="plugin-list">
+      ${(terminal.commandQueue || []).map((item) => `
+        <div class="plugin-row">
+          <div>
+            <strong>${escapeHtml(item.commandPreview || 'command')}</strong>
+            <div class="muted">${escapeHtml(item.serverName || 'Panel')} Â· ${escapeHtml(item.purpose || '')} Â· ${escapeHtml(item.risk || 'high')} Â· ${escapeHtml(item.status || '')}${item.exitCode == null ? '' : ` Â· exit ${item.exitCode}`}</div>
+            ${item.outputPreview ? `<div class="muted">${escapeHtml(item.outputPreview).slice(-420)}</div>` : ''}
+          </div>
+          <div class="row-actions">${item.status === 'pending' && state.user?.role === 'owner' ? `<button class="danger" type="button" data-action="agent-command-approve" data-command-id="${item.id}">Approve & Run</button>` : ''}</div>
+        </div>
+      `).join('') || '<p class="empty-state">No full access commands queued.</p>'}
+    </div>
+    <h3>Seven day fixed log</h3>
     <div class="plugin-list">
       ${(data.logs || []).map((item) => `
         <div class="plugin-row">
@@ -3632,6 +3657,63 @@ document.addEventListener('click', async (event) => {
       await renderFixed();
       showToast('Fixed history refreshed.');
       return;
+    }
+    if (action === 'agent-full-access-unlock') {
+      const password = prompt('Owner password to unlock AI full access for 15 minutes:');
+      if (!password) return;
+      await api('/api/repair/agent/full-access', {
+        method: 'POST',
+        body: JSON.stringify({ enabled: true, minutes: 15, password }),
+      });
+      showToast('AI full access unlocked for 15 minutes.');
+      await refresh();
+      return renderFixed();
+    }
+    if (action === 'agent-full-access-lock') {
+      await api('/api/repair/agent/full-access', {
+        method: 'POST',
+        body: JSON.stringify({ enabled: false, minutes: 1, password: prompt('Owner password to lock AI full access:') || '' }),
+      });
+      showToast('AI full access locked.');
+      await refresh();
+      return renderFixed();
+    }
+    if (action === 'agent-live-enable' || action === 'agent-live-disable') {
+      const enabled = action === 'agent-live-enable';
+      if (enabled && !confirm('Enable Live Agent? It will scan console/files during adaptive maintenance, run safe offline fixes, and queue high-risk commands for owner approval.')) return;
+      await api('/api/repair/agent/live', {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      });
+      showToast(enabled ? 'Live Agent enabled.' : 'Live Agent disabled.');
+      await refresh();
+      return renderFixed();
+    }
+    if (action === 'agent-queue-command') {
+      const command = prompt('Command to queue for owner-approved full access execution:');
+      if (!command) return;
+      const purpose = prompt('Purpose for this command:', 'owner-requested') || 'owner-requested';
+      await api('/api/repair/agent/commands', {
+        method: 'POST',
+        body: JSON.stringify({ serverId: state.activeServerId || null, command, purpose, risk: 'owner-approved' }),
+      });
+      showToast('Command queued.');
+      await refresh();
+      return renderFixed();
+    }
+    if (action === 'agent-command-approve') {
+      const id = actionTarget.dataset.commandId;
+      if (!id) return;
+      if (!confirm('Approve and run this full access command now?')) return;
+      const password = prompt('Owner password to run queued command:');
+      if (!password) return;
+      const result = await api(`/api/repair/agent/commands/${encodeURIComponent(id)}/approve`, {
+        method: 'POST',
+        body: JSON.stringify({ password, timeoutMs: 30000 }),
+      });
+      showToast(result.ok ? 'Full access command completed.' : 'Full access command failed.');
+      await refresh();
+      return renderFixed();
     }
     if (action === 'manage-server') {
       state.activeServerId = Number(actionTarget.closest('[data-server-id]').dataset.serverId);

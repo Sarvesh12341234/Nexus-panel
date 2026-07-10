@@ -25,7 +25,7 @@ const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runti
 const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
-const { runAgentTerminal } = require('./agent_terminal');
+const { runAgentTerminal, runFullAccessCommand } = require('./agent_terminal');
 const {
   SESSION_COOKIE,
   authMiddleware,
@@ -150,6 +150,14 @@ function repairAgentSecret() {
   return ensureSettingValue('repair_agent_secret', () => crypto.randomBytes(32).toString('hex'));
 }
 
+function repairFullAccessUntil() {
+  return Number(settingValue('repair_agent_full_access_until', '0')) || 0;
+}
+
+function repairFullAccessEnabled() {
+  return repairFullAccessUntil() > Date.now();
+}
+
 function pruneFixedLogs() {
   db.prepare('DELETE FROM fixed_logs WHERE created_at < ?').run(Date.now() - 7 * 24 * 60 * 60 * 1000);
 }
@@ -203,6 +211,9 @@ function panelSettingsPayload(user = null) {
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
     repairWebEnabled: settingValue('repair_web_enabled', '1') === '1',
     repairAgentTerminalEnabled: settingValue('repair_agent_terminal_enabled', '1') === '1',
+    repairAgentLiveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
+    repairAgentFullAccessEnabled: repairFullAccessEnabled(),
+    repairAgentFullAccessUntil: repairFullAccessUntil(),
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
     maxCpuCores: hostCpuCount(),
     platform: process.platform,
@@ -1807,6 +1818,28 @@ function repairBrainPayload() {
       COALESCE(AVG(duration_ms), 0) AS average_ms
     FROM repair_agent_terminal_audit
   `).get();
+  const queuedCommands = db.prepare(`
+    SELECT queue.id, queue.server_id, queue.command_preview, queue.purpose, queue.risk,
+      queue.status, queue.requested_at, queue.executed_at, queue.exit_code,
+      queue.output_preview, server.name AS server_name
+    FROM repair_agent_command_queue queue
+    LEFT JOIN servers server ON server.id = queue.server_id
+    ORDER BY queue.requested_at DESC
+    LIMIT 12
+  `).all().map((row) => ({
+    id: row.id,
+    serverId: row.server_id,
+    serverName: row.server_name || '',
+    commandPreview: row.command_preview,
+    purpose: row.purpose,
+    risk: row.risk,
+    status: row.status,
+    requestedAt: row.requested_at,
+    executedAt: row.executed_at,
+    exitCode: row.exit_code,
+    outputPreview: row.output_preview,
+  }));
+  const pendingCommands = queuedCommands.filter((item) => item.status === 'pending').length;
   return {
     knowledge: knowledgeStatus(),
     playbooks,
@@ -1819,6 +1852,11 @@ function repairBrainPayload() {
       recentPlans: plans,
       terminal: {
         enabled: settingValue('repair_agent_terminal_enabled', '1') === '1',
+        liveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
+        fullAccessEnabled: repairFullAccessEnabled(),
+        fullAccessUntil: repairFullAccessUntil(),
+        pendingFullAccessCommands: pendingCommands,
+        commandQueue: queuedCommands,
         auditedCommands: Number(agentTerminal.count || 0),
         lastRunAt: Number(agentTerminal.last_run_at || 0),
         averageMs: Math.round(Number(agentTerminal.average_ms || 0)),
@@ -2821,6 +2859,133 @@ app.post('/api/repair/agent/episodes/:episodeId/feedback', requirePermission(cap
   });
   res.json({ ok: true, learning, agent: repairAgent.status() });
 });
+
+function requireOwnerPassword(req) {
+  const owner = db.prepare('SELECT * FROM users WHERE id = ? AND role = ?').get(req.user.id, 'owner');
+  if (!owner || !verifyPassword(req.body.password, owner.password_hash)) {
+    throw new Error('Owner password is required.');
+  }
+  return owner;
+}
+
+function queueFullAccessCommand({ serverId = null, command, purpose = 'repair-agent', risk = 'high', requestedBy = 'repair-agent' }) {
+  const commandText = String(command || '').trim();
+  if (!commandText) throw new Error('Command is empty.');
+  if (commandText.length > 4000) throw new Error('Command is too long.');
+  const preview = redactRepairCommand(commandText);
+  const inferredRisk = /(?:\bsudo\b|\brm\b|\bmkfs\b|\bfsck\b|\bdd\b|\bmount\b|\bumount\b|\bapt\b|\byum\b|\bdnf\b|\bsystemctl\s+(?:stop|restart|disable|mask)|>\s*\/|\btee\s+\/)/i.test(commandText)
+    ? 'critical'
+    : /(?:\bchmod\b|\bchown\b|\bmv\b|\bcp\b|\bsed\b|\becho\b|\bnano\b|\bvim\b)/i.test(commandText)
+      ? 'high'
+      : String(risk || 'medium');
+  const result = db.prepare(`
+    INSERT INTO repair_agent_command_queue (
+      server_id, command_text, command_preview, purpose, risk, status, requested_by, requested_at
+    ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+  `).run(
+    serverId ? Number(serverId) : null,
+    commandText,
+    preview,
+    String(purpose || 'repair-agent').slice(0, 180),
+    String(inferredRisk).slice(0, 20),
+    String(requestedBy || 'repair-agent').slice(0, 80),
+    Date.now(),
+  );
+  logFixed({
+    serverId,
+    category: 'full-access',
+    title: 'Full access command queued',
+    detail: `${purpose}: ${preview}`,
+    source: requestedBy,
+  });
+  return Number(result.lastInsertRowid);
+}
+
+app.post('/api/repair/agent/full-access', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can unlock AI full access.' });
+  try {
+    requireOwnerPassword(req);
+  } catch (error) {
+    return res.status(401).json({ error: error.message });
+  }
+  const enabled = toBool(req.body.enabled, true);
+  const minutes = clampNumber(req.body.minutes, 1, 120, 15);
+  const until = enabled ? Date.now() + minutes * 60 * 1000 : 0;
+  setSettingValue('repair_agent_full_access_until', until);
+  logFixed({
+    category: 'full-access',
+    title: enabled ? 'AI full access mode unlocked' : 'AI full access mode locked',
+    detail: enabled ? `Expires in ${minutes} minute(s). Owner-approved commands can run until then.` : 'Owner locked full access mode.',
+    source: 'owner',
+  });
+  res.json({ ok: true, enabled: until > Date.now(), until, agent: repairBrainPayload().agent });
+});
+
+app.post('/api/repair/agent/live', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can change live agent mode.' });
+  setSettingValue('repair_agent_live_enabled', toBool(req.body.enabled) ? '1' : '0');
+  logFixed({
+    category: 'live-agent',
+    title: toBool(req.body.enabled) ? 'Live agent enabled' : 'Live agent disabled',
+    detail: 'Live agent scans console logs, server files, database health, and repair signals during adaptive maintenance.',
+    source: 'owner',
+  });
+  res.json({ ok: true, enabled: settingValue('repair_agent_live_enabled', '0') === '1', agent: repairBrainPayload().agent });
+});
+
+app.post('/api/repair/agent/commands', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can queue full access commands.' });
+  const serverId = req.body.serverId ? Number(req.body.serverId) : null;
+  if (serverId && !db.prepare('SELECT id FROM servers WHERE id = ?').get(serverId)) return res.status(404).json({ error: 'Server not found.' });
+  const id = queueFullAccessCommand({
+    serverId,
+    command: req.body.command,
+    purpose: req.body.purpose || 'owner-requested',
+    risk: req.body.risk || 'high',
+    requestedBy: 'owner',
+  });
+  res.status(201).json({ ok: true, id, agent: repairBrainPayload().agent });
+});
+
+app.post('/api/repair/agent/commands/:commandId/approve', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can approve full access commands.' });
+  try {
+    requireOwnerPassword(req);
+  } catch (error) {
+    return res.status(401).json({ error: error.message });
+  }
+  if (!repairFullAccessEnabled()) return res.status(409).json({ error: 'AI full access mode is locked or expired.' });
+  const queued = db.prepare('SELECT * FROM repair_agent_command_queue WHERE id = ?').get(Number(req.params.commandId));
+  if (!queued) return res.status(404).json({ error: 'Command was not found.' });
+  if (queued.status !== 'pending') return res.status(409).json({ error: `Command is already ${queued.status}.` });
+  const server = queued.server_id ? db.prepare('SELECT * FROM servers WHERE id = ?').get(queued.server_id) : null;
+  const cwd = server ? ensureServerDirs(server) : path.join(__dirname, '..');
+  db.prepare(`
+    UPDATE repair_agent_command_queue
+    SET status = 'running', approved_by_user_id = ?, approved_at = ?
+    WHERE id = ?
+  `).run(req.user.id, Date.now(), queued.id);
+  const result = await runFullAccessCommand(db, repairAgentSecret(), {
+    serverId: queued.server_id,
+    command: queued.command_text,
+    purpose: queued.purpose,
+    cwd,
+    timeoutMs: clampNumber(req.body.timeoutMs, 1000, 120000, 30000),
+  });
+  db.prepare(`
+    UPDATE repair_agent_command_queue
+    SET status = ?, executed_at = ?, exit_code = ?, output_preview = ?
+    WHERE id = ?
+  `).run(result.code === 0 ? 'completed' : 'failed', Date.now(), result.code, result.output.slice(-4000), queued.id);
+  logFixed({
+    serverId: queued.server_id,
+    category: 'full-access',
+    title: result.code === 0 ? 'Full access command completed' : 'Full access command failed',
+    detail: `${queued.command_preview}\nexit=${result.code}\n${result.output.slice(-600)}`,
+    source: 'owner-approved-command',
+  });
+  res.json({ ok: result.code === 0, result, agent: repairBrainPayload().agent });
+}));
 
 app.post('/api/database/snapshot', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   const snapshot = backupDatabase({ force: true });
@@ -4690,6 +4855,10 @@ async function runAdaptiveMaintenance() {
   if (validatedPlaybooks.length) actions.push(`Validated ${validatedPlaybooks.length} repair playbook(s) after stable runtime`);
   const validatedAgentEpisodes = validateStableAgentEpisodes();
   if (validatedAgentEpisodes.length) actions.push(`Trained repair agent from ${validatedAgentEpisodes.length} stable recovery episode(s)`);
+  if (settingValue('repair_agent_live_enabled', '0') === '1') {
+    const live = await runLiveAgentSweep();
+    if (live.actions.length) actions.push(...live.actions);
+  }
   if (now - Number(databaseHealthStatus.checkedAt || 0) >= 5 * 60 * 1000) {
     const verification = verifyDatabase();
     databaseHealthStatus = { ...verification, checkedAt: now, snapshotAt: databaseHealthStatus.snapshotAt || 0 };
@@ -4714,6 +4883,81 @@ async function runAdaptiveMaintenance() {
     });
   }
   return { ok: true, ...adaptiveMaintenanceStatus };
+}
+
+async function runLiveAgentSweep() {
+  const actions = [];
+  const servers = db.prepare('SELECT * FROM servers').all();
+  for (const server of servers.slice(0, 50)) {
+    const software = softwareForServer(server);
+    if (!software) continue;
+    const logs = consoleLogs(server.id).slice(-80);
+    const diagnostics = diagnoseRuntime(logs, { limit: 6 });
+    const root = findServerRoot({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+    const watchFiles = ['server.properties', 'eula.txt', '.nexus-server.json']
+      .map((name) => path.join(root, name))
+      .filter((filePath) => fs.existsSync(filePath));
+    if (diagnostics.length) {
+      const analysis = await analyzeServerWithAgent(server, software, diagnostics, { allowWeb: true });
+      const episodeId = repairAgent.recordEpisode({
+        serverId: server.id,
+        signature: crashSignature(server, software, null, null).signature,
+        analysis,
+        status: 'live-observed',
+      });
+      actions.push(`Live agent analyzed ${server.name}: ${diagnostics[0].summary}`);
+      logFixed({
+        serverId: server.id,
+        category: 'live-agent',
+        title: 'Live agent analyzed console',
+        detail: `Episode ${episodeId}: ${diagnostics.map((item) => item.summary).join('; ')}`,
+        source: 'live-agent',
+      });
+      if (runtimeStatus(server.id) === 'offline' && diagnostics.some((item) => ['properties-path', 'properties-syntax', 'properties-value', 'properties-encoding'].includes(item.id))) {
+        const properties = await repairPropertiesFile(server);
+        if (properties.repaired) {
+          actions.push(`Live agent repaired properties for ${server.name}`);
+          logFixed({
+            serverId: server.id,
+            category: 'live-agent',
+            title: 'Live agent repaired server.properties',
+            detail: properties.issues.join('\n') || 'Rebuilt invalid properties file.',
+            source: 'live-agent',
+          });
+        }
+      }
+      if (repairFullAccessEnabled() && diagnostics.some((item) => ['disk-full', 'inode-full', 'read-only-fs', 'disk-io-error'].includes(item.id))) {
+        const existing = db.prepare(`
+          SELECT id FROM repair_agent_command_queue
+          WHERE server_id = ? AND status = 'pending' AND purpose = 'live-agent-storage-debug'
+            AND requested_at >= ?
+        `).get(server.id, Date.now() - 30 * 60 * 1000);
+        if (!existing) {
+          queueFullAccessCommand({
+            serverId: server.id,
+            command: 'df -h && df -i && findmnt -T . && dmesg --level err | tail -80',
+            purpose: 'live-agent-storage-debug',
+            risk: 'high',
+            requestedBy: 'live-agent',
+          });
+          actions.push(`Live agent queued storage debug command for ${server.name}`);
+        }
+      }
+    }
+    for (const filePath of watchFiles) {
+      const stats = fs.statSync(filePath);
+      if (Date.now() - stats.mtimeMs < 3 * 60 * 1000) {
+        logFixed({
+          serverId: server.id,
+          category: 'live-agent',
+          title: 'Live agent noticed file change',
+          detail: displayPath(filePath),
+          source: 'live-agent',
+        });
+      }
+    }
+  }
+  return { actions };
 }
 
 function startSchedulers() {

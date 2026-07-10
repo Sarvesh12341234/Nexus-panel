@@ -143,8 +143,70 @@ function runAgentTerminal(db, secret, request) {
   });
 }
 
+function runFullAccessCommand(db, secret, request) {
+  const started = Date.now();
+  const commandText = String(request.command || '').trim();
+  if (!commandText) throw new Error('Full access command is empty.');
+  if (commandText.length > 4000) throw new Error('Full access command is too long.');
+  const purpose = String(request.purpose || 'owner-approved-full-access').slice(0, 120);
+  const accessHash = agentAccessHash(secret, 'full-access-shell', [commandText], purpose);
+  const cwd = request.cwd || path.resolve(__dirname, '..');
+  const shell = process.platform === 'win32'
+    ? { command: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-Command', commandText] }
+    : { command: process.env.SHELL || '/bin/bash', args: ['-lc', commandText] };
+  return new Promise((resolve) => {
+    const child = spawn(shell.command, shell.args, {
+      cwd,
+      env: { ...process.env, TERM: 'xterm-256color' },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    let settled = false;
+    const finish = (code, error = '') => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const cleanOutput = redact(`${output}${error ? `\n${error}` : ''}`);
+      db.prepare(`
+        INSERT INTO repair_agent_terminal_audit (
+          server_id, command_key, command_preview, purpose, exit_code,
+          duration_ms, output_preview, access_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        request.serverId || null,
+        commandKey('full-access-shell', [commandText]),
+        redact(commandText).slice(0, 300),
+        purpose,
+        Number.isFinite(Number(code)) ? Number(code) : 1,
+        Date.now() - started,
+        cleanOutput.slice(-4000),
+        accessHash,
+        Date.now(),
+      );
+      resolve({
+        code: Number.isFinite(Number(code)) ? Number(code) : 1,
+        output: cleanOutput,
+        durationMs: Date.now() - started,
+        accessHashPreview: `${accessHash.slice(0, 10)}...${accessHash.slice(-8)}`,
+      });
+    };
+    const capture = (chunk) => { output = `${output}${String(chunk)}`.slice(-MAX_OUTPUT); };
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      finish(124, 'Full access command timed out.');
+    }, Number(request.timeoutMs || 30000));
+    timer.unref();
+    child.stdout.on('data', capture);
+    child.stderr.on('data', capture);
+    child.on('error', (error) => finish(1, error.message));
+    child.on('close', (code) => finish(code));
+  });
+}
+
 module.exports = {
   agentAccessHash,
   normalizeCommand,
+  runFullAccessCommand,
   runAgentTerminal,
 };
