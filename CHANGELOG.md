@@ -4,7 +4,7 @@
 
 ### Added
 
-- A bounded 299,598-parameter neural diagnosis ranker blended with the deterministic repair catalog.
+- A bounded 349,986-parameter diagnostics ranker blended with the deterministic repair catalog.
 - Persistent reinforcement episodes with positive rewards for stable recoveries and negative rewards for repeated crashes or owner-marked wrong diagnoses.
 - Live VPS, panel, game-process, disk, Linux pressure, properties, world, and runtime telemetry in every agent diagnosis.
 - A cause-and-action knowledge graph, confidence-ranked repair plan, and conservative offline-only optimization recommendations.
@@ -14,13 +14,13 @@
 - Per-source health telemetry and circuit breakers prevent repeated failures or rate limits from blocking repair analysis.
 - Eight panel/UI/security diagnosis families, bringing the repair catalog to 1,248 signals across 78 cause families.
 - Persistent owner terminal now uses `node-pty` when available, with a pipe fallback, faster polling, and progress-friendly output handling.
-- Hidden AI terminal tools collect bounded VPS telemetry through an allowlisted, timeout-capped, redacted, audited command channel.
+- Hidden terminal diagnostics collect bounded VPS telemetry through an allowlisted, timeout-capped, redacted, audited command channel.
 - The repair agent now stores competing repair plans, sandbox preflight results, rollback strategy metadata, and production gates before controlled fixes.
-- A dedicated Fixed section records repair, AI terminal, backup, server-control, and maintenance actions with automatic seven-day retention.
+- A dedicated Fixed section records repair, terminal diagnostics, backup, server-control, and maintenance actions with automatic seven-day retention.
 - Web research now understands common plain-English panel/Minecraft/VPS problem reports, extracts simple memory/core/time math, and builds stronger focused technical searches.
-- AI terminal diagnostics now include broader safe probes such as `whoami`, `id`, `uname`, `which`, `findmnt`, `lsblk`, and bounded `dmesg` scans.
-- Owner-gated AI Full Access Mode can be unlocked for a limited time with the owner password, then runs arbitrary queued shell commands only after per-command approval.
-- Live Agent mode scans recent console logs and key server files during adaptive maintenance, records learning episodes, performs safe offline repairs, and queues high-risk root/debug commands for approval.
+- Terminal diagnostics now include broader safe probes such as `whoami`, `id`, `uname`, `which`, `findmnt`, `lsblk`, and bounded `dmesg` scans.
+- Owner-gated shell access can be unlocked for a limited time with the owner password, then runs arbitrary queued shell commands only after per-command approval.
+- Live diagnostics scan recent console logs and key server files during adaptive maintenance, record learning episodes, perform safe offline repairs, and queue high-risk root/debug commands for approval.
 
 ### Fixed
 
@@ -31,8 +31,9 @@
 - Credential/JWT/query-secret redaction now runs before research, and each source is isolated behind its own failure threshold and cooldown.
 - An unavailable software download no longer aborts the remaining Repair & Diagnose checks.
 - Linux installers and the safe updater install optional dependencies so PTY terminal support is available on capable VPS hosts.
+- Linux installers now run package index updates first, create the owner account before service start, repair data/runtime folder permissions, and install the `nexuspanel` command before launching systemd.
 - Owner Terminal is always visible to the owner; when disabled, the Terminal page now includes an enable button instead of disappearing from navigation.
-- Long command flags in AI terminal probes are accepted correctly, so systemd and Linux diagnostic probes no longer fail on normal options such as `--no-pager`.
+- Long command flags in terminal diagnostic probes are accepted correctly, so systemd and Linux probes no longer fail on normal options such as `--no-pager`.
 - Full access commands are redacted, timeout-capped, risk-labeled, audited, and shown in the Fixed section before and after execution.
 
 ## 1.2.0 Reliability Revision - 2026-07-03
@@ -72,7 +73,7 @@
 ### Added
 
 - Granular admin permissions for Start, Stop, Restart, Kill, console view/commands, servers, software, properties, whitelist, plugins, files, backups, optimizer, network, admins, security, settings, and timezone.
-- Repair brain catalog with 1,116 diagnostic signals across 70 crash and VPS cause families.
+- Diagnostics catalog with 1,116 signals across 70 crash and VPS cause families.
 - Terminal fix learning with real command exit markers, crash/server association, online stability validation, redacted evidence, and restricted idempotent replay.
 - Proactive safe Repair & Diagnose execution before automatic crash restart when no learned playbook exists.
 - SQLite quick/foreign-key checks, eight rotating verified snapshots, manual snapshot controls, and startup recovery.

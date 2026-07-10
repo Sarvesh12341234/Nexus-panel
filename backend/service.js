@@ -30,8 +30,50 @@ function serviceUser() {
   return os.userInfo().username;
 }
 
+function serviceGroup(user) {
+  if (user === 'root') return 'root';
+  const result = spawnSync('id', ['-gn', user], { encoding: 'utf8' });
+  return result.status === 0 ? result.stdout.trim() || user : user;
+}
+
+function ensureRuntimePermissions() {
+  if (process.platform !== 'linux') return;
+  const user = serviceUser();
+  const group = serviceGroup(user);
+  const dirs = [
+    path.join(repoRoot, 'data'),
+    path.join(repoRoot, 'servers'),
+    path.join(repoRoot, 'software'),
+    path.join(repoRoot, 'backups'),
+    path.join(repoRoot, 'backupfolder'),
+    path.join(repoRoot, 'update', 'backups'),
+    '/var/lib/nexuspanel',
+    '/var/lib/nexuspanel/backups',
+    '/var/lib/nexuspanel/logs',
+    '/var/lib/nexuspanel/nexus-mark',
+  ];
+  for (const dir of dirs) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
+    try {
+      fs.chmodSync(dir, 0o750);
+    } catch {}
+  }
+  const updateScript = path.join(repoRoot, 'update', 'update.sh');
+  if (fs.existsSync(updateScript)) {
+    try {
+      fs.chmodSync(updateScript, 0o755);
+    } catch {}
+  }
+  if (user !== 'root') {
+    for (const dir of dirs) {
+      spawnSync('chown', ['-R', `${user}:${group}`, dir], { stdio: 'ignore' });
+    }
+  }
+}
+
 function serviceContent() {
   const user = serviceUser();
+  const group = serviceGroup(user);
   const editionPath = path.join(repoRoot, 'data', 'edition');
   const edition = fs.existsSync(editionPath) ? fs.readFileSync(editionPath, 'utf8').trim() || 'normal' : 'normal';
   return `[Unit]
@@ -52,7 +94,7 @@ Environment=PORT=${Number(process.env.PORT || 3000)}
 Environment=NEXUSPANEL_BACKUP_ROOT=/var/lib/nexuspanel/backups
 Environment=NEXUSPANEL_X_ACCEL_ROOT=
 Environment=NEXUSPANEL_X_ACCEL_PREFIX=
-${user === 'root' ? '' : `User=${user}\n`}
+${user === 'root' ? '' : `User=${user}\nGroup=${group}\n`}
 
 [Install]
 WantedBy=multi-user.target
@@ -72,6 +114,7 @@ function requireRoot() {
 function install({ start = true } = {}) {
   requireLinuxSystemd();
   requireRoot();
+  ensureRuntimePermissions();
   fs.writeFileSync(servicePath, serviceContent(), 'utf8');
   installCliCommand();
   runSystemctl(['daemon-reload']);

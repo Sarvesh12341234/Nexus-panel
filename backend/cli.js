@@ -36,6 +36,7 @@ Usage:
   nexuspanel change panelport 8080
   nexuspanel update
   nexuspanel install
+  nexuspanel setup-owner
   nexuspanel foreground
 
 Service: ${serviceName}`);
@@ -43,6 +44,14 @@ Service: ${serviceName}`);
 
 async function ensureOwnerForCli() {
   if (getUserCount() > 0) return;
+  const envEmail = String(process.env.NEXUSPANEL_OWNER_EMAIL || '').trim();
+  const envPassword = String(process.env.NEXUSPANEL_OWNER_PASSWORD || '');
+  const envName = String(process.env.NEXUSPANEL_OWNER_NAME || 'Owner').trim() || 'Owner';
+  if (envEmail && envPassword) {
+    createUser({ email: envEmail, name: envName, password: envPassword, role: 'owner', accessLevel: 100 });
+    console.log(`Owner account created from NEXUSPANEL_OWNER_EMAIL: ${envEmail}`);
+    return;
+  }
   let input = stdin;
   let output = stdout;
   let ttyHandle = null;
@@ -132,6 +141,11 @@ async function main() {
   }
   
   if (command === 'help' || command === '--help' || command === '-h') return help();
+  if (command === 'setup-owner' || command === 'owner:setup') {
+    await ensureOwnerForCli();
+    console.log('Owner account is ready.');
+    return;
+  }
   if (command === 'install') {
     await ensureOwnerForCli();
     return install({ start: true });

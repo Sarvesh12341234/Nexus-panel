@@ -5,12 +5,12 @@ const v8 = require('node:v8');
 const { diagnoseRuntime, knowledgeRules } = require('./repair_knowledge');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 
-const FEATURE_DIMENSIONS = 3840;
-const MAX_MODEL_PARAMETERS = 300000;
+const MAX_MODEL_PARAMETERS = 350000;
 const MAX_AGENT_MEMORY_BYTES = 1024 * 1024 * 1024;
 const MAX_LEARNED_WEIGHTS = 32768;
 const MAX_EPISODES = 2000;
 const rules = knowledgeRules();
+const FEATURE_DIMENSIONS = Math.max(1, Math.floor((MAX_MODEL_PARAMETERS - rules.length) / Math.max(1, rules.length)));
 const PARAMETER_COUNT = rules.length * FEATURE_DIMENSIONS + rules.length;
 
 if (PARAMETER_COUNT > MAX_MODEL_PARAMETERS) {

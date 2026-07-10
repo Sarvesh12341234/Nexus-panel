@@ -2136,7 +2136,7 @@ async function analyzeServerWithAgent(server, software, diagnostics, { allowWeb 
 
 async function collectAgentTerminalTelemetry(server) {
   if (settingValue('repair_agent_terminal_enabled', '1') !== '1') {
-    return { enabled: false, commands: [], summary: 'AI terminal tools are disabled.' };
+    return { enabled: false, commands: [], summary: 'Terminal diagnostics are disabled.' };
   }
   const secret = repairAgentSecret();
   const probes = [
@@ -2185,7 +2185,7 @@ async function collectAgentTerminalTelemetry(server) {
   return {
     enabled: true,
     commands,
-    summary: `${commands.filter((item) => item.code === 0).length}/${commands.length} AI terminal telemetry probe(s) passed.`,
+    summary: `${commands.filter((item) => item.code === 0).length}/${commands.length} terminal telemetry probe(s) passed.`,
   };
 }
 
@@ -2232,7 +2232,7 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     logFixed({
       serverId: server.id,
       category: 'ai-terminal',
-      title: 'AI terminal telemetry collected',
+      title: 'Terminal telemetry collected',
       detail: terminalTelemetry.summary,
       source: 'repair-agent',
     });
@@ -2251,7 +2251,7 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
       : `Neural ranker analyzed ${agentAnalysis.featureCount} features across ${knowledge.diagnosticSignals} signals.`,
   });
   checks.push({
-    name: 'AI terminal telemetry',
+    name: 'Terminal telemetry',
     ok: !terminalTelemetry.enabled || terminalTelemetry.commands.some((item) => item.code === 0),
     detail: terminalTelemetry.summary,
   });

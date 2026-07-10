@@ -64,13 +64,13 @@ function agentAccessHash(secret, command, args, purpose) {
 function normalizeCommand(command, args = [], server = null) {
   const executable = path.basename(String(command || '').trim()).toLowerCase();
   const rule = ALLOWED_COMMANDS.get(executable);
-  if (!rule) throw new Error(`AI terminal command is not allowed: ${executable || 'empty'}`);
+  if (!rule) throw new Error(`Terminal diagnostic command is not allowed: ${executable || 'empty'}`);
   const cleanArgs = Array.isArray(args) ? args.map((arg) => String(arg)) : [];
-  if (cleanArgs.length > 32) throw new Error('AI terminal argument list is too long.');
+  if (cleanArgs.length > 32) throw new Error('Terminal diagnostic argument list is too long.');
   for (const arg of cleanArgs) {
     const allowed = rule.args.test(arg) || (rule.token && rule.token.test(arg));
     if (!arg || arg.length > 220 || /[\r\n;&|`$<>]/.test(arg) || !allowed) {
-      throw new Error(`AI terminal argument is not allowed for ${executable}.`);
+      throw new Error(`Terminal diagnostic argument is not allowed for ${executable}.`);
     }
   }
   if (server) {
@@ -133,7 +133,7 @@ function runAgentTerminal(db, secret, request) {
     const capture = (chunk) => { output = `${output}${String(chunk)}`.slice(-MAX_OUTPUT); };
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
-      finish(124, 'AI terminal command timed out.');
+      finish(124, 'Terminal diagnostic command timed out.');
     }, Number(request.timeoutMs || DEFAULT_TIMEOUT_MS));
     timer.unref();
     child.stdout.on('data', capture);

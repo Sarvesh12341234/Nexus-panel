@@ -1999,7 +1999,7 @@ function renderSettings() {
       <label class="switch"><input name="terminalEnabled" type="checkbox" ${settings.terminalEnabled ? 'checked' : ''}><span></span>Owner terminal row</label>
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
       <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
-      <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>AI terminal tools</label>
+      <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.2.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v1.2.0"></label>
@@ -2408,16 +2408,16 @@ async function renderFixed() {
       <article><span>Console memory cap</span><strong>${Number(policy.memoryLinesPerServer || 600)} lines</strong></article>
       <article><span>Disk log rotation</span><strong>${formatBytes(Number(policy.diskRotateBytes || 4 * 1024 * 1024))}</strong></article>
       <article><span>Lag risk</span><strong>${escapeHtml(policy.lagRisk || 'low')}</strong></article>
-      <article><span>Full access</span><strong>${terminal.fullAccessEnabled ? 'Unlocked' : 'Locked'}</strong></article>
-      <article><span>Live agent</span><strong>${terminal.liveEnabled ? 'On' : 'Off'}</strong></article>
+      <article><span>Owner shell queue</span><strong>${terminal.fullAccessEnabled ? 'Unlocked' : 'Locked'}</strong></article>
+      <article><span>Live diagnostics</span><strong>${terminal.liveEnabled ? 'On' : 'Off'}</strong></article>
       <article><span>Pending commands</span><strong>${Number(terminal.pendingFullAccessCommands || 0)}</strong></article>
     </div>
     ${state.user?.role === 'owner' ? `<div class="backup-settings">
-      <button class="${terminal.fullAccessEnabled ? 'danger' : 'secondary'}" type="button" data-action="${terminal.fullAccessEnabled ? 'agent-full-access-lock' : 'agent-full-access-unlock'}">${terminal.fullAccessEnabled ? 'Lock Full Access' : 'Unlock Full Access'}</button>
-      <button class="secondary" type="button" data-action="${terminal.liveEnabled ? 'agent-live-disable' : 'agent-live-enable'}">${terminal.liveEnabled ? 'Disable Live Agent' : 'Enable Live Agent'}</button>
+      <button class="${terminal.fullAccessEnabled ? 'danger' : 'secondary'}" type="button" data-action="${terminal.fullAccessEnabled ? 'agent-full-access-lock' : 'agent-full-access-unlock'}">${terminal.fullAccessEnabled ? 'Lock owner shell' : 'Unlock owner shell'}</button>
+      <button class="secondary" type="button" data-action="${terminal.liveEnabled ? 'agent-live-disable' : 'agent-live-enable'}">${terminal.liveEnabled ? 'Disable live diagnostics' : 'Enable live diagnostics'}</button>
       <button class="secondary" type="button" data-action="agent-queue-command">Queue Command</button>
     </div>` : ''}
-    <h3>Full access queue</h3>
+    <h3>Owner shell queue</h3>
     <div class="plugin-list">
       ${(terminal.commandQueue || []).map((item) => `
         <div class="plugin-row">
@@ -2480,13 +2480,13 @@ async function renderSecurity(forceHealth = false) {
       <div class="health-grid">
         ${(state.adaptiveInsights || []).map((insight) => `<article class="${insight.anomalies?.length ? 'is-bad' : 'is-ok'}"><strong>${escapeHtml(insight.section)} ${insight.health}%</strong><span>${insight.learnedSamples < 5 ? `Learning baseline (${insight.learnedSamples}/5)` : insight.anomalies?.length ? `${insight.anomalies.length} learned anomaly signal(s)` : 'Operating inside its learned baseline'}</span></article>`).join('')}
       </div>
-      <h3>Repair brain</h3>
+      <h3>Diagnostics</h3>
       <div class="health-grid">
-        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.parameterCount || 0).toLocaleString()}-parameter agent</strong><span>${Number(state.repairBrain?.agent?.modelMemoryMb || 0)} MB model · ${Number(state.repairBrain?.agent?.featureDimensions || 0).toLocaleString()} neural features · ${escapeHtml(state.repairBrain?.agent?.architecture || 'loading')}</span></article>
-        <article class="${state.repairBrain?.agent?.bounded ? 'is-ok' : 'is-bad'}"><strong>${Number(state.repairBrain?.agent?.episodes || 0)} agent episodes</strong><span>${Number(state.repairBrain?.agent?.validatedEpisodes || 0)} stable validation(s) · ${Number(state.repairBrain?.agent?.learnedWeights || 0)} learned weights · ${Number(state.repairBrain?.agent?.estimatedStateMemoryMb || 0)} MB bounded agent state.</span></article>
-        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.cumulativeReward || 0)} reinforcement reward</strong><span>${Number(state.repairBrain?.agent?.failedEpisodes || 0)} negative episode(s) · repeat crashes weaken failed paths and stable uptime strengthens them.</span></article>
-        <article class="${state.settings?.repairWebEnabled ? 'is-ok' : ''}"><strong>Web research ${state.settings?.repairWebEnabled ? 'enabled' : 'disabled'}</strong><span>${(state.repairBrain?.agent?.web?.enabledSources || []).length} bounded sources · ${Number(state.repairBrain?.agent?.web?.languageUnderstanding?.naturalLanguageIntents || 0)} English intent(s) · ${Object.values(state.repairBrain?.agent?.web?.sourceHealth || {}).filter((source) => source.healthy).length} recently healthy · ${Number(state.repairBrain?.agent?.web?.cachedQueries || 0)} cached search(es) · web code execution never.</span></article>
-        <article class="${state.repairBrain?.agent?.terminal?.enabled ? 'is-ok' : ''}"><strong>AI terminal ${state.repairBrain?.agent?.terminal?.enabled ? 'enabled' : 'disabled'}</strong><span>${Number(state.repairBrain?.agent?.terminal?.auditedCommands || 0)} audited probe(s) · ${Number(state.repairBrain?.agent?.terminal?.averageMs || 0)} ms average · key ${escapeHtml(state.repairBrain?.agent?.terminal?.accessHashPreview || 'hidden')}.</span></article>
+        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.parameterCount || 0).toLocaleString()}-parameter diagnostics ranker</strong><span>${Number(state.repairBrain?.agent?.modelMemoryMb || 0)} MB model - ${Number(state.repairBrain?.agent?.featureDimensions || 0).toLocaleString()} hashed features - ${escapeHtml(state.repairBrain?.agent?.architecture || 'loading')}</span></article>
+        <article class="${state.repairBrain?.agent?.bounded ? 'is-ok' : 'is-bad'}"><strong>${Number(state.repairBrain?.agent?.episodes || 0)} repair episodes</strong><span>${Number(state.repairBrain?.agent?.validatedEpisodes || 0)} stable validation(s) - ${Number(state.repairBrain?.agent?.learnedWeights || 0)} learned weights - ${Number(state.repairBrain?.agent?.estimatedStateMemoryMb || 0)} MB bounded state.</span></article>
+        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.cumulativeReward || 0)} reinforcement reward</strong><span>${Number(state.repairBrain?.agent?.failedEpisodes || 0)} negative episode(s) - repeat crashes weaken failed paths and stable uptime strengthens them.</span></article>
+        <article class="${state.settings?.repairWebEnabled ? 'is-ok' : ''}"><strong>Web research ${state.settings?.repairWebEnabled ? 'enabled' : 'disabled'}</strong><span>${(state.repairBrain?.agent?.web?.enabledSources || []).length} bounded sources - ${Number(state.repairBrain?.agent?.web?.languageUnderstanding?.naturalLanguageIntents || 0)} English intent(s) - ${Object.values(state.repairBrain?.agent?.web?.sourceHealth || {}).filter((source) => source.healthy).length} recently healthy - ${Number(state.repairBrain?.agent?.web?.cachedQueries || 0)} cached search(es) - web code execution never.</span></article>
+        <article class="${state.repairBrain?.agent?.terminal?.enabled ? 'is-ok' : ''}"><strong>Terminal diagnostics ${state.repairBrain?.agent?.terminal?.enabled ? 'enabled' : 'disabled'}</strong><span>${Number(state.repairBrain?.agent?.terminal?.auditedCommands || 0)} audited probe(s) - ${Number(state.repairBrain?.agent?.terminal?.averageMs || 0)} ms average - key ${escapeHtml(state.repairBrain?.agent?.terminal?.accessHashPreview || 'hidden')}.</span></article>
         <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.plans || 0)} repair plans</strong><span>${Number(state.repairBrain?.agent?.sandboxVerifiedPlans || 0)} sandbox-verified · ${Number(state.repairBrain?.agent?.sandboxBlockedPlans || 0)} blocked before production.</span></article>
         <article class="is-ok"><strong>${Number(state.repairBrain?.knowledge?.diagnosticSignals || 0)} crash signals</strong><span>${Number(state.repairBrain?.knowledge?.rules || 0)} cause families across game, world, network, storage, runtime, and VPS health.</span></article>
         <article class="is-ok"><strong>${Number(state.repairBrain?.playbooks?.count || 0)} repair playbooks</strong><span>${Number(state.repairBrain?.playbooks?.replays || 0)} automatic replay(s) completed.</span></article>
@@ -3680,12 +3680,12 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'agent-live-enable' || action === 'agent-live-disable') {
       const enabled = action === 'agent-live-enable';
-      if (enabled && !confirm('Enable Live Agent? It will scan console/files during adaptive maintenance, run safe offline fixes, and queue high-risk commands for owner approval.')) return;
+      if (enabled && !confirm('Enable live diagnostics? It will scan console/files during adaptive maintenance, run safe offline fixes, and queue high-risk commands for owner approval.')) return;
       await api('/api/repair/agent/live', {
         method: 'POST',
         body: JSON.stringify({ enabled }),
       });
-      showToast(enabled ? 'Live Agent enabled.' : 'Live Agent disabled.');
+      showToast(enabled ? 'Live diagnostics enabled.' : 'Live diagnostics disabled.');
       await refresh();
       return renderFixed();
     }
