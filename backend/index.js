@@ -24,7 +24,9 @@ const { profileForServer, writeProfile } = require('./nexus_mark');
 const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer } = require('./runtime');
 const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
+const { processTreeMetrics } = require('./process_metrics');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
+const { DDOS_PARAMETER_COUNT, collectDdosEvidence, mitigationPlan } = require('./ddos_guard');
 const { runAgentTerminal, runFullAccessCommand } = require('./agent_terminal');
 const {
   SESSION_COOKIE,
@@ -64,7 +66,7 @@ const repairWeb = new RepairWebResearch(db);
 let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
-const PANEL_VERSION = '1.2.0';
+const PANEL_VERSION = '2.0.0';
 let updateStatus = {
   running: false,
   progress: 0,
@@ -196,7 +198,7 @@ function setSettingValue(key, value) {
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
-  const defaultTag = edition === 'host' ? 'host-v1.2.0' : 'normal-v1.2.0';
+  const defaultTag = edition === 'host' ? 'host-v2.0.0' : 'normal-v2.0.0';
   const configuredTag = settingValue('update_target_tag', defaultTag);
   return {
     version: PANEL_VERSION,
@@ -1520,6 +1522,96 @@ function defaultPropertyValues(server) {
     'default-player-permission-level': 'member',
     'server-port': String(server.port),
   };
+}
+
+async function serverTimelineManifest(server) {
+  const root = ensureServerDirs(server);
+  const files = ['server.properties', 'permissions.json', 'whitelist.json', 'allowlist.json', 'banned-players.json'];
+  const fileEntries = [];
+  for (const relative of files) {
+    const absolute = path.join(root, relative);
+    const stats = await fs.promises.stat(absolute).catch(() => null);
+    if (!stats?.isFile()) continue;
+    const content = await fs.promises.readFile(absolute).catch(() => null);
+    fileEntries.push({
+      path: relative,
+      size: stats.size,
+      mtimeMs: Math.round(stats.mtimeMs),
+      sha256: content ? crypto.createHash('sha256').update(content).digest('hex') : '',
+      content: relative === 'server.properties' && content && content.length < 128 * 1024 ? content.toString('utf8') : '',
+    });
+  }
+  const pluginsDir = server.type === 'bedrock' ? path.join(root, 'plugins') : path.join(root, 'plugins');
+  const plugins = fs.existsSync(pluginsDir)
+    ? (await fs.promises.readdir(pluginsDir, { withFileTypes: true }).catch(() => []))
+      .filter((entry) => entry.isFile())
+      .slice(0, 200)
+      .map((entry) => entry.name)
+      .sort()
+    : [];
+  return {
+    version: 1,
+    server: {
+      id: server.id,
+      name: server.name,
+      type: server.type,
+      port: server.port,
+      maxMemoryMb: server.max_memory_mb,
+      cpuCores: server.cpu_cores,
+      softwareKey: server.software_key,
+      softwareVersion: server.software_version,
+    },
+    files: fileEntries,
+    plugins,
+  };
+}
+
+async function createTimelineEvent(server, { type = 'snapshot', title = 'Snapshot', detail = '', userId = null } = {}) {
+  const manifest = await serverTimelineManifest(server);
+  const result = db.prepare(`
+    INSERT INTO server_timeline_events (server_id, event_type, title, detail, manifest_json, actor_user_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(server.id, type, title, detail, JSON.stringify(manifest), userId, Date.now());
+  return { id: result.lastInsertRowid, ...manifest };
+}
+
+async function safeTimelinePoint(server, req, title, detail = '') {
+  try {
+    await createTimelineEvent(server, {
+      type: 'auto',
+      title,
+      detail,
+      userId: req?.user?.id || null,
+    });
+  } catch (error) {
+    appendLog(server.id, `[NexusPanel] Timeline warning: ${error.message}`);
+  }
+}
+
+function timelineRows(serverId) {
+  return db.prepare(`
+    SELECT event.id, event.server_id, event.event_type, event.title, event.detail, event.manifest_json,
+           event.actor_user_id, event.created_at, user.email AS actor_email, user.name AS actor_name
+    FROM server_timeline_events event
+    LEFT JOIN users user ON user.id = event.actor_user_id
+    WHERE event.server_id = ?
+    ORDER BY event.created_at DESC
+    LIMIT 80
+  `).all(serverId).map((row) => {
+    const manifest = parseJsonObject(row.manifest_json);
+    return {
+      id: row.id,
+      serverId: row.server_id,
+      type: row.event_type,
+      title: row.title,
+      detail: row.detail,
+      createdAt: row.created_at,
+      actor: row.actor_user_id ? { id: row.actor_user_id, email: row.actor_email, name: row.actor_name } : null,
+      changedFiles: manifest.files || [],
+      plugins: manifest.plugins || [],
+      server: manifest.server || {},
+    };
+  });
 }
 
 function inspectProperties(content, server) {
@@ -3881,7 +3973,7 @@ app.get('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANAG
   res.json({ plugins: pluginRows(id) });
 });
 
-app.post('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
+app.post('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
@@ -3895,6 +3987,7 @@ app.post('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANA
   }
 
   const targetPath = pluginTarget(target, kind, fileName);
+  await safeTimelinePoint(target, req, 'Before plugin registration', `Captured state before registering ${fileName}.`);
   const name = String(req.body.name || fileName.replace(/\.[^.]+$/, '')).trim().slice(0, 80);
   const result = db.prepare(`
     INSERT INTO plugins (server_id, name, kind, file_name, relative_path, enabled)
@@ -3905,7 +3998,7 @@ app.post('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANA
     plugin: pluginRows(id).find((plugin) => plugin.id === result.lastInsertRowid),
     targetPath: displayPath(targetPath.absolutePath),
   });
-});
+}));
 
 app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
   const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
@@ -4062,30 +4155,23 @@ app.get('/api/servers/:id/console', requirePermission(capabilities.CONSOLE_VIEW,
 app.get('/api/servers/:id/metrics', requireAuth, (req, res) => {
   const server = getServerOr404(req.params.id);
   const details = runtimeDetails(server.id);
-  let rssMb = 0;
-  let cpuPercent = 0;
-  if (details.pid && process.platform !== 'win32') {
-    const result = spawnSync('ps', ['-p', String(details.pid), '-o', '%cpu=,rss='], { encoding: 'utf8' });
-    const [cpu, rss] = String(result.stdout || '').trim().split(/\s+/).map(Number);
-    cpuPercent = Number.isFinite(cpu) ? Math.round(cpu) : 0;
-    rssMb = Number.isFinite(rss) ? Math.round(rss / 1024) : 0;
-  } else if (details.pid && process.platform === 'win32') {
-    const result = spawnSync('powershell.exe', [
-      '-NoProfile',
-      '-Command',
-      `$p=Get-Process -Id ${Number(details.pid)} -ErrorAction SilentlyContinue; if($p){ [Console]::WriteLine("{0} {1}", [Math]::Round($p.WorkingSet64/1MB), [Math]::Round($p.CPU,2)) }`,
-    ], { encoding: 'utf8', windowsHide: true });
-    const [rss] = String(result.stdout || '').trim().split(/\s+/).map(Number);
-    rssMb = Number.isFinite(rss) ? Math.round(rss) : 0;
-  }
+  const processMetrics = processTreeMetrics({
+    pid: details.pid,
+    unit: details.unit,
+    cacheKey: `server:${server.id}`,
+  });
   res.json({
     status: details.status,
     pid: details.pid,
+    unit: details.unit,
+    startedAt: details.startedAt,
+    metricSource: processMetrics.source,
+    processCount: processMetrics.pids.length,
     players: details.players,
     playerCount: details.players.length,
     maxMemoryMb: server.max_memory_mb,
-    rssMb,
-    cpuPercent,
+    rssMb: processMetrics.rssMb,
+    cpuPercent: processMetrics.cpuPercent,
   });
 });
 
@@ -4101,11 +4187,98 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
   });
 });
 
+app.get('/api/servers/:id/timeline', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  res.json({ events: timelineRows(server.id) });
+});
+
+app.post('/api/servers/:id/timeline/snapshot', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const event = await createTimelineEvent(server, {
+    type: 'manual',
+    title: String(req.body.title || 'Manual timeline point').slice(0, 120),
+    detail: String(req.body.detail || '').slice(0, 400),
+    userId: req.user?.id || null,
+  });
+  logFixed({ serverId: server.id, category: 'timeline', title: 'Timeline point created', detail: event.server?.name || server.name, source: 'time-machine' });
+  res.status(201).json({ ok: true, event, events: timelineRows(server.id) });
+}));
+
+app.post('/api/servers/:id/timeline/:eventId/restore-properties', requirePermission(capabilities.PROPERTIES_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id);
+  if (runtimeStatus(server.id) === 'online') return res.status(409).json({ error: 'Stop the server before restoring timeline properties.' });
+  const row = db.prepare('SELECT * FROM server_timeline_events WHERE id = ? AND server_id = ?').get(Number(req.params.eventId), server.id);
+  if (!row) return res.status(404).json({ error: 'Timeline point not found.' });
+  await safeTimelinePoint(server, req, 'Before timeline properties restore', `Restoring from event ${row.id}`);
+  const manifest = parseJsonObject(row.manifest_json);
+  const properties = (manifest.files || []).find((file) => file.path === 'server.properties' && file.content);
+  if (!properties) return res.status(404).json({ error: 'This timeline point does not include server.properties content.' });
+  const target = assertInside(ensureServerDirs(server), path.join(ensureServerDirs(server), 'server.properties'));
+  await fs.promises.writeFile(target, properties.content, { encoding: 'utf8', mode: 0o644 });
+  appendLog(server.id, `[NexusPanel] Time Machine restored server.properties from timeline event ${row.id}.`);
+  res.json({ ok: true, events: timelineRows(server.id) });
+}));
+
+app.post('/api/presence', requireAuth, (req, res) => {
+  const view = String(req.body.view || '').slice(0, 40);
+  const serverId = req.body.serverId ? Number(req.body.serverId) : null;
+  if (serverId) getServerOr404(serverId);
+  const cursor = {
+    x: clampNumber(req.body.x, 0, 100000, 0),
+    y: clampNumber(req.body.y, 0, 100000, 0),
+    label: String(req.body.label || '').slice(0, 80),
+  };
+  db.prepare(`
+    INSERT INTO panel_presence (user_id, server_id, view, cursor_json, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, server_id, view) DO UPDATE SET cursor_json = excluded.cursor_json, updated_at = excluded.updated_at
+  `).run(req.user.id, serverId, view, JSON.stringify(cursor), Date.now());
+  res.json({ ok: true });
+});
+
+app.get('/api/presence', requireAuth, (req, res) => {
+  const now = Date.now();
+  db.prepare('DELETE FROM panel_presence WHERE updated_at < ?').run(now - 45 * 1000);
+  const serverId = req.query.serverId ? Number(req.query.serverId) : null;
+  const rows = db.prepare(`
+    SELECT presence.user_id, presence.server_id, presence.view, presence.cursor_json, presence.updated_at,
+           user.name, user.email
+    FROM panel_presence presence
+    JOIN users user ON user.id = presence.user_id
+    WHERE (? IS NULL OR presence.server_id = ?)
+    ORDER BY presence.updated_at DESC
+    LIMIT 30
+  `).all(serverId, serverId);
+  res.json({
+    users: rows.map((row) => ({
+      userId: row.user_id,
+      serverId: row.server_id,
+      view: row.view,
+      cursor: parseJsonObject(row.cursor_json),
+      updatedAt: row.updated_at,
+      name: row.name,
+      email: row.email,
+      self: row.user_id === req.user.id,
+    })),
+  });
+});
+
+app.get('/api/security/ddos', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_SECURITY), (req, res) => {
+  const server = req.query.serverId ? db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.query.serverId)) : null;
+  const report = collectDdosEvidence();
+  res.json({
+    ...report,
+    parameterCount: DDOS_PARAMETER_COUNT,
+    mitigation: mitigationPlan(report.analysis, server),
+  });
+});
+
 app.post('/api/servers/:id/start', requirePermission(capabilities.SERVER_START, permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can start.' });
+  await safeTimelinePoint(server, req, 'Before server start', 'Captured configuration before launching the process.');
   if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
   try {
     const result = startServer(resolveInstalledExecutable(server, software), software);
@@ -4127,6 +4300,7 @@ app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, p
   if (runtimeStatus(server.id) === 'online') return res.status(409).json({ error: 'Stop the server before running Fix Server.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This server has no repairable software runtime.' });
+  await safeTimelinePoint(server, req, 'Before Repair & Diagnose', 'Captured configuration before repair workflow.');
   const report = await runServerRepair(server, software, { applyOptimizations: true });
   const learned = learnRepairPlaybook(server, report);
   appendLog(server.id, `[NexusPanel] Repair & Diagnose completed: ${report.summary}`);
@@ -4137,6 +4311,7 @@ app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, p
 
 app.post('/api/servers/:id/eula', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
+  await safeTimelinePoint(server, req, 'Before EULA change', 'Captured configuration before accepting EULA.');
   await agreeJavaEula(server);
   appendLog(server.id, '[NexusPanel] EULA accepted from panel.');
   res.json({ ok: true, eulaAgreed: true });
@@ -4154,6 +4329,7 @@ app.post('/api/servers/:id/restart', requirePermission(capabilities.SERVER_RESTA
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can restart.' });
+  await safeTimelinePoint(server, req, 'Before server restart', 'Captured configuration before restart.');
   if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
   const result = restartServer(resolveInstalledExecutable(server, software), software);
   logFixed({ serverId: server.id, category: 'server', title: 'Server restart requested', detail: result.message || '', source: 'owner-action' });
@@ -4181,6 +4357,7 @@ app.get('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES
 
 app.put('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
+  await safeTimelinePoint(server, req, 'Before server.properties edit', 'Captured properties before panel edit.');
   const allowed = new Set(propertySchema.filter((item) => item.editions.includes(server.type)).map((item) => item.key));
   const values = {};
   for (const [key, value] of Object.entries(req.body.values || {})) {
@@ -4198,6 +4375,7 @@ app.get('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_M
 
 app.post('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
+  await safeTimelinePoint(server, req, 'Before whitelist edit', 'Captured whitelist and properties before adding player.');
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   const name = String(req.body.name || '').trim();
   if (name.length < 2) return res.status(400).json({ error: 'Player name is required.' });
@@ -4218,6 +4396,7 @@ app.post('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_
 
 app.delete('/api/servers/:id/whitelist/:name', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
+  await safeTimelinePoint(server, req, 'Before whitelist removal', `Captured whitelist before removing ${req.params.name}.`);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   const name = String(req.params.name || '').toLowerCase();
   const rows = (await readWhitelist(server)).filter((row) => String(row.name || '').toLowerCase() !== name);
@@ -4229,6 +4408,7 @@ app.delete('/api/servers/:id/whitelist/:name', requirePermission(capabilities.WH
 
 app.delete('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
+  await safeTimelinePoint(server, req, 'Before whitelist clear', 'Captured whitelist before clearing all entries.');
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   await writeWhitelist(server, []);
   reloadWhitelistIfRunning(server, software);
@@ -4456,6 +4636,7 @@ app.get('/api/servers/:id/backups/download', requirePermission(capabilities.BACK
 
 app.post('/api/servers/:id/backups/restore', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
+  await safeTimelinePoint(server, req, 'Before backup restore', `Captured configuration before restoring ${req.body.name || 'backup'}.`);
   const sourceServerId = Number(req.body.sourceServerId || server.id);
   if (sourceServerId !== Number(server.id)) {
     const access = db.prepare(`
@@ -4530,6 +4711,7 @@ app.put('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a file path inside the server folder.' });
+  await safeTimelinePoint(server, req, 'Before file edit', `Captured state before editing ${target.relative}.`);
   await fs.promises.mkdir(path.dirname(target.absolute), { recursive: true });
   await fs.promises.writeFile(target.absolute, String(req.body.content ?? ''), 'utf8');
   res.json({ ok: true, path: target.relative });
@@ -4540,6 +4722,7 @@ app.post('/api/servers/:id/files/upload', requirePermission(capabilities.FILES_M
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
   if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Upload body must be binary.' });
+  await safeTimelinePoint(server, req, 'Before file upload', `Captured state before uploading ${target.relative}.`);
   await fs.promises.mkdir(path.dirname(target.absolute), { recursive: true });
   await fs.promises.writeFile(target.absolute, req.body);
   res.status(201).json({ ok: true, path: target.relative, size: req.body.length });
@@ -4609,6 +4792,7 @@ app.post('/api/servers/:id/files/upload-chunk', requirePermission(capabilities.F
   const chunks = mergeChunkRanges(parseChunkRanges(existing?.chunks_json), { start: offset, end: offset + req.body.length });
   const uploadedBytes = uploadedRangeBytes(chunks);
   if (uploadedBytes >= totalSize && req.query.finalize === '1') {
+    await safeTimelinePoint(server, req, 'Before chunked upload finalize', `Captured state before finalizing ${target.relative}.`);
     const stats = await fs.promises.stat(partialPath);
     if (stats.size !== totalSize) return res.status(409).json({ error: 'Upload size mismatch. Retry the file.' });
     const finalHash = await fileSha256Hex(partialPath);
@@ -4630,6 +4814,7 @@ app.post('/api/servers/:id/files/upload-complete', requirePermission(capabilitie
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
+  await safeTimelinePoint(server, req, 'Before upload complete', `Captured state before completing ${target.relative}.`);
   const totalSize = Number(req.body.size || 0);
   const expectedFileHash = String(req.body.sha256 || '').trim().toLowerCase();
   const partialPath = `${target.absolute}.uploading`;
@@ -4680,6 +4865,7 @@ app.post('/api/servers/:id/files/mkdir', requirePermission(capabilities.FILES_MA
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Folder name is required.' });
+  await safeTimelinePoint(server, req, 'Before folder create', `Captured state before creating ${target.relative}.`);
   await fs.promises.mkdir(target.absolute, { recursive: true });
   res.json({ ok: true, path: target.relative });
 }));
@@ -4688,6 +4874,7 @@ app.delete('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE
   const server = getServerOr404(req.params.id);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Cannot delete the server root.' });
+  await safeTimelinePoint(server, req, 'Before file delete', `Captured state before deleting ${target.relative}.`);
   await fs.promises.rm(target.absolute, { recursive: true, force: true });
   res.json({ ok: true });
 }));
@@ -4697,6 +4884,7 @@ app.post('/api/servers/:id/files/copy', requirePermission(capabilities.FILES_MAN
   const destinationDir = safeServerFile(server, req.body.destination || '');
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
   const copied = [];
+  await safeTimelinePoint(server, req, 'Before file copy', `Captured state before copying ${requested.length} item(s).`);
   for (const relative of requested) {
     const source = safeServerFile(server, relative);
     if (!source.relative) return res.status(400).json({ error: 'Cannot copy the server root.' });
@@ -4713,6 +4901,7 @@ app.post('/api/servers/:id/files/move', requirePermission(capabilities.FILES_MAN
   const destinationDir = safeServerFile(server, req.body.destination || '');
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
   const moved = [];
+  await safeTimelinePoint(server, req, 'Before file move', `Captured state before moving ${requested.length} item(s).`);
   for (const relative of requested) {
     const source = safeServerFile(server, relative);
     if (!source.relative) return res.status(400).json({ error: 'Cannot move the server root.' });
@@ -4735,6 +4924,7 @@ app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
   const mode = ['replace', 'skip', 'fail'].includes(req.body.mode) ? req.body.mode : 'fail';
   const extracted = [];
+  await safeTimelinePoint(server, req, 'Before archive extract', `Captured state before extracting ${requested.length} archive(s).`);
   for (const relative of requested) {
     const source = safeServerFile(server, relative);
     if (!source.relative || !source.relative.toLowerCase().endsWith('.zip')) {

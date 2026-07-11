@@ -357,6 +357,30 @@ db.exec(`
     output_preview TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS server_timeline_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL DEFAULT 'snapshot',
+    title TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    manifest_json TEXT NOT NULL DEFAULT '{}',
+    actor_user_id INTEGER,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
+    FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS panel_presence (
+    user_id INTEGER NOT NULL,
+    server_id INTEGER,
+    view TEXT NOT NULL DEFAULT '',
+    cursor_json TEXT NOT NULL DEFAULT '{}',
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, server_id, view),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  );
 `);
 
 // Insert default timezone

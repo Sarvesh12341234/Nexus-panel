@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.0.0 World-Class Operations Revision - 2026-07-11
+
+### Added
+
+- Server Time Machine records lightweight restore points before risky server, plugin, backup, whitelist, property, and file actions.
+- Timeline points include selected config hashes, small `server.properties` content, plugin inventory, actor, timestamp, and server allocation metadata.
+- Console timeline can restore `server.properties` while the server is offline.
+- Live collaborator presence shows when another owner/admin is viewing the same server.
+- DDoS Guard adds a bounded 199,997-parameter defensive classifier for TCP SYN pressure, UDP/Bedrock floods, connection fanout, bandwidth saturation, conntrack pressure, and firewall misconfiguration.
+- DDoS Guard exposes local VPS evidence and owner-reviewed mitigation commands without silently changing firewall rules.
+
+### Fixed
+
+- Server RAM and CPU metrics now read Nexus-Mark cgroup data or the full process tree, so Java/Bedrock child processes are counted instead of only the wrapper PID.
+- Console logs and metrics load in parallel with shorter metric throttling, reducing the slow first-open delay.
+- Updater defaults now point to `normal-v2.0.0` and `host-v2.0.0`.
+
 ## 1.2.0 Repair Agent Revision - 2026-07-06
 
 ### Added

@@ -21,6 +21,8 @@ const state = {
   statusRefreshAt: 0,
   consolePollAt: {},
   consoleMetricsAt: {},
+  timelineAt: {},
+  presenceAt: 0,
   serverStatusSignature: '',
 };
 
@@ -71,6 +73,8 @@ const elements = {
   fixedPanel: document.querySelector('#fixedPanel'),
   consoleBox: document.querySelector('#consoleBox'),
   consoleMetrics: document.querySelector('#consoleMetrics'),
+  presencePanel: document.querySelector('#presencePanel'),
+  timelinePanel: document.querySelector('#timelinePanel'),
   commandForm: document.querySelector('#commandForm'),
   serverConfigForm: document.querySelector('#serverConfigForm'),
   adminServerAssign: document.querySelector('#adminServerAssign'),
@@ -1807,7 +1811,17 @@ async function renderConsole() {
   const now = Date.now();
   if (now - Number(state.consolePollAt[serverId] || 0) < 900) return;
   state.consolePollAt[serverId] = now;
-  const data = await api(`/api/servers/${server.id}/console`).catch((error) => ({ lines: [], error: error.message }));
+  const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 1500;
+  if (needsMetrics) state.consoleMetricsAt[serverId] = now;
+  const [data, metricsBundle] = await Promise.all([
+    api(`/api/servers/${server.id}/console`).catch((error) => ({ lines: [], error: error.message })),
+    needsMetrics
+      ? Promise.all([
+        api('/api/system/metrics').catch(() => null),
+        api(`/api/servers/${server.id}/metrics`).catch(() => null),
+      ])
+      : Promise.resolve(null),
+  ]);
   if (renderToken !== consoleRenderToken || state.activeServerId !== serverId) return;
   fillServerConfigForm(server);
   elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
@@ -1832,14 +1846,49 @@ async function renderConsole() {
     elements.consoleBox.dataset.rendered = consoleSignature;
   }
   if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
-  if (now - Number(state.consoleMetricsAt[serverId] || 0) < 6000) return;
-  state.consoleMetricsAt[serverId] = now;
-  const [metrics, serverMetrics] = await Promise.all([
-    api('/api/system/metrics').catch(() => null),
-    api(`/api/servers/${server.id}/metrics`).catch(() => null),
-  ]);
-  if (renderToken !== consoleRenderToken || state.activeServerId !== serverId) return;
-  renderConsoleMetrics(server, metrics, serverMetrics);
+  if (metricsBundle) renderConsoleMetrics(server, metricsBundle[0], metricsBundle[1]);
+  renderPresence(server).catch(() => {});
+  renderTimeline(server).catch(() => {});
+}
+
+async function renderPresence(server) {
+  if (!elements.presencePanel || !server) return;
+  const now = Date.now();
+  if (now - Number(state.presenceAt || 0) < 3000) return;
+  state.presenceAt = now;
+  api('/api/presence', {
+    method: 'POST',
+    body: JSON.stringify({ serverId: server.id, view: state.activeView, label: server.name }),
+  }).catch(() => {});
+  const data = await api(`/api/presence?serverId=${encodeURIComponent(server.id)}`).catch(() => ({ users: [] }));
+  const users = (data.users || []).filter((user) => !user.self).slice(0, 5);
+  elements.presencePanel.innerHTML = users.length
+    ? users.map((user) => `<div class="plugin-row"><div><strong>${escapeHtml(user.name || user.email)}</strong><div class="muted">Viewing ${escapeHtml(user.view || 'panel')} now</div></div><span class="badge is-on">Live</span></div>`).join('')
+    : '<div class="plugin-row"><div><strong>Live collaborators</strong><div class="muted">No other owner/admin is viewing this server right now.</div></div><span class="badge">Solo</span></div>';
+}
+
+async function renderTimeline(server, force = false) {
+  if (!elements.timelinePanel || !server || !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS)) {
+    if (elements.timelinePanel) elements.timelinePanel.innerHTML = '';
+    return;
+  }
+  const now = Date.now();
+  if (!force && now - Number(state.timelineAt[server.id] || 0) < 9000) return;
+  state.timelineAt[server.id] = now;
+  const data = await api(`/api/servers/${server.id}/timeline`).catch(() => ({ events: [] }));
+  const events = (data.events || []).slice(0, 5);
+  elements.timelinePanel.innerHTML = `
+    <div class="plugin-row">
+      <div><strong>Server Time Machine</strong><div class="muted">${events.length ? `${events.length} recent restore point(s)` : 'No restore points yet.'}</div></div>
+      <button class="secondary" type="button" data-action="timeline-snapshot">Create point</button>
+    </div>
+    ${events.map((event) => `
+      <div class="plugin-row">
+        <div><strong>${escapeHtml(event.title || 'Timeline point')}</strong><div class="muted">${escapeHtml(formatPanelDate(event.createdAt))} - ${(event.changedFiles || []).length} tracked file(s) - ${(event.plugins || []).length} plugin(s)</div></div>
+        ${(event.changedFiles || []).some((file) => file.path === 'server.properties' && file.content) ? `<button class="secondary" type="button" data-action="timeline-restore-properties" data-event-id="${event.id}">Restore properties</button>` : '<span class="badge">Tracked</span>'}
+      </div>
+    `).join('')}
+  `;
 }
 
 function syncConsoleActionButtons(server, status) {
@@ -2000,9 +2049,9 @@ function renderSettings() {
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
       <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
-      <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.2.0')}"></label>
+      <label>Panel version <input readonly value="${escapeHtml(settings.version || '2.0.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
-      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v1.2.0"></label>
+      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v2.0.0"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
       <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
@@ -2469,6 +2518,7 @@ async function renderSecurity(forceHealth = false) {
           <button class="secondary" type="button" data-action="copy-repair-bundle">Copy repair bundle</button>
           <button class="secondary" type="button" data-action="database-snapshot">Snapshot DB</button>
           <button class="secondary" type="button" data-action="adaptive-heal">Adaptive heal</button>
+          <button class="secondary" type="button" data-action="ddos-scan">DDoS scan</button>
           <button type="button" data-action="run-health-check">Run check now</button>
         </div>
       </div>
@@ -2481,6 +2531,7 @@ async function renderSecurity(forceHealth = false) {
         ${(state.adaptiveInsights || []).map((insight) => `<article class="${insight.anomalies?.length ? 'is-bad' : 'is-ok'}"><strong>${escapeHtml(insight.section)} ${insight.health}%</strong><span>${insight.learnedSamples < 5 ? `Learning baseline (${insight.learnedSamples}/5)` : insight.anomalies?.length ? `${insight.anomalies.length} learned anomaly signal(s)` : 'Operating inside its learned baseline'}</span></article>`).join('')}
       </div>
       <h3>Diagnostics</h3>
+      <div class="plugin-list" id="ddosPanel"></div>
       <div class="health-grid">
         <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.parameterCount || 0).toLocaleString()}-parameter diagnostics ranker</strong><span>${Number(state.repairBrain?.agent?.modelMemoryMb || 0)} MB model - ${Number(state.repairBrain?.agent?.featureDimensions || 0).toLocaleString()} hashed features - ${escapeHtml(state.repairBrain?.agent?.architecture || 'loading')}</span></article>
         <article class="${state.repairBrain?.agent?.bounded ? 'is-ok' : 'is-bad'}"><strong>${Number(state.repairBrain?.agent?.episodes || 0)} repair episodes</strong><span>${Number(state.repairBrain?.agent?.validatedEpisodes || 0)} stable validation(s) - ${Number(state.repairBrain?.agent?.learnedWeights || 0)} learned weights - ${Number(state.repairBrain?.agent?.estimatedStateMemoryMb || 0)} MB bounded state.</span></article>
@@ -3563,6 +3614,44 @@ document.addEventListener('click', async (event) => {
       state.user = null;
       window.clearInterval(state.refreshTimer);
       await refresh();
+      return;
+    }
+    if (action === 'timeline-snapshot') {
+      const server = activeServer();
+      if (!server) return;
+      await api(`/api/servers/${server.id}/timeline/snapshot`, {
+        method: 'POST',
+        body: JSON.stringify({ title: 'Manual console checkpoint' }),
+      });
+      state.timelineAt[server.id] = 0;
+      await renderTimeline(server, true);
+      showToast('Timeline point created.');
+      return;
+    }
+    if (action === 'timeline-restore-properties') {
+      const server = activeServer();
+      if (!server) return;
+      if (!confirm('Restore server.properties from this timeline point? Stop the server first.')) return;
+      await api(`/api/servers/${server.id}/timeline/${actionTarget.dataset.eventId}/restore-properties`, { method: 'POST' });
+      state.timelineAt[server.id] = 0;
+      await renderTimeline(server, true);
+      showToast('server.properties restored from timeline.');
+      return;
+    }
+    if (action === 'ddos-scan') {
+      const server = activeServer();
+      const data = await api(`/api/security/ddos${server ? `?serverId=${encodeURIComponent(server.id)}` : ''}`);
+      const panel = document.querySelector('#ddosPanel');
+      if (panel) {
+        panel.innerHTML = `
+          <div class="plugin-row">
+            <div><strong>DDoS Guard ${Number(data.parameterCount || 0).toLocaleString()} params - ${escapeHtml(data.analysis?.risk || 'normal')}</strong><div class="muted">${escapeHtml(data.analysis?.top?.id || 'normal')} score ${Number(data.analysis?.top?.score || 0).toFixed(2)} - TCP ${Number(data.evidence?.tcp?.total || 0)} - UDP ${Number(data.evidence?.udp?.total || 0)}</div></div>
+            <span class="badge ${data.analysis?.active ? 'is-on' : ''}">${data.analysis?.active ? 'Active risk' : 'Watching'}</span>
+          </div>
+          ${(data.mitigation?.steps || []).slice(0, 5).map((step) => `<div class="plugin-row"><div><strong>${escapeHtml(step)}</strong><div class="muted">${escapeHtml((data.mitigation?.commands || [])[0] || 'No command required')}</div></div></div>`).join('')}
+        `;
+      }
+      showToast('DDoS scan complete.');
       return;
     }
     if (action === 'alpha-nav-move') {

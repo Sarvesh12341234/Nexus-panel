@@ -1,6 +1,6 @@
 {
   "name": "nexuspanel",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Lightweight Minecraft server panel with SQLite accounts and admin permissions.",
   "main": "backend/index.js",
   "bin": {

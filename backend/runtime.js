@@ -113,6 +113,8 @@ function runtimeDetails(serverId) {
   return {
     status: child ? 'online' : 'offline',
     pid: child ? child.pid : null,
+    unit: child?.nexusUnit || '',
+    startedAt: child?.startedAt || 0,
     players: [...(players.get(serverId) || new Set())],
   };
 }
