@@ -575,6 +575,44 @@ code {
   transition: width 160ms ease;
 }
 
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 12px;
+  margin: 1rem 0;
+}
+
+.metric-grid > div {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.metric-grid strong,
+.metric-grid span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metric-grid strong {
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.metric-grid span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .spectate-frame-wrap {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -597,6 +635,33 @@ code {
 
 .spectate-client-video {
   background: #020617;
+}
+
+.spectate-empty-video {
+  display: grid;
+  place-items: center;
+  min-height: 420px;
+  padding: 2rem;
+  background:
+    linear-gradient(135deg, rgba(65, 230, 155, 0.08), rgba(94, 216, 255, 0.06)),
+    #020617;
+  color: var(--text);
+  text-align: center;
+}
+
+.spectate-empty-video div {
+  display: grid;
+  gap: 0.7rem;
+  max-width: 620px;
+}
+
+.spectate-empty-video strong {
+  font-size: clamp(1.25rem, 2.4vw, 2rem);
+}
+
+.spectate-empty-video span {
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .spectate-head {
@@ -1332,6 +1397,7 @@ code {
   .whitelist-form,
   .backup-settings,
   .console-metrics,
+  .metric-grid,
   .admin-form,
   .audit-row,
   .optimizer-summary {
@@ -1388,6 +1454,7 @@ code {
   .whitelist-form,
   .backup-settings,
   .console-metrics,
+  .metric-grid,
   .admin-form,
   .optimizer-summary,
 .audit-row,

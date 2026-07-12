@@ -1948,6 +1948,16 @@ function renderSpectateSurface(data) {
       <iframe class="spectate-frame" src="${escapeHtml(data.rendererUrl)}" title="Live Minecraft renderer" loading="eager" allow="fullscreen"></iframe>
     `;
   }
+  if (data.serverType === 'bedrock') {
+    return `
+      <div class="spectate-video spectate-empty-video">
+        <div>
+          <strong>No real spectator-client video connected</strong>
+          <span>Bedrock protocol bots do not output pixels. Run a real Bedrock client in spectator mode and paste its stream URL in Settings.</span>
+        </div>
+      </div>
+    `;
+  }
   return '<canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>';
 }
 
@@ -1984,10 +1994,13 @@ function syncSpectateSurface(data) {
     }
     return;
   }
-  if (!canvas) {
+  if (!canvas && data.serverType !== 'bedrock') {
     surface.innerHTML = renderSpectateSurface(data);
     const server = activeServer();
     if (server) startSpectateVideo(server.id);
+  } else if (data.serverType === 'bedrock' && !surface.querySelector('.spectate-empty-video')) {
+    stopSpectateVideo();
+    surface.innerHTML = renderSpectateSurface(data);
   }
 }
 
