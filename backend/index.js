@@ -243,6 +243,8 @@ function panelSettingsPayload(user = null) {
     repairAgentFullAccessEnabled: repairFullAccessEnabled(),
     repairAgentFullAccessUntil: repairFullAccessUntil(),
     liveSpectateEnabled: settingValue('live_spectate_enabled', '0') === '1',
+    spectateJavaAuth: settingValue('spectate_java_auth', process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline'),
+    spectateBedrockAuth: settingValue('spectate_bedrock_auth', process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline'),
     normalTunnelsEnabled: edition === 'normal',
     ngrokConfigured: edition === 'normal' && Boolean(settingValue('ngrok_auth_token', '')),
     ngrokAuthtokenPreview: edition === 'normal' && settingValue('ngrok_auth_token', '') ? `${settingValue('ngrok_auth_token', '').slice(0, 6)}....${settingValue('ngrok_auth_token', '').slice(-4)}` : '',
@@ -271,8 +273,8 @@ function spectateBotName(server) {
 
 function spectateAuthMode(server) {
   return server.type === 'java'
-    ? (process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline')
-    : (process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline');
+    ? settingValue('spectate_java_auth', process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline')
+    : settingValue('spectate_bedrock_auth', process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline');
 }
 
 function sendSpectateModeCommand(server, botName) {
@@ -446,8 +448,14 @@ function startSpectateSession(server, req = null) {
     }
     session.updatedAt = Date.now();
   });
-  child.stdout.on('data', (chunk) => appendLog(server.id, `[NexusPanel Spectate] ${String(chunk).trim().slice(-400)}`));
-  child.stderr.on('data', (chunk) => appendLog(server.id, `[NexusPanel Spectate] ${String(chunk).trim().slice(-400)}`));
+  child.stdout.on('data', (chunk) => {
+    const text = String(chunk).trim().slice(-1200);
+    if (text) appendLog(server.id, `[NexusPanel Spectate] ${text}`);
+  });
+  child.stderr.on('data', (chunk) => {
+    const text = String(chunk).trim().slice(-1200);
+    if (text) appendLog(server.id, `[NexusPanel Spectate] ${text}`);
+  });
   child.on('exit', (code, signal) => {
     const session = spectateSessions.get(Number(server.id));
     if (!session) return;
@@ -3811,6 +3819,10 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   const liveSpectateEnabled = toBool(req.body.liveSpectateEnabled);
   setSettingValue('live_spectate_enabled', liveSpectateEnabled ? '1' : '0');
   if (!liveSpectateEnabled) stopAllSpectateSessions('Live Spectate was disabled in Settings; background bot stopped.');
+  const spectateJavaAuth = String(req.body.spectateJavaAuth || settingValue('spectate_java_auth', 'offline')).trim().toLowerCase();
+  const spectateBedrockAuth = String(req.body.spectateBedrockAuth || settingValue('spectate_bedrock_auth', 'offline')).trim().toLowerCase();
+  if (['offline', 'microsoft'].includes(spectateJavaAuth)) setSettingValue('spectate_java_auth', spectateJavaAuth);
+  if (['offline', 'microsoft'].includes(spectateBedrockAuth)) setSettingValue('spectate_bedrock_auth', spectateBedrockAuth);
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
   if (publicBaseUrl) {

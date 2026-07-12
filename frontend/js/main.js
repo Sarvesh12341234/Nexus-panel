@@ -1894,6 +1894,9 @@ async function renderSpectate() {
   }
   const data = await api(`/api/servers/${server.id}/spectate`).catch((error) => ({ error: error.message, players: [] }));
   state.spectateData = data;
+  const authHint = data.authMode === 'microsoft'
+    ? 'Microsoft mode uses device/browser login and token cache. Watch the server console for the login prompt.'
+    : 'Offline mode joins without a Microsoft account when the server allows it.';
   const playerButtons = (data.players || []).map((player) => `
     <button class="secondary spectate-player-button" type="button" data-action="spectate-target" data-player-name="${escapeHtml(player)}">${escapeHtml(player)}</button>
   `).join('');
@@ -1919,7 +1922,7 @@ async function renderSpectate() {
       <canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>
     </div>
     <div class="plugin-row">
-      <div><strong>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted">${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)} - ${escapeHtml(data.botName || 'live-update')}` : `Install inside /opt/nexuspanel: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
+      <div><strong>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted">${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)} - ${escapeHtml(data.botName || 'live-update')} - ${escapeHtml(authHint)}` : `Install inside /opt/nexuspanel: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
       <span class="badge ${data.packageInstalled && data.status !== 'missing-engine' ? 'is-on' : ''}">${data.packageInstalled ? 'Engine ready' : 'Needs engine'}</span>
     </div>
     <div class="settings-group">
@@ -2238,6 +2241,8 @@ function renderSettings() {
       <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
       <label class="switch"><input name="liveSpectateEnabled" type="checkbox" ${settings.liveSpectateEnabled ? 'checked' : ''}><span></span>Live spectate section</label>
+      <label>Java spectate auth <select name="spectateJavaAuth"><option value="offline" ${settings.spectateJavaAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateJavaAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
+      <label>Bedrock spectate auth <select name="spectateBedrockAuth"><option value="offline" ${settings.spectateBedrockAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateBedrockAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '2.0.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v2.0.0"></label>
