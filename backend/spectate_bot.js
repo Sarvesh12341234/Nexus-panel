@@ -32,7 +32,7 @@ function startJavaBot(config) {
   };
 
   bot.once('spawn', () => {
-    send('status', { status: 'connected', message: `Java spectate bot joined ${config.host}:${config.port}.` });
+    send('status', { status: 'connected', target: config.username, message: `Java spectate bot joined ${config.host}:${config.port}.` });
     publishPlayers();
     setTimeout(() => {
       bot.chat(`/gamemode spectator ${config.username}`);
@@ -69,11 +69,14 @@ function startBedrockBot(config) {
     profilesFolder,
   });
   const players = new Set();
+  let connected = false;
 
   const publishPlayers = () => send('players', { players: [...players].map(cleanPlayerName).filter(Boolean) });
-
-  client.on('join', () => {
-    send('status', { status: 'connected', message: `Bedrock spectate bot joined ${config.host}:${config.port}.` });
+  const markConnected = () => {
+    if (connected) return;
+    connected = true;
+    players.add(config.username);
+    send('status', { status: 'connected', target: config.username, message: `Bedrock spectate bot joined ${config.host}:${config.port}.` });
     publishPlayers();
     setTimeout(() => {
       try {
@@ -85,7 +88,11 @@ function startBedrockBot(config) {
         });
       } catch {}
     }, 1200);
-  });
+  };
+
+  client.once('join', markConnected);
+  client.once('start_game', markConnected);
+  client.once('spawn', markConnected);
   client.on('add_player', (packet) => {
     const name = packet?.username || packet?.runtime_entity_id || '';
     if (name) players.add(String(name));

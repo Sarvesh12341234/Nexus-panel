@@ -345,6 +345,7 @@ function startSpectateSession(server, req = null) {
   });
   const payload = {
     child,
+    timeout: null,
     status: 'connecting',
     startedAt: Date.now(),
     updatedAt: Date.now(),
@@ -355,6 +356,18 @@ function startSpectateSession(server, req = null) {
     message: `${bot.engine} detected. Connecting bot to 127.0.0.1:${config.port}...`,
   };
   spectateSessions.set(Number(server.id), payload);
+  payload.timeout = setTimeout(() => {
+    const session = spectateSessions.get(Number(server.id));
+    if (!session || session.status !== 'connecting') return;
+    session.status = 'error';
+    session.updatedAt = Date.now();
+    session.message = server.type === 'bedrock'
+      ? 'Bedrock bot reached the server but did not finish joining within 30 seconds. If server.properties has online-mode=true, use Microsoft auth (NEXUSPANEL_SPECTATE_BEDROCK_AUTH=microsoft) or turn online-mode=false for this spectate account.'
+      : 'Java bot did not finish joining within 30 seconds. Check whitelist, online-mode, and player limit.';
+    appendLog(server.id, `[NexusPanel] Live Spectate timeout: ${session.message}`);
+    try { child.kill(); } catch {}
+  }, 30 * 1000);
+  payload.timeout.unref();
   child.on('message', (message) => {
     const session = spectateSessions.get(Number(server.id));
     if (!session) return;
@@ -363,6 +376,10 @@ function startSpectateSession(server, req = null) {
       session.status = message.status || session.status;
       session.message = message.message || session.message;
       if (message.target !== undefined) session.target = message.target;
+      if (session.status === 'connected' && session.timeout) {
+        clearTimeout(session.timeout);
+        session.timeout = null;
+      }
     }
     if (message.type === 'error') {
       session.status = 'error';
@@ -376,6 +393,7 @@ function startSpectateSession(server, req = null) {
   child.on('exit', (code, signal) => {
     const session = spectateSessions.get(Number(server.id));
     if (!session) return;
+    if (session.timeout) clearTimeout(session.timeout);
     session.status = 'stopped';
     session.updatedAt = Date.now();
     session.message = `Spectate bot exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
@@ -387,6 +405,7 @@ function startSpectateSession(server, req = null) {
 function stopSpectateSession(server) {
   const session = spectateSessions.get(Number(server.id));
   if (session?.child) {
+    if (session.timeout) clearTimeout(session.timeout);
     try { session.child.send({ type: 'stop' }); } catch {}
     setTimeout(() => {
       try {
@@ -396,6 +415,40 @@ function stopSpectateSession(server) {
   }
   spectateSessions.delete(Number(server.id));
   appendLog(server.id, '[NexusPanel] Live Spectate session stopped.');
+}
+
+function stopAllSpectateSessions(reason = 'Live Spectate was disabled.') {
+  for (const serverId of [...spectateSessions.keys()]) {
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(serverId));
+    if (!server) {
+      const session = spectateSessions.get(Number(serverId));
+      if (session?.timeout) clearTimeout(session.timeout);
+      try { session?.child?.kill(); } catch {}
+      spectateSessions.delete(Number(serverId));
+      continue;
+    }
+    stopSpectateSession(server);
+    appendLog(server.id, `[NexusPanel] ${reason}`);
+  }
+}
+
+function pruneSpectateSessions() {
+  if (settingValue('live_spectate_enabled', '0') !== '1') {
+    stopAllSpectateSessions('Live Spectate is disabled; background bot stopped.');
+    return;
+  }
+  for (const serverId of [...spectateSessions.keys()]) {
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(serverId));
+    if (!server || runtimeStatus(server.id) !== 'online') {
+      if (server) stopSpectateSession(server);
+      else {
+        const session = spectateSessions.get(Number(serverId));
+        if (session?.timeout) clearTimeout(session.timeout);
+        try { session?.child?.kill(); } catch {}
+        spectateSessions.delete(Number(serverId));
+      }
+    }
+  }
 }
 
 function spectateFrameSvg(payload) {
@@ -3695,7 +3748,9 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
   setSettingValue('repair_web_enabled', toBool(req.body.repairWebEnabled, true) ? '1' : '0');
   setSettingValue('repair_agent_terminal_enabled', toBool(req.body.repairAgentTerminalEnabled, true) ? '1' : '0');
-  setSettingValue('live_spectate_enabled', toBool(req.body.liveSpectateEnabled) ? '1' : '0');
+  const liveSpectateEnabled = toBool(req.body.liveSpectateEnabled);
+  setSettingValue('live_spectate_enabled', liveSpectateEnabled ? '1' : '0');
+  if (!liveSpectateEnabled) stopAllSpectateSessions('Live Spectate was disabled in Settings; background bot stopped.');
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
   if (publicBaseUrl) {
@@ -5594,9 +5649,11 @@ async function runLiveAgentSweep() {
 
 function startSchedulers() {
   setInterval(runAutoBackups, 30 * 1000).unref();
+  setInterval(pruneSpectateSessions, 10 * 1000).unref();
   setInterval(() => runAdaptiveMaintenance().catch(() => {}), 2 * 60 * 1000).unref();
   setInterval(() => runHealthCheck(false).catch(() => {}), 24 * 60 * 60 * 1000).unref();
   runAutoBackups().catch(() => {});
+  pruneSpectateSessions();
   runAdaptiveMaintenance().catch(() => {});
   runHealthCheck(false).catch(() => {});
 }
