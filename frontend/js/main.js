@@ -2016,20 +2016,33 @@ function syncSpectateSurface(data) {
   }
 }
 
+function screenShareSupportError() {
+  if (!window.isSecureContext) return 'Screen share needs HTTPS, or localhost. Open NexusPanel through HTTPS to use real browser capture.';
+  if (!navigator.mediaDevices?.getDisplayMedia) return 'This browser does not expose screen capture. Use Chrome, Edge, Firefox desktop, or paste a Watch-only client video URL in Settings.';
+  return '';
+}
+
 async function startClientScreenShare() {
-  if (!navigator.mediaDevices?.getDisplayMedia) {
-    showToast('Screen share is not supported in this browser.');
+  const supportError = screenShareSupportError();
+  if (supportError) {
+    showToast(supportError);
     return;
   }
   stopClientScreenShare(false);
-  const stream = await navigator.mediaDevices.getDisplayMedia({
-    video: {
-      frameRate: { ideal: 30, max: 60 },
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
-    },
-    audio: false,
-  });
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        frameRate: { ideal: 30, max: 60 },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
+      audio: false,
+    });
+  } catch (error) {
+    showToast(error?.name === 'NotAllowedError' ? 'Screen share was cancelled or denied.' : `Screen share failed: ${error.message || error}`);
+    return;
+  }
   state.spectateClientScreenStream = stream;
   state.spectateClientScreenActive = true;
   stream.getVideoTracks()[0]?.addEventListener('ended', () => {

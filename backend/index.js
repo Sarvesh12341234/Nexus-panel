@@ -350,6 +350,8 @@ function sendSpectateModeCommand(server, botName) {
 
 function inferSpectateFromServerLogs(server, session) {
   if (!session) return session;
+  const childAlive = Boolean(session.child && !session.child.killed && session.status !== 'stopped');
+  if (!childAlive || Date.now() - Number(session.startedAt || 0) > 10 * 60 * 1000) return session;
   const botName = session.botName || spectateBotName(server);
   const recent = consoleLogs(server.id)
     .filter((line) => String(line).includes(botName))
@@ -360,9 +362,6 @@ function inferSpectateFromServerLogs(server, session) {
     const players = new Set([...(session.players || []), botName]);
     session.players = [...players];
     session.target = session.target || botName;
-    if (!Array.isArray(session.entities) || !session.entities.length) {
-      session.entities = sanitizeSpectateEntities([{ id: botName, name: botName, x: 0, y: 64, z: 0, yaw: 0, pitch: 0, self: true }]);
-    }
     if (['connecting', 'ready', 'stopped', 'error'].includes(session.status)) {
       session.status = 'connected';
       session.message = `${botName} is connected and spawned. Live feed is following the bot perspective.`;
@@ -385,7 +384,8 @@ function inferSpectateFromServerLogs(server, session) {
 function spectateSessionPayload(server, req = null) {
   const session = inferSpectateFromServerLogs(server, spectateSessions.get(Number(server.id)));
   const bot = spectateBotPackage(server);
-  const players = session?.players?.length ? session.players : runtimeDetails(server.id).players || [];
+  const sessionActive = Boolean(session && session.status !== 'stopped' && session.status !== 'error' && (!session.child || !session.child.killed));
+  const players = sessionActive && session?.players?.length ? session.players : [];
   const installed = (() => {
     try {
       require.resolve(bot.name);
@@ -422,8 +422,8 @@ function spectateSessionPayload(server, req = null) {
     clientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
     target: session?.target || players[0] || '',
     players,
-    entities: sanitizeSpectateEntities(session?.entities || []),
-    world: sanitizeSpectateWorld(session?.world || {}),
+    entities: sessionActive ? sanitizeSpectateEntities(session?.entities || []) : [],
+    world: sessionActive ? sanitizeSpectateWorld(session?.world || {}) : sanitizeSpectateWorld({}),
     visualSeed: crypto.createHash('sha1').update(`${server.id}:${server.name}:${server.port}`).digest('hex').slice(0, 12),
     recentEvents: consoleLogs(server.id)
       .filter((line) => /Player |Live Spectate|Spawned|connected|disconnected/i.test(String(line)))
@@ -4871,12 +4871,10 @@ app.post('/api/servers/:id/spectate/stop', requirePermission(capabilities.CONSOL
 
 app.post('/api/servers/:id/spectate/target', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
   const server = getServerOr404(req.params.id);
-  const session = spectateSessions.get(Number(server.id)) || {
-    status: 'ready',
-    startedAt: Date.now(),
-    updatedAt: 0,
-    message: 'Live frame target selected.',
-  };
+  const session = spectateSessions.get(Number(server.id));
+  if (!session || session.status === 'stopped' || session.status === 'error') {
+    return res.status(409).json({ error: 'Start the spectate bot before switching targets.' });
+  }
   session.target = String(req.body.target || '').slice(0, 80);
   session.updatedAt = Date.now();
   if (session.child) {
