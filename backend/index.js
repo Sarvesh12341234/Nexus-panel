@@ -268,7 +268,7 @@ function spectateBotPackage(server) {
 function spectateSessionPayload(server, req = null) {
   const session = spectateSessions.get(Number(server.id));
   const bot = spectateBotPackage(server);
-  const players = runtimeDetails(server.id).players || [];
+  const players = session?.players?.length ? session.players : runtimeDetails(server.id).players || [];
   const installed = (() => {
     try {
       require.resolve(bot.name);
@@ -288,10 +288,13 @@ function spectateSessionPayload(server, req = null) {
     engine: bot.engine,
     packageName: bot.name,
     packageInstalled: installed,
-    installCommand: `npm install ${bot.name}`,
+    installCommand: `cd /opt/nexuspanel && npm install ${bot.name}`,
     status: session?.status || 'stopped',
     startedAt: session?.startedAt || 0,
     updatedAt: session?.updatedAt || 0,
+    pid: session?.child?.pid || 0,
+    botName: session?.botName || (server.type === 'java' ? 'live_update' : 'live-update'),
+    authMode: session?.authMode || (server.type === 'java' ? (process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline') : (process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline')),
     target: session?.target || players[0] || '',
     players,
     frameUrl: `/api/servers/${server.id}/spectate/frame.svg`,
@@ -303,6 +306,10 @@ function startSpectateSession(server, req = null) {
   if (settingValue('live_spectate_enabled', '0') !== '1') throw new Error('Live spectate is disabled in Settings.');
   if (runtimeStatus(server.id) !== 'online') throw new Error('Start the server before opening a live spectate session.');
   const bot = spectateBotPackage(server);
+  const existing = spectateSessions.get(Number(server.id));
+  if (existing?.child && !existing.child.killed && !['stopped', 'error'].includes(existing.status)) {
+    return spectateSessionPayload(server, req);
+  }
   try {
     require.resolve(bot.name);
   } catch {
@@ -311,26 +318,82 @@ function startSpectateSession(server, req = null) {
       startedAt: Date.now(),
       updatedAt: Date.now(),
       target: '',
-      message: `${bot.engine} package is not installed. Run: npm install ${bot.name}`,
+      message: `${bot.engine} package is not installed in the panel folder. Run: cd /opt/nexuspanel && npm install ${bot.name}`,
     };
     spectateSessions.set(Number(server.id), payload);
     appendLog(server.id, `[NexusPanel] Live Spectate waiting for bot engine: npm install ${bot.name}`);
     return spectateSessionPayload(server, req);
   }
   const players = runtimeDetails(server.id).players || [];
+  const serverRoot = ensureServerDirs(server);
+  const runtimeDir = assertInside(serverRoot, path.join(serverRoot, 'runtime', 'spectate'));
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  const config = {
+    type: server.type === 'java' ? 'java' : 'bedrock',
+    host: '127.0.0.1',
+    port: Number(server.port || (server.type === 'bedrock' ? 19132 : 25565)),
+    username: server.type === 'java' ? 'live_update' : 'live-update',
+    auth: server.type === 'java' ? (process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline') : (process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline'),
+    runtimeDir,
+  };
+  const encoded = Buffer.from(JSON.stringify(config), 'utf8').toString('base64url');
+  const child = spawn(process.execPath, [path.join(__dirname, 'spectate_bot.js'), encoded], {
+    cwd: path.join(__dirname, '..'),
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    windowsHide: true,
+  });
   const payload = {
-    status: 'ready',
+    child,
+    status: 'connecting',
     startedAt: Date.now(),
     updatedAt: Date.now(),
+    botName: config.username,
+    authMode: config.auth,
     target: players[0] || '',
-    message: `${bot.engine} detected. Live frame is following ${players[0] || 'server overview'}.`,
+    players,
+    message: `${bot.engine} detected. Connecting bot to 127.0.0.1:${config.port}...`,
   };
   spectateSessions.set(Number(server.id), payload);
-  appendLog(server.id, `[NexusPanel] Live Spectate session armed with ${bot.engine}.`);
+  child.on('message', (message) => {
+    const session = spectateSessions.get(Number(server.id));
+    if (!session) return;
+    if (message.type === 'players' && Array.isArray(message.players)) session.players = message.players;
+    if (message.type === 'status') {
+      session.status = message.status || session.status;
+      session.message = message.message || session.message;
+      if (message.target !== undefined) session.target = message.target;
+    }
+    if (message.type === 'error') {
+      session.status = 'error';
+      session.message = message.message || 'Spectate bot error.';
+      appendLog(server.id, `[NexusPanel] Live Spectate error: ${session.message}`);
+    }
+    session.updatedAt = Date.now();
+  });
+  child.stdout.on('data', (chunk) => appendLog(server.id, `[NexusPanel Spectate] ${String(chunk).trim().slice(-400)}`));
+  child.stderr.on('data', (chunk) => appendLog(server.id, `[NexusPanel Spectate] ${String(chunk).trim().slice(-400)}`));
+  child.on('exit', (code, signal) => {
+    const session = spectateSessions.get(Number(server.id));
+    if (!session) return;
+    session.status = 'stopped';
+    session.updatedAt = Date.now();
+    session.message = `Spectate bot exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
+  });
+  appendLog(server.id, `[NexusPanel] Live Spectate launched ${bot.engine} as ${config.username} (${config.auth} auth).`);
   return spectateSessionPayload(server, req);
 }
 
 function stopSpectateSession(server) {
+  const session = spectateSessions.get(Number(server.id));
+  if (session?.child) {
+    try { session.child.send({ type: 'stop' }); } catch {}
+    setTimeout(() => {
+      try {
+        if (!session.child.killed) session.child.kill();
+      } catch {}
+    }, 1500).unref();
+  }
   spectateSessions.delete(Number(server.id));
   appendLog(server.id, '[NexusPanel] Live Spectate session stopped.');
 }
@@ -4561,6 +4624,9 @@ app.post('/api/servers/:id/spectate/target', requirePermission(capabilities.CONS
   };
   session.target = String(req.body.target || '').slice(0, 80);
   session.updatedAt = Date.now();
+  if (session.child) {
+    try { session.child.send({ type: 'target', target: session.target }); } catch {}
+  }
   spectateSessions.set(Number(server.id), session);
   res.json(spectateSessionPayload(server, req));
 });

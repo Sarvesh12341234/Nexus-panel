@@ -21,6 +21,7 @@ const state = {
   statusRefreshAt: 0,
   consolePollAt: {},
   consoleMetricsAt: {},
+  spectatePollAt: 0,
   presenceAt: 0,
   serverStatusSignature: '',
 };
@@ -1889,13 +1890,14 @@ async function renderSpectate() {
   }
   const data = await api(`/api/servers/${server.id}/spectate`).catch((error) => ({ error: error.message, players: [] }));
   const playerButtons = (data.players || []).map((player) => `
-    <button class="secondary" type="button" data-action="spectate-target" data-player-name="${escapeHtml(player)}">${escapeHtml(player)}</button>
+    <button class="secondary spectate-player-button" type="button" data-action="spectate-target" data-player-name="${escapeHtml(player)}">${escapeHtml(player)}</button>
   `).join('');
+  const running = ['connecting', 'connected', 'ready'].includes(data.status);
   elements.spectatePanel.innerHTML = `
-    <div class="section-head">
+    <div class="section-head spectate-head">
       <div><p class="eyebrow">Live Spectate</p><h2>${escapeHtml(server.name)}</h2></div>
       <div class="row-actions">
-        <button type="button" data-action="spectate-start" ${data.serverStatus === 'online' ? '' : 'disabled'}>Start Bot</button>
+        <button type="button" data-action="spectate-start" ${data.serverStatus === 'online' && !running ? '' : 'disabled'}>${running ? 'Bot Running' : 'Start Bot'}</button>
         <button class="secondary" type="button" data-action="spectate-refresh">Refresh</button>
         <button class="danger" type="button" data-action="spectate-stop" ${data.status === 'stopped' ? 'disabled' : ''}>Stop</button>
       </div>
@@ -1904,13 +1906,15 @@ async function renderSpectate() {
       <div><strong>${escapeHtml(data.status || 'stopped')}</strong><span>Session</span></div>
       <div><strong>${escapeHtml(data.serverStatus || server.status)}</strong><span>Server</span></div>
       <div><strong>${escapeHtml(data.engine || 'Bot engine')}</strong><span>${data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
+      <div><strong>${escapeHtml(data.botName || 'live-update')}</strong><span>${escapeHtml(data.authMode || 'offline')} auth</span></div>
       <div><strong>${escapeHtml(data.target || 'Overview')}</strong><span>Target</span></div>
+      <div><strong>${data.pid ? Number(data.pid) : '-'}</strong><span>Bot PID</span></div>
     </div>
     <div class="spectate-frame-wrap">
       <img class="spectate-frame" alt="Live spectate frame" src="${escapeHtml(data.frameUrl || `/api/servers/${server.id}/spectate/frame.svg`)}?t=${Date.now()}">
     </div>
     <div class="plugin-row">
-      <div><strong>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted">${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)}` : `Install on VPS: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
+      <div><strong>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted">${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)} - ${escapeHtml(data.botName || 'live-update')}` : `Install inside /opt/nexuspanel: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
       <span class="badge ${data.packageInstalled && data.status !== 'missing-engine' ? 'is-on' : ''}">${data.packageInstalled ? 'Engine ready' : 'Needs engine'}</span>
     </div>
     <div class="settings-group">
@@ -2907,6 +2911,14 @@ function startRefreshLoop() {
     const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy ? 1500 : 5000);
     if (state.activeView === 'console') {
       renderConsole().catch(() => {});
+      if (!dueStatus) return;
+    }
+    if (state.activeView === 'spectate') {
+      const dueSpectate = Date.now() - Number(state.spectatePollAt || 0) > 1000;
+      if (dueSpectate) {
+        state.spectatePollAt = Date.now();
+        renderSpectate().catch(() => {});
+      }
       if (!dueStatus) return;
     }
     if (dueStatus || liveBusy) {

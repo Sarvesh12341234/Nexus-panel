@@ -589,6 +589,17 @@ code {
   object-fit: cover;
 }
 
+.spectate-head {
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.spectate-player-button {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .switch {
   display: flex;
   align-items: center;
@@ -1329,6 +1340,15 @@ code {
     justify-content: flex-start;
     width: 100%;
   }
+
+  .spectate-head {
+    align-items: stretch;
+  }
+
+  .spectate-head .row-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 620px) {
@@ -1382,6 +1402,23 @@ code {
     display: grid;
     grid-template-columns: 1fr;
     width: 100%;
+  }
+
+  .spectate-head .row-actions,
+  #spectatePanel .row-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  .spectate-frame-wrap {
+    border-radius: 8px;
+    margin-inline: -2px;
+  }
+
+  .spectate-player-button {
+    width: 100%;
+    max-width: none;
   }
 
   button,
