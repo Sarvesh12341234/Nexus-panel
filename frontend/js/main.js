@@ -2229,7 +2229,7 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     const heightY = Number(column.h || 4);
     const x = Number(column.x || 0);
     const z = Number(column.z || 0);
-    const size = 2.15;
+    const size = 1.18;
     const bottom = [
       project(x, baseY, z),
       project(x + size, baseY, z),
@@ -2286,7 +2286,7 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
 
   const geometryColumns = chunks
     .flatMap((chunk) => Array.isArray(chunk.geometry?.columns) ? chunk.geometry.columns : [])
-    .slice(-1280);
+    .slice(-8192);
   const visible = [];
   for (let cx = focusChunkX - 3; cx <= focusChunkX + 3; cx += 1) {
     for (let cz = focusChunkZ - 3; cz <= focusChunkZ + 3; cz += 1) {
@@ -2302,7 +2302,11 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     }
   }
   if (geometryColumns.length) {
-    const sortedColumns = [...geometryColumns].sort((left, right) => (Number(left.x || 0) + Number(left.z || 0)) - (Number(right.x || 0) + Number(right.z || 0)));
+    const sortedColumns = [...geometryColumns].sort((left, right) => {
+      const leftDepth = (Number(left.x || 0) - Number(focus.x || 0)) + (Number(left.z || 0) - Number(focus.z || 0));
+      const rightDepth = (Number(right.x || 0) - Number(focus.x || 0)) + (Number(right.z || 0) - Number(focus.z || 0));
+      return leftDepth - rightDepth;
+    });
     for (const column of sortedColumns) {
       const point = project(column.x, column.y, column.z);
       if (point.x < -100 || point.x > width + 100 || point.y < height * 0.08 || point.y > height + 120) continue;

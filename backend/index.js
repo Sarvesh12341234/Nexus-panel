@@ -499,10 +499,10 @@ function sanitizeSpectateWorld(world) {
             x: Number.isFinite(Number(column?.x)) ? Math.trunc(Number(column.x)) : 0,
             y: Number.isFinite(Number(column?.y)) ? Math.trunc(Number(column.y)) : 64,
             z: Number.isFinite(Number(column?.z)) ? Math.trunc(Number(column.z)) : 0,
-            h: Number.isFinite(Number(column?.h)) ? Math.max(1, Math.min(32, Math.trunc(Number(column.h)))) : 4,
+            h: Number.isFinite(Number(column?.h)) ? Math.max(1, Math.min(24, Math.trunc(Number(column.h)))) : 4,
             d: Number.isFinite(Number(column?.d)) ? Math.max(0, Math.min(1, Number(column.d))) : 0,
           }))
-          .slice(0, 80)
+          .slice(0, 256)
         : [];
       return {
         x: Number.isFinite(Number(chunk?.x)) ? Math.trunc(Number(chunk.x)) : 0,
@@ -518,7 +518,7 @@ function sanitizeSpectateWorld(world) {
         updatedAt: Number.isFinite(Number(chunk?.updatedAt)) ? Number(chunk.updatedAt) : Date.now(),
       };
     })
-    .slice(-192);
+    .slice(-64);
   const blockUpdates = (Array.isArray(world?.blockUpdates) ? world.blockUpdates : [])
     .map((block) => ({
       x: Number.isFinite(Number(block?.x)) ? Math.trunc(Number(block.x)) : 0,

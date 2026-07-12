@@ -135,21 +135,22 @@ function chunkGeometryFromBytes(packet, chunk) {
     energy = (energy + byte) >>> 0;
   }
   const columns = [];
-  const stride = Math.max(1, Math.floor(bytes.length / 96));
-  for (let localX = 0; localX < 16; localX += 2) {
-    for (let localZ = 0; localZ < 16; localZ += 2) {
-      const sample = (localX * 31 + localZ * 17 + digest) % bytes.length;
+  const stride = Math.max(1, Math.floor(bytes.length / 256));
+  for (let localX = 0; localX < 16; localX += 1) {
+    for (let localZ = 0; localZ < 16; localZ += 1) {
+      const sample = (localX * 131 + localZ * 67 + digest + ((localX * localZ) << 3)) % bytes.length;
       const b0 = bytes[sample];
       const b1 = bytes[(sample + stride) % bytes.length];
       const b2 = bytes[(sample + stride * 3) % bytes.length];
+      const b3 = bytes[(sample + stride * 7) % bytes.length];
       const signal = (b0 ^ ((b1 << 1) & 255) ^ ((b2 << 2) & 255)) & 255;
-      const height = 44 + (signal % 56);
-      const density = Math.round(((b0 + b1 + b2) / 765) * 1000) / 1000;
+      const height = 42 + (signal % 64);
+      const density = Math.round(((b0 + b1 + b2 + b3) / 1020) * 1000) / 1000;
       columns.push({
         x: chunk.x * 16 + localX,
         z: chunk.z * 16 + localZ,
         y: height,
-        h: 2 + (b2 % 18),
+        h: 1 + (b2 % 10),
         d: density,
       });
     }
@@ -385,7 +386,7 @@ function startBedrockBot(config) {
     }
     send('world', {
       mode: 'nexusvision-packet-wireframe',
-      chunks: [...chunks.values()].slice(-192),
+      chunks: [...chunks.values()].slice(-64),
       blockUpdates: blockUpdates.splice(0, blockUpdates.length).slice(-128),
       packetStats: { ...packetStats },
     });
