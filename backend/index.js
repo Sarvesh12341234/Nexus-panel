@@ -277,6 +277,27 @@ function spectateAuthMode(server) {
     : settingValue('spectate_bedrock_auth', process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline');
 }
 
+function sanitizeSpectateEntities(entities) {
+  return (Array.isArray(entities) ? entities : [])
+    .map((entity) => {
+      const name = String(entity?.name || entity?.id || '').replace(/[^A-Za-z0-9_ -]/g, '').slice(0, 32);
+      if (!name) return null;
+      return {
+        id: String(entity.id || name).slice(0, 80),
+        name,
+        x: Number.isFinite(Number(entity.x)) ? Number(entity.x) : 0,
+        y: Number.isFinite(Number(entity.y)) ? Number(entity.y) : 0,
+        z: Number.isFinite(Number(entity.z)) ? Number(entity.z) : 0,
+        yaw: Number.isFinite(Number(entity.yaw)) ? Number(entity.yaw) : 0,
+        pitch: Number.isFinite(Number(entity.pitch)) ? Number(entity.pitch) : 0,
+        self: Boolean(entity.self),
+        updatedAt: Number.isFinite(Number(entity.updatedAt)) ? Number(entity.updatedAt) : Date.now(),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 80);
+}
+
 function sendSpectateModeCommand(server, botName) {
   const session = spectateSessions.get(Number(server.id));
   if (!session || session.gamemodeSent || runtimeStatus(server.id) !== 'online') return;
@@ -301,6 +322,9 @@ function inferSpectateFromServerLogs(server, session) {
     const players = new Set([...(session.players || []), botName]);
     session.players = [...players];
     session.target = session.target || botName;
+    if (!Array.isArray(session.entities) || !session.entities.length) {
+      session.entities = sanitizeSpectateEntities([{ id: botName, name: botName, x: 0, y: 64, z: 0, yaw: 0, pitch: 0, self: true }]);
+    }
     if (['connecting', 'ready', 'stopped', 'error'].includes(session.status)) {
       session.status = 'connected';
       session.message = `${botName} is connected and spawned. Live feed is following the bot perspective.`;
@@ -352,6 +376,7 @@ function spectateSessionPayload(server, req = null) {
     authMode: session?.authMode || spectateAuthMode(server),
     target: session?.target || players[0] || '',
     players,
+    entities: sanitizeSpectateEntities(session?.entities || []),
     visualSeed: crypto.createHash('sha1').update(`${server.id}:${server.name}:${server.port}`).digest('hex').slice(0, 12),
     recentEvents: consoleLogs(server.id)
       .filter((line) => /Player |Live Spectate|Spawned|connected|disconnected/i.test(String(line)))
@@ -412,6 +437,7 @@ function startSpectateSession(server, req = null) {
     authMode: config.auth,
     target: players[0] || '',
     players,
+    entities: [],
     message: `${bot.engine} detected. Connecting bot to 127.0.0.1:${config.port}...`,
   };
   spectateSessions.set(Number(server.id), payload);
@@ -431,6 +457,11 @@ function startSpectateSession(server, req = null) {
     const session = spectateSessions.get(Number(server.id));
     if (!session) return;
     if (message.type === 'players' && Array.isArray(message.players)) session.players = message.players;
+    if (message.type === 'entities' && Array.isArray(message.entities)) {
+      session.entities = sanitizeSpectateEntities(message.entities);
+      const entityNames = session.entities.map((entity) => entity.name).filter(Boolean);
+      if (entityNames.length) session.players = [...new Set([...(session.players || []), ...entityNames])];
+    }
     if (message.type === 'status') {
       session.status = message.status || session.status;
       session.message = message.message || session.message;

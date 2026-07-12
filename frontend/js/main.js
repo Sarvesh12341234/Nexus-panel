@@ -1894,6 +1894,7 @@ async function renderSpectate() {
   }
   const data = await api(`/api/servers/${server.id}/spectate`).catch((error) => ({ error: error.message, players: [] }));
   state.spectateData = data;
+  state.spectatePlayerSignature = (data.players || []).join('|');
   const authHint = data.authMode === 'microsoft'
     ? 'Microsoft mode uses device/browser login and token cache. Watch the server console for the login prompt.'
     : 'Offline mode joins without a Microsoft account when the server allows it.';
@@ -1911,26 +1912,73 @@ async function renderSpectate() {
       </div>
     </div>
     <div class="metric-grid">
-      <div><strong>${escapeHtml(data.status || 'stopped')}</strong><span>Session</span></div>
-      <div><strong>${escapeHtml(data.serverStatus || server.status)}</strong><span>Server</span></div>
-      <div><strong>${escapeHtml(data.engine || 'Bot engine')}</strong><span>${data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
-      <div><strong>${escapeHtml(data.botName || 'live-update')}</strong><span>${escapeHtml(data.authMode || 'offline')} auth</span></div>
-      <div><strong>${escapeHtml(data.target || 'Overview')}</strong><span>Target</span></div>
-      <div><strong>${data.pid ? Number(data.pid) : '-'}</strong><span>Bot PID</span></div>
+      <div><strong data-spectate-status>${escapeHtml(data.status || 'stopped')}</strong><span>Session</span></div>
+      <div><strong data-spectate-server>${escapeHtml(data.serverStatus || server.status)}</strong><span>Server</span></div>
+      <div><strong data-spectate-engine>${escapeHtml(data.engine || 'Bot engine')}</strong><span>${data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
+      <div><strong data-spectate-bot>${escapeHtml(data.botName || 'live-update')}</strong><span>${escapeHtml(data.authMode || 'offline')} auth</span></div>
+      <div><strong data-spectate-target>${escapeHtml(data.target || 'Overview')}</strong><span>Target</span></div>
+      <div><strong data-spectate-pid>${data.pid ? Number(data.pid) : '-'}</strong><span>Bot PID</span></div>
     </div>
     <div class="spectate-frame-wrap">
       <canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>
     </div>
     <div class="plugin-row">
-      <div><strong>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted">${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)} - ${escapeHtml(data.botName || 'live-update')} - ${escapeHtml(authHint)}` : `Install inside /opt/nexuspanel: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
-      <span class="badge ${data.packageInstalled && data.status !== 'missing-engine' ? 'is-on' : ''}">${data.packageInstalled ? 'Engine ready' : 'Needs engine'}</span>
+      <div><strong data-spectate-message>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted" data-spectate-detail>${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)} - ${escapeHtml(data.botName || 'live-update')} - ${escapeHtml(authHint)}` : `Install inside /opt/nexuspanel: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
+      <span class="badge ${data.packageInstalled && data.status !== 'missing-engine' ? 'is-on' : ''}" data-spectate-badge>${data.packageInstalled ? 'Engine ready' : 'Needs engine'}</span>
     </div>
     <div class="settings-group">
       <strong>Switch Player</strong>
-      <div class="row-actions">${playerButtons || '<span class="muted">No players detected from console telemetry yet.</span>'}</div>
+      <div class="row-actions" data-spectate-players>${playerButtons || '<span class="muted">No players detected from console telemetry yet.</span>'}</div>
     </div>
   `;
   startSpectateVideo(server.id);
+}
+
+function renderSpectatePlayerButtons(data) {
+  return (data.players || []).map((player) => `
+    <button class="secondary spectate-player-button" type="button" data-action="spectate-target" data-player-name="${escapeHtml(player)}">${escapeHtml(player)}</button>
+  `).join('') || '<span class="muted">No players detected from console telemetry yet.</span>';
+}
+
+function updateSpectateLiveDom(data) {
+  const panel = elements.spectatePanel;
+  if (!panel || state.activeView !== 'spectate') return;
+  const setText = (selector, value) => {
+    const node = panel.querySelector(selector);
+    if (node) node.textContent = value;
+  };
+  setText('[data-spectate-status]', data.status || 'stopped');
+  setText('[data-spectate-server]', data.serverStatus || '');
+  setText('[data-spectate-engine]', data.engine || 'Bot engine');
+  setText('[data-spectate-bot]', data.botName || 'live-update');
+  setText('[data-spectate-target]', data.target || 'Overview');
+  setText('[data-spectate-pid]', data.pid ? String(Number(data.pid)) : '-');
+  setText('[data-spectate-message]', data.error || data.message || 'Live spectate ready.');
+  const detail = panel.querySelector('[data-spectate-detail]');
+  if (detail) {
+    detail.textContent = data.packageInstalled
+      ? `${data.host || '127.0.0.1'}:${Number(data.port || 0)} - ${data.botName || 'live-update'} - ${(data.authMode || 'offline')} auth`
+      : `Install inside /opt/nexuspanel: ${data.installCommand || 'npm install mineflayer'}`;
+  }
+  const badge = panel.querySelector('[data-spectate-badge]');
+  if (badge) {
+    badge.textContent = data.packageInstalled ? 'Engine ready' : 'Needs engine';
+    badge.classList.toggle('is-on', Boolean(data.packageInstalled && data.status !== 'missing-engine'));
+  }
+  const signature = (data.players || []).join('|');
+  if (signature !== state.spectatePlayerSignature) {
+    state.spectatePlayerSignature = signature;
+    const players = panel.querySelector('[data-spectate-players]');
+    if (players) players.innerHTML = renderSpectatePlayerButtons(data);
+  }
+}
+
+async function pollSpectateData() {
+  const server = activeServer();
+  if (!server || !state.settings?.liveSpectateEnabled) return;
+  const data = await api(`/api/servers/${server.id}/spectate`);
+  state.spectateData = data;
+  updateSpectateLiveDom(data);
 }
 
 function stopSpectateVideo() {
@@ -1956,6 +2004,11 @@ function drawSpectateVideo(canvas, data, elapsed) {
   const live = data.status === 'connected';
   const target = data.target || data.botName || 'Overview';
   const players = data.players || [];
+  const entities = (data.entities || []).filter((entity) => Number.isFinite(Number(entity.x)) && Number.isFinite(Number(entity.z)));
+  const focus = entities.find((entity) => entity.name === target)
+    || entities.find((entity) => entity.self)
+    || entities[0]
+    || { name: target, x: 0, y: 64, z: 0, yaw: 0, pitch: 0 };
   const pulse = (Math.sin(elapsed / 520) + 1) / 2;
 
   const sky = ctx.createLinearGradient(0, 0, 0, height);
@@ -1966,11 +2019,12 @@ function drawSpectateVideo(canvas, data, elapsed) {
   ctx.fillRect(0, 0, width, height);
 
   ctx.save();
-  ctx.globalAlpha = 0.22;
+  ctx.globalAlpha = 0.18;
   ctx.strokeStyle = live ? '#8fffd2' : '#a4b0c0';
   ctx.lineWidth = 1;
-  const gridOffset = (elapsed / 38) % 48;
-  for (let x = -48 + gridOffset; x < width + 48; x += 48) {
+  const gridOffsetX = ((Number(focus.x) * 14) % 48 + 48) % 48;
+  const gridOffsetZ = ((Number(focus.z) * 10) % 38 + 38) % 38;
+  for (let x = -48 + gridOffsetX; x < width + 48; x += 48) {
     ctx.beginPath();
     ctx.moveTo(x, height * 0.48);
     ctx.lineTo(width / 2 + (x - width / 2) * 1.8, height);
@@ -1978,8 +2032,8 @@ function drawSpectateVideo(canvas, data, elapsed) {
   }
   for (let y = height * 0.52; y < height; y += 38) {
     ctx.beginPath();
-    ctx.moveTo(0, y + gridOffset * 0.3);
-    ctx.lineTo(width, y + gridOffset * 0.3);
+    ctx.moveTo(0, y + gridOffsetZ * 0.3);
+    ctx.lineTo(width, y + gridOffsetZ * 0.3);
     ctx.stroke();
   }
   ctx.restore();
@@ -1996,26 +2050,78 @@ function drawSpectateVideo(canvas, data, elapsed) {
     }
   }
 
-  const cx = width * 0.5 + Math.sin(elapsed / 900) * 80;
-  const cy = height * 0.53 + Math.cos(elapsed / 760) * 28;
-  ctx.fillStyle = live ? '#41e69b' : '#8fa3b8';
-  ctx.shadowColor = live ? '#41e69b' : '#64748b';
-  ctx.shadowBlur = live ? 22 + pulse * 18 : 10;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 26 + pulse * 3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
+  const worldToScreen = (entity) => {
+    const dx = Number(entity.x || 0) - Number(focus.x || 0);
+    const dz = Number(entity.z || 0) - Number(focus.z || 0);
+    const dy = Number(entity.y || 0) - Number(focus.y || 0);
+    return {
+      x: width * 0.5 + dx * 16,
+      y: height * 0.61 + dz * 10 - dy * 2,
+      scale: Math.max(0.72, Math.min(1.35, 1 + (Number(entity.y || 0) - Number(focus.y || 0)) / 80)),
+    };
+  };
 
-  const nameWidth = Math.min(360, Math.max(150, target.length * 14 + 44));
-  ctx.fillStyle = 'rgba(3, 8, 14, 0.72)';
-  ctx.strokeStyle = live ? 'rgba(65, 230, 155, 0.8)' : 'rgba(148, 163, 184, 0.6)';
-  roundRect(ctx, cx - nameWidth / 2, cy - 78, nameWidth, 38, 10);
-  ctx.fill();
-  ctx.stroke();
-  ctx.fillStyle = '#f8fafc';
-  ctx.font = '700 18px Inter, Segoe UI, Arial';
-  ctx.textAlign = 'center';
-  ctx.fillText(target, cx, cy - 53);
+  if (!entities.length) {
+    const cx = width * 0.5 + Math.sin(elapsed / 900) * 80;
+    const cy = height * 0.55 + Math.cos(elapsed / 760) * 28;
+    ctx.fillStyle = live ? '#41e69b' : '#8fa3b8';
+    ctx.shadowColor = live ? '#41e69b' : '#64748b';
+    ctx.shadowBlur = live ? 22 + pulse * 18 : 10;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 26 + pulse * 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(3, 8, 14, 0.72)';
+    roundRect(ctx, cx - 190, cy - 78, 380, 40, 10);
+    ctx.fill();
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = '700 17px Inter, Segoe UI, Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for movement packets', cx, cy - 52);
+  } else {
+    const ordered = [...entities].sort((left, right) => {
+      const ly = worldToScreen(left).y;
+      const ry = worldToScreen(right).y;
+      return ly - ry;
+    });
+    for (const entity of ordered) {
+      const screen = worldToScreen(entity);
+      const active = entity.name === target || entity.self;
+      const radius = (active ? 22 : 15) * screen.scale;
+      const yaw = Number(entity.yaw || 0) * (Math.PI / 180);
+      ctx.save();
+      ctx.globalAlpha = screen.x < -80 || screen.x > width + 80 || screen.y < -80 || screen.y > height + 80 ? 0.18 : 1;
+      ctx.fillStyle = active ? 'rgba(65, 230, 155, 0.2)' : 'rgba(96, 165, 250, 0.14)';
+      ctx.beginPath();
+      ctx.ellipse(screen.x, screen.y + radius * 1.2, radius * 1.35, radius * 0.45, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = active ? '#41e69b' : '#60a5fa';
+      ctx.shadowColor = active ? '#41e69b' : '#60a5fa';
+      ctx.shadowBlur = active ? 24 + pulse * 12 : 12;
+      ctx.beginPath();
+      ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#03111a';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(screen.x, screen.y);
+      ctx.lineTo(screen.x + Math.sin(yaw) * radius * 1.7, screen.y - Math.cos(yaw) * radius * 1.7);
+      ctx.stroke();
+      const label = entity.name;
+      const labelWidth = Math.min(260, Math.max(92, label.length * 10 + 30));
+      ctx.fillStyle = 'rgba(3, 8, 14, 0.78)';
+      ctx.strokeStyle = active ? 'rgba(65, 230, 155, 0.82)' : 'rgba(147, 197, 253, 0.45)';
+      roundRect(ctx, screen.x - labelWidth / 2, screen.y - radius - 44, labelWidth, 30, 9);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#f8fafc';
+      ctx.font = '700 14px Inter, Segoe UI, Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, screen.x, screen.y - radius - 24);
+      ctx.restore();
+    }
+  }
 
   ctx.fillStyle = 'rgba(4, 10, 18, 0.78)';
   roundRect(ctx, 28, 28, 420, 116, 14);
@@ -2029,7 +2135,17 @@ function drawSpectateVideo(canvas, data, elapsed) {
   ctx.fillText(data.serverName || 'Server', 52, 101);
   ctx.fillStyle = '#9fb3c8';
   ctx.font = '14px Inter, Segoe UI, Arial';
-  ctx.fillText(`${data.botName || 'live-update'} - ${players.length || 0} player(s) - ${new Date().toLocaleTimeString()}`, 52, 128);
+  ctx.fillText(`${data.botName || 'live-update'} - ${players.length || 0} player(s) - ${entities.length || 0} tracked - ${new Date().toLocaleTimeString()}`, 52, 128);
+
+  ctx.fillStyle = 'rgba(4, 10, 18, 0.74)';
+  roundRect(ctx, 28, height - 116, 390, 72, 14);
+  ctx.fill();
+  ctx.fillStyle = '#bfdbfe';
+  ctx.font = '700 14px Inter, Segoe UI, Arial';
+  ctx.fillText('Camera follow', 52, height - 84);
+  ctx.fillStyle = '#dbeafe';
+  ctx.font = '600 18px Inter, Segoe UI, Arial';
+  ctx.fillText(`${focus.name || target}  x:${Math.round(Number(focus.x || 0))} y:${Math.round(Number(focus.y || 0))} z:${Math.round(Number(focus.z || 0))}`, 52, height - 56);
 
   const events = (data.recentEvents || []).slice(-4);
   ctx.fillStyle = 'rgba(4, 10, 18, 0.68)';
@@ -3074,10 +3190,10 @@ function startRefreshLoop() {
       if (!dueStatus) return;
     }
     if (state.activeView === 'spectate') {
-      const dueSpectate = Date.now() - Number(state.spectatePollAt || 0) > 1000;
+      const dueSpectate = Date.now() - Number(state.spectatePollAt || 0) > 250;
       if (dueSpectate) {
         state.spectatePollAt = Date.now();
-        renderSpectate().catch(() => {});
+        pollSpectateData().catch(() => {});
       }
       if (!dueStatus) return;
     }
