@@ -25,8 +25,6 @@ const state = {
   spectateData: null,
   spectateStream: null,
   spectateStreamServerId: 0,
-  spectateClientScreenStream: null,
-  spectateClientScreenActive: false,
   presenceAt: 0,
   serverStatusSignature: '',
 };
@@ -1913,8 +1911,6 @@ async function renderSpectate() {
       <div><p class="eyebrow">Live Spectate</p><h2>${escapeHtml(server.name)}</h2></div>
       <div class="row-actions">
         <button type="button" data-action="spectate-start" ${data.serverStatus === 'online' && !running ? '' : 'disabled'}>${running ? 'Bot Running' : 'Start Bot'}</button>
-        <button class="secondary" type="button" data-action="spectate-share-screen">${state.spectateClientScreenActive ? 'Screen Sharing' : 'Share Client Screen'}</button>
-        <button class="secondary" type="button" data-action="spectate-stop-share" ${state.spectateClientScreenActive ? '' : 'disabled'}>Stop Share</button>
         <button class="secondary" type="button" data-action="spectate-refresh">Refresh</button>
         <button class="danger" type="button" data-action="spectate-stop" ${data.status === 'stopped' ? 'disabled' : ''}>Stop</button>
       </div>
@@ -1939,17 +1935,11 @@ async function renderSpectate() {
       <div class="row-actions" data-spectate-players>${playerButtons || '<span class="muted">No players detected from console telemetry yet.</span>'}</div>
     </div>
   `;
-  attachSpectateClientVideo();
   startSpectateVideo(server.id);
   ensureSpectateStream(server.id);
 }
 
 function renderSpectateSurface(data) {
-  if (state.spectateClientScreenActive) {
-    return `
-      <video class="spectate-video spectate-client-video" id="spectateClientVideo" autoplay muted playsinline></video>
-    `;
-  }
   if (data.clientVideoUrl) {
     return renderClientVideoUrl(data.clientVideoUrl);
   }
@@ -1972,27 +1962,12 @@ function renderClientVideoUrl(url) {
   return `<iframe class="spectate-frame" src="${escapeHtml(url)}" title="Watch-only Minecraft client stream" loading="eager" allow="autoplay; fullscreen; encrypted-media; picture-in-picture"></iframe>`;
 }
 
-function attachSpectateClientVideo() {
-  const video = document.querySelector('#spectateClientVideo');
-  if (!video || !state.spectateClientScreenStream) return;
-  if (video.srcObject !== state.spectateClientScreenStream) video.srcObject = state.spectateClientScreenStream;
-  video.play?.().catch(() => {});
-}
-
 function syncSpectateSurface(data) {
   const surface = elements.spectatePanel?.querySelector('[data-spectate-surface]');
   if (!surface) return;
   const iframe = surface.querySelector('iframe');
   const canvas = surface.querySelector('canvas');
   const video = surface.querySelector('video');
-  if (state.spectateClientScreenActive) {
-    if (!video) {
-      stopSpectateVideo();
-      surface.innerHTML = renderSpectateSurface(data);
-    }
-    attachSpectateClientVideo();
-    return;
-  }
   if (data.clientVideoUrl) {
     const directVideo = isDirectVideoUrl(data.clientVideoUrl);
     const expectedSource = directVideo ? video?.getAttribute('src') : iframe?.getAttribute('src');
@@ -2014,56 +1989,6 @@ function syncSpectateSurface(data) {
     const server = activeServer();
     if (server) startSpectateVideo(server.id);
   }
-}
-
-function screenShareSupportError() {
-  if (!window.isSecureContext) return 'Screen share needs HTTPS, or localhost. Open NexusPanel through HTTPS to use real browser capture.';
-  if (!navigator.mediaDevices?.getDisplayMedia) return 'This browser does not expose screen capture. Use Chrome, Edge, Firefox desktop, or paste a Watch-only client video URL in Settings.';
-  return '';
-}
-
-async function startClientScreenShare() {
-  const supportError = screenShareSupportError();
-  if (supportError) {
-    showToast(supportError);
-    return;
-  }
-  stopClientScreenShare(false);
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: { ideal: 30, max: 60 },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-      },
-      audio: false,
-    });
-  } catch (error) {
-    showToast(error?.name === 'NotAllowedError' ? 'Screen share was cancelled or denied.' : `Screen share failed: ${error.message || error}`);
-    return;
-  }
-  state.spectateClientScreenStream = stream;
-  state.spectateClientScreenActive = true;
-  stream.getVideoTracks()[0]?.addEventListener('ended', () => {
-    stopClientScreenShare();
-  });
-  const server = activeServer();
-  const surface = elements.spectatePanel?.querySelector('[data-spectate-surface]');
-  if (surface) surface.innerHTML = renderSpectateSurface(state.spectateData || {});
-  attachSpectateClientVideo();
-  stopSpectateVideo();
-  showToast('Client screen share started. Pick the Minecraft window for real video.');
-  if (server) updateSpectateLiveDom(state.spectateData || { serverId: server.id });
-}
-
-function stopClientScreenShare(render = true) {
-  if (state.spectateClientScreenStream) {
-    for (const track of state.spectateClientScreenStream.getTracks()) track.stop();
-  }
-  state.spectateClientScreenStream = null;
-  state.spectateClientScreenActive = false;
-  if (render && state.activeView === 'spectate') renderSpectate().catch(() => {});
 }
 
 function renderSpectatePlayerButtons(data) {
@@ -2643,7 +2568,7 @@ function renderSettings() {
       <label class="switch"><input name="liveSpectateEnabled" type="checkbox" ${settings.liveSpectateEnabled ? 'checked' : ''}><span></span>Live spectate section</label>
       <label>Java spectate auth <select name="spectateJavaAuth"><option value="offline" ${settings.spectateJavaAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateJavaAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
       <label>Bedrock spectate auth <select name="spectateBedrockAuth"><option value="offline" ${settings.spectateBedrockAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateBedrockAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
-      <label>Watch-only client video URL <input name="spectateClientVideoUrl" type="url" value="${escapeHtml(settings.spectateClientVideoUrl || '')}" placeholder="https://your-stream.example/watch"></label>
+      <label>Spectator client stream URL <input name="spectateClientVideoUrl" type="url" value="${escapeHtml(settings.spectateClientVideoUrl || '')}" placeholder="https://your-stream.example/watch"></label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '2.0.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v2.0.0"></label>
@@ -4901,15 +4826,6 @@ document.addEventListener('click', async (event) => {
       showToast(data.message || 'Live spectate started.');
       await renderSpectate();
       ensureSpectateStream(server.id);
-      return;
-    }
-    if (action === 'spectate-share-screen') {
-      await startClientScreenShare();
-      return;
-    }
-    if (action === 'spectate-stop-share') {
-      stopClientScreenShare();
-      showToast('Client screen share stopped.');
       return;
     }
     if (action === 'spectate-stop') {
