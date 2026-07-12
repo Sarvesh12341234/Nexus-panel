@@ -2202,6 +2202,49 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     ctx.restore();
   };
 
+  const drawWireColumn = (column) => {
+    const baseY = Number(column.y || 64);
+    const heightY = Number(column.h || 4);
+    const x = Number(column.x || 0);
+    const z = Number(column.z || 0);
+    const size = 2;
+    const bottom = [
+      project(x, baseY, z),
+      project(x + size, baseY, z),
+      project(x + size, baseY, z + size),
+      project(x, baseY, z + size),
+    ];
+    const top = [
+      project(x, baseY + heightY, z),
+      project(x + size, baseY + heightY, z),
+      project(x + size, baseY + heightY, z + size),
+      project(x, baseY + heightY, z + size),
+    ];
+    const density = Number(column.d || 0);
+    ctx.save();
+    ctx.globalAlpha = 0.28 + density * 0.62;
+    ctx.strokeStyle = '#f8fafc';
+    ctx.lineWidth = 1 + density;
+    const drawLoop = (points) => {
+      ctx.beginPath();
+      points.forEach((point, index) => {
+        if (index) ctx.lineTo(point.x, point.y);
+        else ctx.moveTo(point.x, point.y);
+      });
+      ctx.closePath();
+      ctx.stroke();
+    };
+    drawLoop(bottom);
+    drawLoop(top);
+    for (let index = 0; index < 4; index += 1) {
+      ctx.beginPath();
+      ctx.moveTo(bottom[index].x, bottom[index].y);
+      ctx.lineTo(top[index].x, top[index].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
   const packetChunks = chunks.length
     ? chunks
     : Array.from({ length: 49 }, (_, index) => ({
@@ -2213,6 +2256,9 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     drawPacketDiamond(chunk.x, chunk.z, chunk.synthetic ? 0.22 : 0.72);
   }
 
+  const geometryColumns = chunks
+    .flatMap((chunk) => Array.isArray(chunk.geometry?.columns) ? chunk.geometry.columns : [])
+    .slice(-1280);
   const visible = [];
   for (let cx = focusChunkX - 3; cx <= focusChunkX + 3; cx += 1) {
     for (let cz = focusChunkZ - 3; cz <= focusChunkZ + 3; cz += 1) {
@@ -2227,17 +2273,26 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
       }
     }
   }
-  visible.sort((a, b) => a.sort - b.sort);
-  for (const block of visible.slice(-360)) {
-    const point = project(block.x, block.y, block.z);
-    if (point.x < -80 || point.x > width + 80 || point.y < height * 0.18 || point.y > height + 80) continue;
-    const distance = Math.hypot(block.x - Number(focus.x || 0), block.z - Number(focus.z || 0));
-    ctx.save();
-    ctx.globalAlpha = Math.max(0.12, Math.min(0.62, 1 - distance / 120));
-    ctx.strokeStyle = '#f8fafc';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(point.x - 2, point.y - 2, 4, 4);
-    ctx.restore();
+  if (geometryColumns.length) {
+    const sortedColumns = [...geometryColumns].sort((left, right) => (Number(left.x || 0) + Number(left.z || 0)) - (Number(right.x || 0) + Number(right.z || 0)));
+    for (const column of sortedColumns) {
+      const point = project(column.x, column.y, column.z);
+      if (point.x < -100 || point.x > width + 100 || point.y < height * 0.08 || point.y > height + 120) continue;
+      drawWireColumn(column);
+    }
+  } else {
+    visible.sort((a, b) => a.sort - b.sort);
+    for (const block of visible.slice(-360)) {
+      const point = project(block.x, block.y, block.z);
+      if (point.x < -80 || point.x > width + 80 || point.y < height * 0.18 || point.y > height + 80) continue;
+      const distance = Math.hypot(block.x - Number(focus.x || 0), block.z - Number(focus.z || 0));
+      ctx.save();
+      ctx.globalAlpha = Math.max(0.12, Math.min(0.62, 1 - distance / 120));
+      ctx.strokeStyle = '#f8fafc';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(point.x - 2, point.y - 2, 4, 4);
+      ctx.restore();
+    }
   }
 
   for (const update of blockUpdates.slice(-40)) {
@@ -2268,8 +2323,8 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   ctx.fillText('NexusVision packet constructor', width - 398, 56);
   ctx.fillStyle = '#cbd5e1';
   ctx.font = '13px Inter, Segoe UI, Arial';
-  ctx.fillText(`chunks ${chunks.length}  updates ${blockUpdates.length}  packets ${Number(packetStats.total || 0)}`, width - 398, 80);
-  ctx.fillText(`level_chunk ${Number(packetStats.levelChunk || 0)}  move ${Number(packetStats.movePlayer || 0) + Number(packetStats.moveEntity || 0)}`, width - 398, 102);
+  ctx.fillText(`chunks ${chunks.length}  columns ${geometryColumns.length}  packets ${Number(packetStats.total || 0)}`, width - 398, 80);
+  ctx.fillText(`bytes ${Number(packetStats.bytesTotal || 0)}  level_chunk ${Number(packetStats.levelChunk || 0)}`, width - 398, 102);
   ctx.fillText(`last ${packetStats.lastPacket || 'waiting'}  yaw ${Math.round(Number(focus.yaw || 0))}`, width - 398, 124);
   return { project, tile };
 }

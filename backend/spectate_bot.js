@@ -75,6 +75,64 @@ function packetChunkKey(packet) {
   return { key: `${Math.trunc(x)},${Math.trunc(z)}`, x: Math.trunc(x), z: Math.trunc(z) };
 }
 
+function findPacketBytes(value, depth = 0, seen = new Set()) {
+  if (!value || depth > 5 || seen.has(value)) return null;
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findPacketBytes(item, depth + 1, seen);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== 'object') return null;
+  seen.add(value);
+  for (const key of ['payload', 'data', 'blob', 'sub_chunk_data', 'cache_blobs', 'raw_payload', 'buffer']) {
+    const found = findPacketBytes(value[key], depth + 1, seen);
+    if (found) return found;
+  }
+  for (const item of Object.values(value)) {
+    const found = findPacketBytes(item, depth + 1, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+function chunkGeometryFromBytes(packet, chunk) {
+  const bytes = findPacketBytes(packet);
+  if (!bytes || !bytes.length) return { columns: [], bytesRead: 0, digest: 0 };
+  let digest = 2166136261;
+  let energy = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    const byte = bytes[index];
+    digest ^= byte;
+    digest = Math.imul(digest, 16777619) >>> 0;
+    energy = (energy + byte) >>> 0;
+  }
+  const columns = [];
+  const stride = Math.max(1, Math.floor(bytes.length / 96));
+  for (let localX = 0; localX < 16; localX += 2) {
+    for (let localZ = 0; localZ < 16; localZ += 2) {
+      const sample = (localX * 31 + localZ * 17 + digest) % bytes.length;
+      const b0 = bytes[sample];
+      const b1 = bytes[(sample + stride) % bytes.length];
+      const b2 = bytes[(sample + stride * 3) % bytes.length];
+      const signal = (b0 ^ ((b1 << 1) & 255) ^ ((b2 << 2) & 255)) & 255;
+      const height = 44 + (signal % 56);
+      const density = Math.round(((b0 + b1 + b2) / 765) * 1000) / 1000;
+      columns.push({
+        x: chunk.x * 16 + localX,
+        z: chunk.z * 16 + localZ,
+        y: height,
+        h: 2 + (b2 % 18),
+        d: density,
+      });
+    }
+  }
+  return { columns, bytesRead: bytes.length, digest: digest >>> 0, energy: energy >>> 0 };
+}
+
 function startJavaBot(config) {
   const mineflayer = require('mineflayer');
   const bot = mineflayer.createBot({
@@ -207,6 +265,8 @@ function startBedrockBot(config) {
     total: 0,
     levelChunk: 0,
     updateBlock: 0,
+    geometryColumns: 0,
+    bytesTotal: 0,
     movePlayer: 0,
     moveEntity: 0,
     addPlayer: 0,
@@ -332,11 +392,16 @@ function startBedrockBot(config) {
     countPacket('level_chunk');
     const chunk = packetChunkKey(packet);
     if (!chunk) return;
+    const geometry = chunkGeometryFromBytes(packet, chunk);
+    packetStats.geometryColumns += geometry.columns.length;
+    packetStats.bytesTotal += geometry.bytesRead;
     chunks.set(chunk.key, {
       x: chunk.x,
       z: chunk.z,
       updatedAt: Date.now(),
-      size: finiteNumber(packet?.payload?.length ?? packet?.data?.length ?? packet?.blob?.length),
+      size: geometry.bytesRead || finiteNumber(packet?.payload?.length ?? packet?.data?.length ?? packet?.blob?.length),
+      digest: geometry.digest,
+      geometry,
     });
   });
   client.on('update_block', (packet) => {

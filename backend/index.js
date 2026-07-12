@@ -492,12 +492,30 @@ function sanitizeSpectateEntities(entities) {
 
 function sanitizeSpectateWorld(world) {
   const chunks = (Array.isArray(world?.chunks) ? world.chunks : [])
-    .map((chunk) => ({
-      x: Number.isFinite(Number(chunk?.x)) ? Math.trunc(Number(chunk.x)) : 0,
-      z: Number.isFinite(Number(chunk?.z)) ? Math.trunc(Number(chunk.z)) : 0,
-      size: Number.isFinite(Number(chunk?.size)) ? Math.max(0, Math.trunc(Number(chunk.size))) : 0,
-      updatedAt: Number.isFinite(Number(chunk?.updatedAt)) ? Number(chunk.updatedAt) : Date.now(),
-    }))
+    .map((chunk) => {
+      const columns = Array.isArray(chunk?.geometry?.columns)
+        ? chunk.geometry.columns
+          .map((column) => ({
+            x: Number.isFinite(Number(column?.x)) ? Math.trunc(Number(column.x)) : 0,
+            y: Number.isFinite(Number(column?.y)) ? Math.trunc(Number(column.y)) : 64,
+            z: Number.isFinite(Number(column?.z)) ? Math.trunc(Number(column.z)) : 0,
+            h: Number.isFinite(Number(column?.h)) ? Math.max(1, Math.min(32, Math.trunc(Number(column.h)))) : 4,
+            d: Number.isFinite(Number(column?.d)) ? Math.max(0, Math.min(1, Number(column.d))) : 0,
+          }))
+          .slice(0, 80)
+        : [];
+      return {
+        x: Number.isFinite(Number(chunk?.x)) ? Math.trunc(Number(chunk.x)) : 0,
+        z: Number.isFinite(Number(chunk?.z)) ? Math.trunc(Number(chunk.z)) : 0,
+        size: Number.isFinite(Number(chunk?.size)) ? Math.max(0, Math.trunc(Number(chunk.size))) : 0,
+        digest: Number.isFinite(Number(chunk?.digest ?? chunk?.geometry?.digest)) ? Math.trunc(Number(chunk.digest ?? chunk.geometry.digest)) : 0,
+        geometry: {
+          bytesRead: Number.isFinite(Number(chunk?.geometry?.bytesRead)) ? Math.max(0, Math.trunc(Number(chunk.geometry.bytesRead))) : 0,
+          columns,
+        },
+        updatedAt: Number.isFinite(Number(chunk?.updatedAt)) ? Number(chunk.updatedAt) : Date.now(),
+      };
+    })
     .slice(-192);
   const blockUpdates = (Array.isArray(world?.blockUpdates) ? world.blockUpdates : [])
     .map((block) => ({
@@ -513,6 +531,8 @@ function sanitizeSpectateWorld(world) {
     total: Number.isFinite(Number(rawStats.total)) ? Math.trunc(Number(rawStats.total)) : 0,
     levelChunk: Number.isFinite(Number(rawStats.levelChunk)) ? Math.trunc(Number(rawStats.levelChunk)) : 0,
     updateBlock: Number.isFinite(Number(rawStats.updateBlock)) ? Math.trunc(Number(rawStats.updateBlock)) : 0,
+    geometryColumns: Number.isFinite(Number(rawStats.geometryColumns)) ? Math.trunc(Number(rawStats.geometryColumns)) : 0,
+    bytesTotal: Number.isFinite(Number(rawStats.bytesTotal)) ? Math.trunc(Number(rawStats.bytesTotal)) : 0,
     movePlayer: Number.isFinite(Number(rawStats.movePlayer)) ? Math.trunc(Number(rawStats.movePlayer)) : 0,
     moveEntity: Number.isFinite(Number(rawStats.moveEntity)) ? Math.trunc(Number(rawStats.moveEntity)) : 0,
     addPlayer: Number.isFinite(Number(rawStats.addPlayer)) ? Math.trunc(Number(rawStats.addPlayer)) : 0,
