@@ -350,6 +350,10 @@ function spectateSessionPayload(server, req = null) {
     authMode: session?.authMode || spectateAuthMode(server),
     target: session?.target || players[0] || '',
     players,
+    visualSeed: crypto.createHash('sha1').update(`${server.id}:${server.name}:${server.port}`).digest('hex').slice(0, 12),
+    recentEvents: consoleLogs(server.id)
+      .filter((line) => /Player |Live Spectate|Spawned|connected|disconnected/i.test(String(line)))
+      .slice(-6),
     frameUrl: `/api/servers/${server.id}/spectate/frame.svg`,
     message: session?.message || (installed ? 'Ready to start a spectate bot.' : `Install ${bot.name} to enable a real spectate bot for this server type.`),
   };

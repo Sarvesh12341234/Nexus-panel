@@ -582,11 +582,16 @@ code {
   background: rgba(5, 11, 20, 0.72);
 }
 
-.spectate-frame {
+.spectate-frame,
+.spectate-video {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
   object-fit: cover;
+}
+
+.spectate-video {
+  min-height: 260px;
 }
 
 .spectate-head {
@@ -1414,6 +1419,10 @@ code {
   .spectate-frame-wrap {
     border-radius: 8px;
     margin-inline: -2px;
+  }
+
+  .spectate-video {
+    min-height: 190px;
   }
 
   .spectate-player-button {

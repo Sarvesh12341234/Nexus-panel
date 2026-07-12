@@ -22,6 +22,7 @@ const state = {
   consolePollAt: {},
   consoleMetricsAt: {},
   spectatePollAt: 0,
+  spectateData: null,
   presenceAt: 0,
   serverStatusSignature: '',
 };
@@ -101,6 +102,7 @@ let currentUpload = { path: '', size: 0, paused: false, canceled: false };
 let consoleStickToBottom = true;
 let consoleRenderToken = 0;
 let terminalSession = { id: '', cursor: 0, timer: 0 };
+let spectateAnimation = { id: 0, serverId: 0, startedAt: 0 };
 const versionCache = new Map();
 const publicBackupLinks = new Map();
 const UI_PREFERENCES_KEY = 'nexusUiPreferences';
@@ -1881,14 +1883,17 @@ async function renderSpectate() {
   if (!elements.spectatePanel) return;
   const server = activeServer();
   if (!state.settings?.liveSpectateEnabled) {
+    stopSpectateVideo();
     elements.spectatePanel.innerHTML = '<div class="section-head"><div><p class="eyebrow">Live Spectate</p><h2>Disabled</h2></div></div><p class="empty-state">Enable Live spectate section in Settings.</p>';
     return;
   }
   if (!server) {
+    stopSpectateVideo();
     elements.spectatePanel.innerHTML = '<div class="section-head"><div><p class="eyebrow">Live Spectate</p><h2>No server</h2></div></div><p class="empty-state">Create a server before opening a live spectate session.</p>';
     return;
   }
   const data = await api(`/api/servers/${server.id}/spectate`).catch((error) => ({ error: error.message, players: [] }));
+  state.spectateData = data;
   const playerButtons = (data.players || []).map((player) => `
     <button class="secondary spectate-player-button" type="button" data-action="spectate-target" data-player-name="${escapeHtml(player)}">${escapeHtml(player)}</button>
   `).join('');
@@ -1911,7 +1916,7 @@ async function renderSpectate() {
       <div><strong>${data.pid ? Number(data.pid) : '-'}</strong><span>Bot PID</span></div>
     </div>
     <div class="spectate-frame-wrap">
-      <img class="spectate-frame" alt="Live spectate frame" src="${escapeHtml(data.frameUrl || `/api/servers/${server.id}/spectate/frame.svg`)}?t=${Date.now()}">
+      <canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>
     </div>
     <div class="plugin-row">
       <div><strong>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted">${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)} - ${escapeHtml(data.botName || 'live-update')}` : `Install inside /opt/nexuspanel: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
@@ -1922,6 +1927,156 @@ async function renderSpectate() {
       <div class="row-actions">${playerButtons || '<span class="muted">No players detected from console telemetry yet.</span>'}</div>
     </div>
   `;
+  startSpectateVideo(server.id);
+}
+
+function stopSpectateVideo() {
+  if (spectateAnimation.id) window.cancelAnimationFrame(spectateAnimation.id);
+  spectateAnimation = { id: 0, serverId: 0, startedAt: 0 };
+}
+
+function spectateHash(value) {
+  let hash = 2166136261;
+  for (const char of String(value || '')) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function drawSpectateVideo(canvas, data, elapsed) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const width = canvas.width;
+  const height = canvas.height;
+  const seed = spectateHash(data.visualSeed || data.serverName || 'nexus');
+  const live = data.status === 'connected';
+  const target = data.target || data.botName || 'Overview';
+  const players = data.players || [];
+  const pulse = (Math.sin(elapsed / 520) + 1) / 2;
+
+  const sky = ctx.createLinearGradient(0, 0, 0, height);
+  sky.addColorStop(0, live ? '#132f4c' : '#18202e');
+  sky.addColorStop(0.55, live ? '#1f4f45' : '#252638');
+  sky.addColorStop(1, live ? '#162018' : '#141821');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.save();
+  ctx.globalAlpha = 0.22;
+  ctx.strokeStyle = live ? '#8fffd2' : '#a4b0c0';
+  ctx.lineWidth = 1;
+  const gridOffset = (elapsed / 38) % 48;
+  for (let x = -48 + gridOffset; x < width + 48; x += 48) {
+    ctx.beginPath();
+    ctx.moveTo(x, height * 0.48);
+    ctx.lineTo(width / 2 + (x - width / 2) * 1.8, height);
+    ctx.stroke();
+  }
+  for (let y = height * 0.52; y < height; y += 38) {
+    ctx.beginPath();
+    ctx.moveTo(0, y + gridOffset * 0.3);
+    ctx.lineTo(width, y + gridOffset * 0.3);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  for (let i = 0; i < 12; i += 1) {
+    const h = 70 + ((seed >> (i % 16)) & 95);
+    const x = i * 118 - ((elapsed / 90 + seed) % 118);
+    ctx.fillStyle = i % 2 ? 'rgba(14, 26, 38, 0.78)' : 'rgba(19, 43, 55, 0.72)';
+    ctx.fillRect(x, height * 0.42 - h, 84, h);
+    ctx.fillStyle = 'rgba(100, 255, 210, 0.18)';
+    for (let wy = height * 0.42 - h + 14; wy < height * 0.42 - 10; wy += 20) {
+      ctx.fillRect(x + 12, wy, 10, 8);
+      ctx.fillRect(x + 40, wy, 10, 8);
+    }
+  }
+
+  const cx = width * 0.5 + Math.sin(elapsed / 900) * 80;
+  const cy = height * 0.53 + Math.cos(elapsed / 760) * 28;
+  ctx.fillStyle = live ? '#41e69b' : '#8fa3b8';
+  ctx.shadowColor = live ? '#41e69b' : '#64748b';
+  ctx.shadowBlur = live ? 22 + pulse * 18 : 10;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 26 + pulse * 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  const nameWidth = Math.min(360, Math.max(150, target.length * 14 + 44));
+  ctx.fillStyle = 'rgba(3, 8, 14, 0.72)';
+  ctx.strokeStyle = live ? 'rgba(65, 230, 155, 0.8)' : 'rgba(148, 163, 184, 0.6)';
+  roundRect(ctx, cx - nameWidth / 2, cy - 78, nameWidth, 38, 10);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '700 18px Inter, Segoe UI, Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText(target, cx, cy - 53);
+
+  ctx.fillStyle = 'rgba(4, 10, 18, 0.78)';
+  roundRect(ctx, 28, 28, 420, 116, 14);
+  ctx.fill();
+  ctx.fillStyle = live ? '#41e69b' : '#fbbf24';
+  ctx.font = '800 18px Inter, Segoe UI, Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText(live ? 'LIVE SPECTATE' : String(data.status || 'WAITING').toUpperCase(), 52, 66);
+  ctx.fillStyle = '#dbeafe';
+  ctx.font = '600 24px Inter, Segoe UI, Arial';
+  ctx.fillText(data.serverName || 'Server', 52, 101);
+  ctx.fillStyle = '#9fb3c8';
+  ctx.font = '14px Inter, Segoe UI, Arial';
+  ctx.fillText(`${data.botName || 'live-update'} - ${players.length || 0} player(s) - ${new Date().toLocaleTimeString()}`, 52, 128);
+
+  const events = (data.recentEvents || []).slice(-4);
+  ctx.fillStyle = 'rgba(4, 10, 18, 0.68)';
+  roundRect(ctx, width - 470, height - 170, 430, 126, 14);
+  ctx.fill();
+  ctx.fillStyle = '#bfdbfe';
+  ctx.font = '700 15px Inter, Segoe UI, Arial';
+  ctx.fillText('Recent server events', width - 445, height - 138);
+  ctx.font = '13px Inter, Segoe UI, Arial';
+  ctx.fillStyle = '#cbd5e1';
+  events.forEach((event, index) => {
+    const text = String(event).replace(/^\[[^\]]+\]\s*/, '').slice(-70);
+    ctx.fillText(text, width - 445, height - 112 + index * 22);
+  });
+
+  ctx.fillStyle = live ? 'rgba(65, 230, 155, 0.95)' : 'rgba(251, 191, 36, 0.95)';
+  ctx.beginPath();
+  ctx.arc(width - 54, 52, 8 + pulse * 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function roundRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+
+function startSpectateVideo(serverId) {
+  const canvas = document.querySelector('#spectateVideo');
+  if (!canvas) return stopSpectateVideo();
+  if (spectateAnimation.serverId !== serverId) {
+    stopSpectateVideo();
+    spectateAnimation.serverId = serverId;
+    spectateAnimation.startedAt = performance.now();
+  }
+  if (spectateAnimation.id) return;
+  const tick = (now) => {
+    if (state.activeView !== 'spectate' || !document.querySelector('#spectateVideo')) {
+      stopSpectateVideo();
+      return;
+    }
+    drawSpectateVideo(canvas, state.spectateData || {}, now - spectateAnimation.startedAt);
+    spectateAnimation.id = window.requestAnimationFrame(tick);
+  };
+  spectateAnimation.id = window.requestAnimationFrame(tick);
 }
 
 function syncConsoleActionButtons(server, status) {
