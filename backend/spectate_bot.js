@@ -276,16 +276,23 @@ function startBedrockBot(config) {
   };
   let connected = false;
 
+  const normalizePacketName = (name) => String(name || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[-\s]+/g, '_')
+    .toLowerCase();
+
   const countPacket = (name) => {
+    const normalized = normalizePacketName(name);
     packetStats.total += 1;
     packetStats.lastPacketAt = Date.now();
-    packetStats.lastPacket = name;
-    if (name === 'level_chunk') packetStats.levelChunk += 1;
-    else if (name === 'update_block') packetStats.updateBlock += 1;
-    else if (name === 'move_player') packetStats.movePlayer += 1;
-    else if (name === 'move_entity') packetStats.moveEntity += 1;
-    else if (name === 'add_player') packetStats.addPlayer += 1;
-    else if (name === 'player_list') packetStats.playerList += 1;
+    packetStats.lastPacket = normalized;
+    if (normalized === 'level_chunk' || normalized === 'levelchunk') packetStats.levelChunk += 1;
+    else if (normalized === 'update_block' || normalized === 'updateblock') packetStats.updateBlock += 1;
+    else if (normalized === 'move_player' || normalized === 'moveplayer') packetStats.movePlayer += 1;
+    else if (normalized === 'move_entity' || normalized === 'moveentity') packetStats.moveEntity += 1;
+    else if (normalized === 'add_player' || normalized === 'addplayer') packetStats.addPlayer += 1;
+    else if (normalized === 'player_list' || normalized === 'playerlist') packetStats.playerList += 1;
+    return normalized;
   };
 
   const publishPlayers = () => send('players', { players: [...players].map(cleanPlayerName).filter(Boolean) });
@@ -324,6 +331,50 @@ function startBedrockBot(config) {
       packetStats: { ...packetStats },
     });
   };
+  const rememberChunkPacket = (packet) => {
+    const chunk = packetChunkKey(packet);
+    if (!chunk) return;
+    const geometry = chunkGeometryFromBytes(packet, chunk);
+    packetStats.geometryColumns += geometry.columns.length;
+    packetStats.bytesTotal += geometry.bytesRead;
+    chunks.set(chunk.key, {
+      x: chunk.x,
+      z: chunk.z,
+      updatedAt: Date.now(),
+      size: geometry.bytesRead || finiteNumber(packet?.payload?.length ?? packet?.data?.length ?? packet?.blob?.length),
+      digest: geometry.digest,
+      geometry,
+    });
+  };
+  const rememberBlockUpdatePacket = (packet) => {
+    const position = packetPosition(packet);
+    blockUpdates.push({
+      x: Math.trunc(position.x),
+      y: Math.trunc(position.y),
+      z: Math.trunc(position.z),
+      runtimeId: finiteNumber(packet?.runtime_id ?? packet?.block_runtime_id ?? packet?.block?.runtime_id),
+      updatedAt: Date.now(),
+    });
+    if (blockUpdates.length > 512) blockUpdates.splice(0, blockUpdates.length - 512);
+  };
+  const observePacket = (name, packet) => {
+    const normalized = countPacket(name);
+    if ((normalized === 'level_chunk' || normalized === 'levelchunk') && packet) rememberChunkPacket(packet);
+    if ((normalized === 'update_block' || normalized === 'updateblock') && packet) rememberBlockUpdatePacket(packet);
+  };
+  const originalEmit = client.emit.bind(client);
+  client.emit = (name, ...args) => {
+    if (!String(name || '').startsWith('newListener') && !String(name || '').startsWith('removeListener')) {
+      observePacket(name, args[0]);
+    }
+    return originalEmit(name, ...args);
+  };
+  client.on('packet', (packet, meta = {}) => {
+    observePacket(meta.name || packet?.name || packet?.packetName || 'packet', packet);
+  });
+  client.on('clientbound', (packet, meta = {}) => {
+    observePacket(meta.name || packet?.name || packet?.packetName || 'clientbound', packet);
+  });
   const markConnected = (packet = null) => {
     if (connected) return;
     connected = true;
@@ -342,7 +393,6 @@ function startBedrockBot(config) {
   client.once('start_game', markConnected);
   client.once('spawn', markConnected);
   client.on('add_player', (packet) => {
-    countPacket('add_player');
     const id = packetEntityId(packet) || packet?.username;
     const name = packet?.username || packet?.name || packet?.display_name || id || '';
     if (name) players.add(String(name));
@@ -356,7 +406,6 @@ function startBedrockBot(config) {
     publishPlayers();
   });
   client.on('move_player', (packet) => {
-    countPacket('move_player');
     const id = packetEntityId(packet);
     if (!id) return;
     const previous = entities.get(id) || {};
@@ -369,7 +418,6 @@ function startBedrockBot(config) {
     });
   });
   client.on('move_entity', (packet) => {
-    countPacket('move_entity');
     const id = packetEntityId(packet);
     if (!id) return;
     const previous = entities.get(id) || {};
@@ -389,35 +437,12 @@ function startBedrockBot(config) {
     if (id) entities.delete(id);
   });
   client.on('level_chunk', (packet) => {
-    countPacket('level_chunk');
-    const chunk = packetChunkKey(packet);
-    if (!chunk) return;
-    const geometry = chunkGeometryFromBytes(packet, chunk);
-    packetStats.geometryColumns += geometry.columns.length;
-    packetStats.bytesTotal += geometry.bytesRead;
-    chunks.set(chunk.key, {
-      x: chunk.x,
-      z: chunk.z,
-      updatedAt: Date.now(),
-      size: geometry.bytesRead || finiteNumber(packet?.payload?.length ?? packet?.data?.length ?? packet?.blob?.length),
-      digest: geometry.digest,
-      geometry,
-    });
+    rememberChunkPacket(packet);
   });
   client.on('update_block', (packet) => {
-    countPacket('update_block');
-    const position = packetPosition(packet);
-    blockUpdates.push({
-      x: Math.trunc(position.x),
-      y: Math.trunc(position.y),
-      z: Math.trunc(position.z),
-      runtimeId: finiteNumber(packet?.runtime_id ?? packet?.block_runtime_id ?? packet?.block?.runtime_id),
-      updatedAt: Date.now(),
-    });
-    if (blockUpdates.length > 512) blockUpdates.splice(0, blockUpdates.length - 512);
+    rememberBlockUpdatePacket(packet);
   });
   client.on('player_list', (packet) => {
-    countPacket('player_list');
     for (const record of packet?.records?.records || packet?.records || []) {
       if (record?.username) {
         players.add(String(record.username));

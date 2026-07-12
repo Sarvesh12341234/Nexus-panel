@@ -2326,6 +2326,15 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   ctx.fillText(`chunks ${chunks.length}  columns ${geometryColumns.length}  packets ${Number(packetStats.total || 0)}`, width - 398, 80);
   ctx.fillText(`bytes ${Number(packetStats.bytesTotal || 0)}  level_chunk ${Number(packetStats.levelChunk || 0)}`, width - 398, 102);
   ctx.fillText(`last ${packetStats.lastPacket || 'waiting'}  yaw ${Math.round(Number(focus.yaw || 0))}`, width - 398, 124);
+  if (Number(packetStats.total || 0) > 0 && !chunks.length) {
+    ctx.fillStyle = 'rgba(4, 10, 18, 0.72)';
+    roundRect(ctx, width / 2 - 240, height * 0.28, 480, 48, 10);
+    ctx.fill();
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = '700 14px Inter, Segoe UI, Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Receiving ${packetStats.lastPacket || 'packets'}, waiting for level_chunk bytes`, width / 2, height * 0.28 + 30);
+  }
   return { project, tile };
 }
 
