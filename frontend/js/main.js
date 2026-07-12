@@ -25,6 +25,8 @@ const state = {
   spectateData: null,
   spectateStream: null,
   spectateStreamServerId: 0,
+  spectateClientScreenStream: null,
+  spectateClientScreenActive: false,
   presenceAt: 0,
   serverStatusSignature: '',
 };
@@ -1911,6 +1913,8 @@ async function renderSpectate() {
       <div><p class="eyebrow">Live Spectate</p><h2>${escapeHtml(server.name)}</h2></div>
       <div class="row-actions">
         <button type="button" data-action="spectate-start" ${data.serverStatus === 'online' && !running ? '' : 'disabled'}>${running ? 'Bot Running' : 'Start Bot'}</button>
+        <button class="secondary" type="button" data-action="spectate-share-screen">${state.spectateClientScreenActive ? 'Screen Sharing' : 'Share Client Screen'}</button>
+        <button class="secondary" type="button" data-action="spectate-stop-share" ${state.spectateClientScreenActive ? '' : 'disabled'}>Stop Share</button>
         <button class="secondary" type="button" data-action="spectate-refresh">Refresh</button>
         <button class="danger" type="button" data-action="spectate-stop" ${data.status === 'stopped' ? 'disabled' : ''}>Stop</button>
       </div>
@@ -1935,11 +1939,17 @@ async function renderSpectate() {
       <div class="row-actions" data-spectate-players>${playerButtons || '<span class="muted">No players detected from console telemetry yet.</span>'}</div>
     </div>
   `;
+  attachSpectateClientVideo();
   startSpectateVideo(server.id);
   ensureSpectateStream(server.id);
 }
 
 function renderSpectateSurface(data) {
+  if (state.spectateClientScreenActive) {
+    return `
+      <video class="spectate-video spectate-client-video" id="spectateClientVideo" autoplay muted playsinline></video>
+    `;
+  }
   if (data.rendererUrl) {
     return `
       <iframe class="spectate-frame" src="${escapeHtml(data.rendererUrl)}" title="Live Minecraft renderer" loading="eager" allow="fullscreen"></iframe>
@@ -1948,11 +1958,27 @@ function renderSpectateSurface(data) {
   return '<canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>';
 }
 
+function attachSpectateClientVideo() {
+  const video = document.querySelector('#spectateClientVideo');
+  if (!video || !state.spectateClientScreenStream) return;
+  if (video.srcObject !== state.spectateClientScreenStream) video.srcObject = state.spectateClientScreenStream;
+  video.play?.().catch(() => {});
+}
+
 function syncSpectateSurface(data) {
   const surface = elements.spectatePanel?.querySelector('[data-spectate-surface]');
   if (!surface) return;
   const iframe = surface.querySelector('iframe');
   const canvas = surface.querySelector('canvas');
+  const video = surface.querySelector('video');
+  if (state.spectateClientScreenActive) {
+    if (!video) {
+      stopSpectateVideo();
+      surface.innerHTML = renderSpectateSurface(data);
+    }
+    attachSpectateClientVideo();
+    return;
+  }
   if (data.rendererUrl) {
     if (!iframe || iframe.getAttribute('src') !== data.rendererUrl) {
       stopSpectateVideo();
@@ -1965,6 +1991,43 @@ function syncSpectateSurface(data) {
     const server = activeServer();
     if (server) startSpectateVideo(server.id);
   }
+}
+
+async function startClientScreenShare() {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    showToast('Screen share is not supported in this browser.');
+    return;
+  }
+  stopClientScreenShare(false);
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      frameRate: { ideal: 30, max: 60 },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+    },
+    audio: false,
+  });
+  state.spectateClientScreenStream = stream;
+  state.spectateClientScreenActive = true;
+  stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+    stopClientScreenShare();
+  });
+  const server = activeServer();
+  const surface = elements.spectatePanel?.querySelector('[data-spectate-surface]');
+  if (surface) surface.innerHTML = renderSpectateSurface(state.spectateData || {});
+  attachSpectateClientVideo();
+  stopSpectateVideo();
+  showToast('Client screen share started. Pick the Minecraft window for real video.');
+  if (server) updateSpectateLiveDom(state.spectateData || { serverId: server.id });
+}
+
+function stopClientScreenShare(render = true) {
+  if (state.spectateClientScreenStream) {
+    for (const track of state.spectateClientScreenStream.getTracks()) track.stop();
+  }
+  state.spectateClientScreenStream = null;
+  state.spectateClientScreenActive = false;
+  if (render && state.activeView === 'spectate') renderSpectate().catch(() => {});
 }
 
 function renderSpectatePlayerButtons(data) {
@@ -4801,6 +4864,15 @@ document.addEventListener('click', async (event) => {
       showToast(data.message || 'Live spectate started.');
       await renderSpectate();
       ensureSpectateStream(server.id);
+      return;
+    }
+    if (action === 'spectate-share-screen') {
+      await startClientScreenShare();
+      return;
+    }
+    if (action === 'spectate-stop-share') {
+      stopClientScreenShare();
+      showToast('Client screen share stopped.');
       return;
     }
     if (action === 'spectate-stop') {

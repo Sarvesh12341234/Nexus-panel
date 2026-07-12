@@ -595,6 +595,10 @@ code {
   min-height: 260px;
 }
 
+.spectate-client-video {
+  background: #020617;
+}
+
 .spectate-head {
   align-items: flex-start;
   gap: 1rem;
