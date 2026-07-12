@@ -23,6 +23,8 @@ const state = {
   consoleMetricsAt: {},
   spectatePollAt: 0,
   spectateData: null,
+  spectateStream: null,
+  spectateStreamServerId: 0,
   presenceAt: 0,
   serverStatusSignature: '',
 };
@@ -1884,11 +1886,13 @@ async function renderSpectate() {
   const server = activeServer();
   if (!state.settings?.liveSpectateEnabled) {
     stopSpectateVideo();
+    closeSpectateStream();
     elements.spectatePanel.innerHTML = '<div class="section-head"><div><p class="eyebrow">Live Spectate</p><h2>Disabled</h2></div></div><p class="empty-state">Enable Live spectate section in Settings.</p>';
     return;
   }
   if (!server) {
     stopSpectateVideo();
+    closeSpectateStream();
     elements.spectatePanel.innerHTML = '<div class="section-head"><div><p class="eyebrow">Live Spectate</p><h2>No server</h2></div></div><p class="empty-state">Create a server before opening a live spectate session.</p>';
     return;
   }
@@ -1932,6 +1936,7 @@ async function renderSpectate() {
     </div>
   `;
   startSpectateVideo(server.id);
+  ensureSpectateStream(server.id);
 }
 
 function renderSpectateSurface(data) {
@@ -2002,6 +2007,33 @@ function updateSpectateLiveDom(data) {
   syncSpectateSurface(data);
 }
 
+function closeSpectateStream() {
+  if (state.spectateStream) {
+    state.spectateStream.close();
+    state.spectateStream = null;
+  }
+  state.spectateStreamServerId = 0;
+}
+
+function ensureSpectateStream(serverId) {
+  if (!window.EventSource || !serverId || state.spectateStreamServerId === serverId) return;
+  closeSpectateStream();
+  const stream = new EventSource(`/api/servers/${serverId}/spectate/stream`);
+  state.spectateStream = stream;
+  state.spectateStreamServerId = serverId;
+  stream.addEventListener('spectate', (event) => {
+    try {
+      const data = JSON.parse(event.data || '{}');
+      state.spectateData = data;
+      state.spectatePollAt = Date.now();
+      updateSpectateLiveDom(data);
+    } catch {}
+  });
+  stream.onerror = () => {
+    closeSpectateStream();
+  };
+}
+
 async function pollSpectateData() {
   const server = activeServer();
   if (!server || !state.settings?.liveSpectateEnabled) return;
@@ -2024,6 +2056,108 @@ function spectateHash(value) {
   return hash >>> 0;
 }
 
+function terrainHeightAt(x, z, seed) {
+  const h = spectateHash(`${Math.floor(x / 4)}:${Math.floor(z / 4)}:${seed}`);
+  return 61 + (h % 9) + Math.sin((x + seed % 31) / 9) * 2 + Math.cos((z - seed % 17) / 11) * 2;
+}
+
+function drawVoxelCube(ctx, x, y, size, height, palette) {
+  const half = size / 2;
+  const top = [
+    [x, y - height],
+    [x + half, y - height + half * 0.45],
+    [x, y - height + half * 0.9],
+    [x - half, y - height + half * 0.45],
+  ];
+  const left = [top[3], top[2], [x, y + half * 0.9], [x - half, y + half * 0.45]];
+  const right = [top[1], top[2], [x, y + half * 0.9], [x + half, y + half * 0.45]];
+  const poly = (points, color) => {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      if (index) ctx.lineTo(point[0], point[1]);
+      else ctx.moveTo(point[0], point[1]);
+    });
+    ctx.closePath();
+    ctx.fill();
+  };
+  poly(left, palette.left);
+  poly(right, palette.right);
+  poly(top, palette.top);
+}
+
+function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
+  const world = data.world || {};
+  const chunks = Array.isArray(world.chunks) ? world.chunks : [];
+  const blockUpdates = Array.isArray(world.blockUpdates) ? world.blockUpdates : [];
+  const chunkSet = new Set(chunks.map((chunk) => `${chunk.x},${chunk.z}`));
+  const focusChunkX = Math.floor(Number(focus.x || 0) / 16);
+  const focusChunkZ = Math.floor(Number(focus.z || 0) / 16);
+  const tile = Math.max(10, Math.min(18, width / 90));
+  const originX = width * 0.5;
+  const originY = height * 0.58;
+  const project = (x, y, z) => {
+    const dx = Number(x || 0) - Number(focus.x || 0);
+    const dz = Number(z || 0) - Number(focus.z || 0);
+    const dy = Number(y || 0) - Number(focus.y || 64);
+    return {
+      x: originX + (dx - dz) * tile * 0.58,
+      y: originY + (dx + dz) * tile * 0.31 - dy * tile * 0.38,
+    };
+  };
+
+  const visible = [];
+  for (let cx = focusChunkX - 3; cx <= focusChunkX + 3; cx += 1) {
+    for (let cz = focusChunkZ - 3; cz <= focusChunkZ + 3; cz += 1) {
+      if (chunks.length && !chunkSet.has(`${cx},${cz}`)) continue;
+      for (let lx = 0; lx < 16; lx += 4) {
+        for (let lz = 0; lz < 16; lz += 4) {
+          const wx = cx * 16 + lx;
+          const wz = cz * 16 + lz;
+          const y = terrainHeightAt(wx, wz, seed);
+          visible.push({ x: wx, y, z: wz, sort: wx + wz });
+        }
+      }
+    }
+  }
+  visible.sort((a, b) => a.sort - b.sort);
+  const palette = {
+    top: '#4ade80',
+    left: '#176b4a',
+    right: '#228b60',
+  };
+  for (const block of visible.slice(-360)) {
+    const point = project(block.x, block.y, block.z);
+    if (point.x < -80 || point.x > width + 80 || point.y < height * 0.18 || point.y > height + 80) continue;
+    drawVoxelCube(ctx, point.x, point.y, tile * 1.8, tile * 0.7, palette);
+  }
+
+  for (const update of blockUpdates.slice(-40)) {
+    const point = project(update.x, update.y || terrainHeightAt(update.x, update.z, seed) + 1, update.z);
+    const age = Math.max(0, Math.min(1, 1 - ((Date.now() - Number(update.updatedAt || 0)) / 5000)));
+    ctx.save();
+    ctx.globalAlpha = 0.25 + age * 0.55;
+    drawVoxelCube(ctx, point.x, point.y - 8, tile * 1.5, tile * 1.2, {
+      top: '#fbbf24',
+      left: '#b45309',
+      right: '#d97706',
+    });
+    ctx.restore();
+  }
+
+  ctx.fillStyle = 'rgba(4, 10, 18, 0.58)';
+  roundRect(ctx, width - 350, 28, 294, 68, 14);
+  ctx.fill();
+  ctx.fillStyle = '#bfdbfe';
+  ctx.font = '700 13px Inter, Segoe UI, Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText('Bedrock custom renderer', width - 328, 56);
+  ctx.fillStyle = '#cbd5e1';
+  ctx.font = '13px Inter, Segoe UI, Arial';
+  ctx.fillText(`${chunks.length || 'synthetic'} chunk(s) loaded  ${blockUpdates.length} block hint(s)`, width - 328, 80);
+  return { project, tile };
+}
+
 function drawSpectateVideo(canvas, data, elapsed) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -2034,6 +2168,7 @@ function drawSpectateVideo(canvas, data, elapsed) {
   const target = data.target || data.botName || 'Overview';
   const players = data.players || [];
   const entities = (data.entities || []).filter((entity) => Number.isFinite(Number(entity.x)) && Number.isFinite(Number(entity.z)));
+  const bedrockVoxel = data.serverType === 'bedrock' && !data.rendererUrl;
   const focus = entities.find((entity) => entity.name === target)
     || entities.find((entity) => entity.self)
     || entities[0]
@@ -2047,39 +2182,52 @@ function drawSpectateVideo(canvas, data, elapsed) {
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, width, height);
 
-  ctx.save();
-  ctx.globalAlpha = 0.18;
-  ctx.strokeStyle = live ? '#8fffd2' : '#a4b0c0';
-  ctx.lineWidth = 1;
-  const gridOffsetX = ((Number(focus.x) * 14) % 48 + 48) % 48;
-  const gridOffsetZ = ((Number(focus.z) * 10) % 38 + 38) % 38;
-  for (let x = -48 + gridOffsetX; x < width + 48; x += 48) {
-    ctx.beginPath();
-    ctx.moveTo(x, height * 0.48);
-    ctx.lineTo(width / 2 + (x - width / 2) * 1.8, height);
-    ctx.stroke();
-  }
-  for (let y = height * 0.52; y < height; y += 38) {
-    ctx.beginPath();
-    ctx.moveTo(0, y + gridOffsetZ * 0.3);
-    ctx.lineTo(width, y + gridOffsetZ * 0.3);
-    ctx.stroke();
-  }
-  ctx.restore();
+  let bedrockProjection = null;
+  if (bedrockVoxel) {
+    bedrockProjection = drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed);
+  } else {
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = live ? '#8fffd2' : '#a4b0c0';
+    ctx.lineWidth = 1;
+    const gridOffsetX = ((Number(focus.x) * 14) % 48 + 48) % 48;
+    const gridOffsetZ = ((Number(focus.z) * 10) % 38 + 38) % 38;
+    for (let x = -48 + gridOffsetX; x < width + 48; x += 48) {
+      ctx.beginPath();
+      ctx.moveTo(x, height * 0.48);
+      ctx.lineTo(width / 2 + (x - width / 2) * 1.8, height);
+      ctx.stroke();
+    }
+    for (let y = height * 0.52; y < height; y += 38) {
+      ctx.beginPath();
+      ctx.moveTo(0, y + gridOffsetZ * 0.3);
+      ctx.lineTo(width, y + gridOffsetZ * 0.3);
+      ctx.stroke();
+    }
+    ctx.restore();
 
-  for (let i = 0; i < 12; i += 1) {
-    const h = 70 + ((seed >> (i % 16)) & 95);
-    const x = i * 118 - ((elapsed / 90 + seed) % 118);
-    ctx.fillStyle = i % 2 ? 'rgba(14, 26, 38, 0.78)' : 'rgba(19, 43, 55, 0.72)';
-    ctx.fillRect(x, height * 0.42 - h, 84, h);
-    ctx.fillStyle = 'rgba(100, 255, 210, 0.18)';
-    for (let wy = height * 0.42 - h + 14; wy < height * 0.42 - 10; wy += 20) {
-      ctx.fillRect(x + 12, wy, 10, 8);
-      ctx.fillRect(x + 40, wy, 10, 8);
+    for (let i = 0; i < 12; i += 1) {
+      const h = 70 + ((seed >> (i % 16)) & 95);
+      const x = i * 118 - ((elapsed / 90 + seed) % 118);
+      ctx.fillStyle = i % 2 ? 'rgba(14, 26, 38, 0.78)' : 'rgba(19, 43, 55, 0.72)';
+      ctx.fillRect(x, height * 0.42 - h, 84, h);
+      ctx.fillStyle = 'rgba(100, 255, 210, 0.18)';
+      for (let wy = height * 0.42 - h + 14; wy < height * 0.42 - 10; wy += 20) {
+        ctx.fillRect(x + 12, wy, 10, 8);
+        ctx.fillRect(x + 40, wy, 10, 8);
+      }
     }
   }
 
   const worldToScreen = (entity) => {
+    if (bedrockProjection?.project) {
+      const point = bedrockProjection.project(entity.x, entity.y, entity.z);
+      return {
+        x: point.x,
+        y: point.y - bedrockProjection.tile * 1.2,
+        scale: Math.max(0.72, Math.min(1.35, 1 + (Number(entity.y || 0) - Number(focus.y || 0)) / 80)),
+      };
+    }
     const dx = Number(entity.x || 0) - Number(focus.x || 0);
     const dz = Number(entity.z || 0) - Number(focus.z || 0);
     const dy = Number(entity.y || 0) - Number(focus.y || 0);
@@ -2127,9 +2275,17 @@ function drawSpectateVideo(canvas, data, elapsed) {
       ctx.fillStyle = active ? '#41e69b' : '#60a5fa';
       ctx.shadowColor = active ? '#41e69b' : '#60a5fa';
       ctx.shadowBlur = active ? 24 + pulse * 12 : 12;
-      ctx.beginPath();
-      ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
-      ctx.fill();
+      if (bedrockVoxel) {
+        drawVoxelCube(ctx, screen.x, screen.y + radius * 0.6, radius * 1.45, radius * 2.3, {
+          top: active ? '#86efac' : '#93c5fd',
+          left: active ? '#16a34a' : '#2563eb',
+          right: active ? '#22c55e' : '#3b82f6',
+        });
+      } else {
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
       ctx.shadowBlur = 0;
       ctx.strokeStyle = '#03111a';
       ctx.lineWidth = 4;
@@ -3219,12 +3375,16 @@ function startRefreshLoop() {
       if (!dueStatus) return;
     }
     if (state.activeView === 'spectate') {
+      const server = activeServer();
+      if (server) ensureSpectateStream(server.id);
       const dueSpectate = Date.now() - Number(state.spectatePollAt || 0) > 250;
-      if (dueSpectate) {
+      if (dueSpectate && !state.spectateStream) {
         state.spectatePollAt = Date.now();
         pollSpectateData().catch(() => {});
       }
       if (!dueStatus) return;
+    } else if (state.spectateStream) {
+      closeSpectateStream();
     }
     if (dueStatus || liveBusy) {
       state.statusRefreshAt = Date.now();
@@ -4640,17 +4800,20 @@ document.addEventListener('click', async (event) => {
       const data = await api(`/api/servers/${server.id}/spectate/start`, { method: 'POST' });
       showToast(data.message || 'Live spectate started.');
       await renderSpectate();
+      ensureSpectateStream(server.id);
       return;
     }
     if (action === 'spectate-stop') {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
+      closeSpectateStream();
       await api(`/api/servers/${server.id}/spectate/stop`, { method: 'POST' });
       showToast('Live spectate stopped.');
       await renderSpectate();
       return;
     }
     if (action === 'spectate-refresh') {
+      closeSpectateStream();
       await renderSpectate();
       return;
     }

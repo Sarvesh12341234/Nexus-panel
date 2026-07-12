@@ -309,6 +309,32 @@ function sanitizeSpectateEntities(entities) {
     .slice(0, 80);
 }
 
+function sanitizeSpectateWorld(world) {
+  const chunks = (Array.isArray(world?.chunks) ? world.chunks : [])
+    .map((chunk) => ({
+      x: Number.isFinite(Number(chunk?.x)) ? Math.trunc(Number(chunk.x)) : 0,
+      z: Number.isFinite(Number(chunk?.z)) ? Math.trunc(Number(chunk.z)) : 0,
+      size: Number.isFinite(Number(chunk?.size)) ? Math.max(0, Math.trunc(Number(chunk.size))) : 0,
+      updatedAt: Number.isFinite(Number(chunk?.updatedAt)) ? Number(chunk.updatedAt) : Date.now(),
+    }))
+    .slice(-192);
+  const blockUpdates = (Array.isArray(world?.blockUpdates) ? world.blockUpdates : [])
+    .map((block) => ({
+      x: Number.isFinite(Number(block?.x)) ? Math.trunc(Number(block.x)) : 0,
+      y: Number.isFinite(Number(block?.y)) ? Math.trunc(Number(block.y)) : 0,
+      z: Number.isFinite(Number(block?.z)) ? Math.trunc(Number(block.z)) : 0,
+      runtimeId: Number.isFinite(Number(block?.runtimeId)) ? Math.trunc(Number(block.runtimeId)) : 0,
+      updatedAt: Number.isFinite(Number(block?.updatedAt)) ? Number(block.updatedAt) : Date.now(),
+    }))
+    .slice(-256);
+  return {
+    mode: String(world?.mode || 'bedrock-custom-voxel').slice(0, 60),
+    chunks,
+    blockUpdates,
+    updatedAt: Number.isFinite(Number(world?.updatedAt)) ? Number(world.updatedAt) : Date.now(),
+  };
+}
+
 function sendSpectateModeCommand(server, botName) {
   const session = spectateSessions.get(Number(server.id));
   if (!session || session.gamemodeSent || runtimeStatus(server.id) !== 'online') return;
@@ -391,10 +417,11 @@ function spectateSessionPayload(server, req = null) {
     rendererUrl: spectateRendererUrl(server, session, req),
     rendererMessage: session?.rendererMessage || (server.type === 'java'
       ? 'Java screenshare renderer starts after the bot spawns. Install prismarine-viewer if it stays unavailable.'
-      : 'Bedrock uses NexusPanel custom movement rendering while the chunk renderer is being built.'),
+      : 'Bedrock custom voxel renderer uses live chunk, block update, and entity packets.'),
     target: session?.target || players[0] || '',
     players,
     entities: sanitizeSpectateEntities(session?.entities || []),
+    world: sanitizeSpectateWorld(session?.world || {}),
     visualSeed: crypto.createHash('sha1').update(`${server.id}:${server.name}:${server.port}`).digest('hex').slice(0, 12),
     recentEvents: consoleLogs(server.id)
       .filter((line) => /Player |Live Spectate|Spawned|connected|disconnected/i.test(String(line)))
@@ -459,10 +486,11 @@ function startSpectateSession(server, req = null) {
     rendererPort: config.rendererPort,
     rendererMessage: server.type === 'java'
       ? `Starting Java first-person renderer on port ${config.rendererPort}...`
-      : 'Using NexusPanel custom Bedrock movement renderer.',
+      : 'Using NexusPanel custom Bedrock voxel renderer.',
     target: players[0] || '',
     players,
     entities: [],
+    world: sanitizeSpectateWorld({}),
     message: `${bot.engine} detected. Connecting bot to 127.0.0.1:${config.port}...`,
   };
   spectateSessions.set(Number(server.id), payload);
@@ -493,6 +521,15 @@ function startSpectateSession(server, req = null) {
       session.rendererPort = Number(message.port || session.rendererPort || 0);
       session.rendererMessage = message.message || session.rendererMessage;
       if (message.status !== 'ready' && message.message) appendLog(server.id, `[NexusPanel] Live Spectate renderer: ${message.message}`);
+    }
+    if (message.type === 'world') {
+      const previous = session.world || {};
+      session.world = sanitizeSpectateWorld({
+        mode: message.mode || previous.mode || 'bedrock-custom-voxel',
+        chunks: message.chunks || previous.chunks || [],
+        blockUpdates: [...(previous.blockUpdates || []), ...(message.blockUpdates || [])].slice(-256),
+        updatedAt: Date.now(),
+      });
     }
     if (message.type === 'status') {
       session.status = message.status || session.status;
@@ -4791,6 +4828,24 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
 app.get('/api/servers/:id/spectate', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
   const server = getServerOr404(req.params.id);
   res.json(spectateSessionPayload(server, req));
+});
+
+app.get('/api/servers/:id/spectate/stream', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  const writePayload = () => {
+    try {
+      res.write(`event: spectate\n`);
+      res.write(`data: ${JSON.stringify(spectateSessionPayload(server, req))}\n\n`);
+    } catch {}
+  };
+  writePayload();
+  const timer = setInterval(writePayload, server.type === 'bedrock' ? 180 : 500);
+  timer.unref();
+  req.on('close', () => clearInterval(timer));
 });
 
 app.post('/api/servers/:id/spectate/start', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {

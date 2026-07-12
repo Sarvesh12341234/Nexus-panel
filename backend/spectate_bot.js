@@ -68,6 +68,13 @@ function sendEntities(values) {
   send('entities', { entities });
 }
 
+function packetChunkKey(packet) {
+  const x = finiteNumber(packet?.x ?? packet?.chunk_x ?? packet?.chunkX ?? packet?.chunk_position?.x, NaN);
+  const z = finiteNumber(packet?.z ?? packet?.chunk_z ?? packet?.chunkZ ?? packet?.chunk_position?.z, NaN);
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+  return { key: `${Math.trunc(x)},${Math.trunc(z)}`, x: Math.trunc(x), z: Math.trunc(z) };
+}
+
 function startJavaBot(config) {
   const mineflayer = require('mineflayer');
   const bot = mineflayer.createBot({
@@ -194,6 +201,8 @@ function startBedrockBot(config) {
   });
   const players = new Set();
   const entities = new Map();
+  const chunks = new Map();
+  const blockUpdates = [];
   let connected = false;
 
   const publishPlayers = () => send('players', { players: [...players].map(cleanPlayerName).filter(Boolean) });
@@ -216,6 +225,17 @@ function startBedrockBot(config) {
       if (!entity.self && now - Number(entity.updatedAt || 0) > 30 * 1000) entities.delete(id);
     }
     sendEntities([...entities.values()]);
+  };
+  const publishWorld = () => {
+    const now = Date.now();
+    for (const [key, chunk] of [...chunks.entries()]) {
+      if (now - Number(chunk.updatedAt || 0) > 5 * 60 * 1000) chunks.delete(key);
+    }
+    send('world', {
+      mode: 'bedrock-custom-voxel',
+      chunks: [...chunks.values()].slice(-192),
+      blockUpdates: blockUpdates.splice(0, blockUpdates.length).slice(-128),
+    });
   };
   const markConnected = (packet = null) => {
     if (connected) return;
@@ -288,6 +308,27 @@ function startBedrockBot(config) {
     const id = packetEntityId(packet);
     if (id) entities.delete(id);
   });
+  client.on('level_chunk', (packet) => {
+    const chunk = packetChunkKey(packet);
+    if (!chunk) return;
+    chunks.set(chunk.key, {
+      x: chunk.x,
+      z: chunk.z,
+      updatedAt: Date.now(),
+      size: finiteNumber(packet?.payload?.length ?? packet?.data?.length ?? packet?.blob?.length),
+    });
+  });
+  client.on('update_block', (packet) => {
+    const position = packetPosition(packet);
+    blockUpdates.push({
+      x: Math.trunc(position.x),
+      y: Math.trunc(position.y),
+      z: Math.trunc(position.z),
+      runtimeId: finiteNumber(packet?.runtime_id ?? packet?.block_runtime_id ?? packet?.block?.runtime_id),
+      updatedAt: Date.now(),
+    });
+    if (blockUpdates.length > 512) blockUpdates.splice(0, blockUpdates.length - 512);
+  });
   client.on('player_list', (packet) => {
     for (const record of packet?.records?.records || packet?.records || []) {
       if (record?.username) {
@@ -302,8 +343,11 @@ function startBedrockBot(config) {
   });
   const entityTimer = setInterval(publishEntities, 250);
   entityTimer.unref();
+  const worldTimer = setInterval(publishWorld, 650);
+  worldTimer.unref();
   client.on('disconnect', (packet) => {
     clearInterval(entityTimer);
+    clearInterval(worldTimer);
     const detail = packet?.message || packet?.reason || 'closed';
     const hint = /auth|xbox|login|token|online/i.test(String(detail)) ? ' If online-mode=true, set NEXUSPANEL_SPECTATE_BEDROCK_AUTH=microsoft and restart NexusPanel.' : '';
     send('status', { status: 'stopped', message: `Bedrock spectate bot disconnected: ${detail}.${hint}` });
@@ -317,6 +361,7 @@ function startBedrockBot(config) {
   client.on('error', (error) => send('error', { message: `Bedrock bot error: ${error.message}` }));
   client.on('close', () => {
     clearInterval(entityTimer);
+    clearInterval(worldTimer);
     send('status', { status: 'stopped', message: 'Bedrock spectate bot connection closed.' });
     process.exit(0);
   });
