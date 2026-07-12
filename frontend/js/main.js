@@ -1906,6 +1906,8 @@ async function renderSpectate() {
     <button class="secondary spectate-player-button" type="button" data-action="spectate-target" data-player-name="${escapeHtml(player)}">${escapeHtml(player)}</button>
   `).join('');
   const running = ['connecting', 'connected', 'ready'].includes(data.status);
+  const framePushUrl = `${state.settings?.publicBaseUrl || window.location.origin}/api/servers/${server.id}/spectate/frame-push`;
+  const framePushToken = state.settings?.spectateFramePushToken || state.settings?.spectateFramePushTokenPreview || '';
   elements.spectatePanel.innerHTML = `
     <div class="section-head spectate-head">
       <div><p class="eyebrow">Live Spectate</p><h2>${escapeHtml(server.name)}</h2></div>
@@ -1934,12 +1936,21 @@ async function renderSpectate() {
       <strong>Switch Player</strong>
       <div class="row-actions" data-spectate-players>${playerButtons || '<span class="muted">No players detected from console telemetry yet.</span>'}</div>
     </div>
+    <div class="settings-group">
+      <strong>Real Bedrock Client Stream</strong>
+      <label>Frame push endpoint <input readonly value="${escapeHtml(framePushUrl)}"></label>
+      <label>Frame push token <input readonly value="${escapeHtml(framePushToken)}"></label>
+      <div class="muted">Run a real Minecraft Bedrock client on a capture machine, then push that client window/monitor into this endpoint.</div>
+    </div>
   `;
   startSpectateVideo(server.id);
   ensureSpectateStream(server.id);
 }
 
 function renderSpectateSurface(data) {
+  if (data.framePushActive && data.framePushUrl) {
+    return `<img class="spectate-video spectate-client-video" data-spectate-frame-push src="${escapeHtml(data.framePushUrl)}" alt="Live spectator client frame stream">`;
+  }
   if (data.clientVideoUrl) {
     return renderClientVideoUrl(data.clientVideoUrl);
   }
@@ -1953,7 +1964,7 @@ function renderSpectateSurface(data) {
       <div class="spectate-video spectate-empty-video">
         <div>
           <strong>No real spectator-client video connected</strong>
-          <span>Bedrock protocol bots do not output pixels. Run a real Bedrock client in spectator mode and paste its stream URL in Settings.</span>
+          <span>Bedrock protocol bots do not output pixels. Start a real Bedrock client capture and push frames to NexusPanel.</span>
         </div>
       </div>
     `;
@@ -1978,6 +1989,14 @@ function syncSpectateSurface(data) {
   const iframe = surface.querySelector('iframe');
   const canvas = surface.querySelector('canvas');
   const video = surface.querySelector('video');
+  const framePush = surface.querySelector('[data-spectate-frame-push]');
+  if (data.framePushActive && data.framePushUrl) {
+    if (!framePush || framePush.getAttribute('src') !== data.framePushUrl) {
+      stopSpectateVideo();
+      surface.innerHTML = renderSpectateSurface(data);
+    }
+    return;
+  }
   if (data.clientVideoUrl) {
     const directVideo = isDirectVideoUrl(data.clientVideoUrl);
     const expectedSource = directVideo ? video?.getAttribute('src') : iframe?.getAttribute('src');
@@ -2023,10 +2042,12 @@ function updateSpectateLiveDom(data) {
   setText('[data-spectate-bot]', data.botName || 'live-update');
   setText('[data-spectate-target]', data.target || 'Overview');
   setText('[data-spectate-pid]', data.pid ? String(Number(data.pid)) : '-');
-  setText('[data-spectate-message]', data.error || (data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
+  setText('[data-spectate-message]', data.error || (data.framePushActive ? 'Real spectator-client frame stream is active.' : data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
   const detail = panel.querySelector('[data-spectate-detail]');
   if (detail) {
-    detail.textContent = data.packageInstalled
+    detail.textContent = data.framePushActive
+      ? `Frame stream updated ${data.framePushUpdatedAt ? new Date(data.framePushUpdatedAt).toLocaleTimeString() : 'now'}`
+      : data.packageInstalled
       ? `${data.host || '127.0.0.1'}:${Number(data.port || 0)} - ${data.botName || 'live-update'} - ${(data.authMode || 'offline')} auth`
       : `Install inside /opt/nexuspanel: ${data.installCommand || 'npm install mineflayer'}`;
   }
@@ -2582,6 +2603,8 @@ function renderSettings() {
       <label>Java spectate auth <select name="spectateJavaAuth"><option value="offline" ${settings.spectateJavaAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateJavaAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
       <label>Bedrock spectate auth <select name="spectateBedrockAuth"><option value="offline" ${settings.spectateBedrockAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateBedrockAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
       <label>Spectator client stream URL <input name="spectateClientVideoUrl" type="url" value="${escapeHtml(settings.spectateClientVideoUrl || '')}" placeholder="https://your-stream.example/watch"></label>
+      <label>Spectate frame push token <input readonly value="${escapeHtml(settings.spectateFramePushToken || settings.spectateFramePushTokenPreview || '')}"></label>
+      <label>Frame push endpoint <input readonly value="${escapeHtml(`${settings.publicBaseUrl || window.location.origin}/api/servers/<serverId>/spectate/frame-push`)}"></label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '2.0.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v2.0.0"></label>

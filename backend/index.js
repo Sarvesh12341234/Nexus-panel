@@ -56,6 +56,7 @@ const editionPath = path.join(dataRoot, 'edition');
 const terminalSessions = new Map();
 const wakeWatchers = new Map();
 const spectateSessions = new Map();
+const spectateFrameFeeds = new Map();
 const passwordResetRequests = new Map();
 const keyedOperations = new Map();
 const crashHistory = new Map();
@@ -82,6 +83,7 @@ app.set('trust proxy', true);
 app.use('/api/servers/:id/files/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/servers/:id/files/upload', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/network/upload-test', express.raw({ type: 'application/octet-stream', limit: '64mb' }));
+app.use('/api/servers/:id/spectate/frame-push', express.raw({ type: '*/*', limit: '8mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(authMiddleware);
 app.use((req, res, next) => {
@@ -224,6 +226,7 @@ const repairAgentModelFreshness = ensureRepairAgentModelFresh();
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
+  const framePushToken = spectateFramePushToken();
   const defaultTag = edition === 'host' ? 'host-v2.0.0' : 'normal-v2.0.0';
   const configuredTag = settingValue('update_target_tag', defaultTag);
   return {
@@ -246,6 +249,8 @@ function panelSettingsPayload(user = null) {
     spectateJavaAuth: settingValue('spectate_java_auth', process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline'),
     spectateBedrockAuth: settingValue('spectate_bedrock_auth', process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline'),
     spectateClientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
+    spectateFramePushTokenPreview: `${framePushToken.slice(0, 8)}....${framePushToken.slice(-6)}`,
+    spectateFramePushToken: user?.role === 'owner' ? framePushToken : '',
     normalTunnelsEnabled: edition === 'normal',
     ngrokConfigured: edition === 'normal' && Boolean(settingValue('ngrok_auth_token', '')),
     ngrokAuthtokenPreview: edition === 'normal' && settingValue('ngrok_auth_token', '') ? `${settingValue('ngrok_auth_token', '').slice(0, 6)}....${settingValue('ngrok_auth_token', '').slice(-4)}` : '',
@@ -276,6 +281,63 @@ function spectateAuthMode(server) {
   return server.type === 'java'
     ? settingValue('spectate_java_auth', process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline')
     : settingValue('spectate_bedrock_auth', process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline');
+}
+
+function spectateFramePushToken() {
+  return ensureSettingValue('spectate_frame_push_token', () => crypto.randomBytes(32).toString('base64url'));
+}
+
+function validateSpectateFrameToken(req) {
+  const token = String(req.query.token || req.headers['x-nexuspanel-stream-token'] || '').trim();
+  const expected = spectateFramePushToken();
+  const left = Buffer.from(token);
+  const right = Buffer.from(expected);
+  return Boolean(token && left.length === right.length && crypto.timingSafeEqual(left, right));
+}
+
+function spectateFeedFor(serverId) {
+  const id = Number(serverId);
+  if (!spectateFrameFeeds.has(id)) {
+    spectateFrameFeeds.set(id, {
+      frame: null,
+      contentType: 'image/jpeg',
+      updatedAt: 0,
+      clients: new Set(),
+    });
+  }
+  return spectateFrameFeeds.get(id);
+}
+
+function writeSpectateFrame(res, feed) {
+  if (!feed.frame || res.destroyed || res.writableEnded) return;
+  res.write(`--nexuspanel-spectate\r\n`);
+  res.write(`Content-Type: ${feed.contentType}\r\n`);
+  res.write(`Content-Length: ${feed.frame.length}\r\n`);
+  res.write(`X-NexusPanel-Frame-Time: ${feed.updatedAt}\r\n\r\n`);
+  res.write(feed.frame);
+  res.write('\r\n');
+}
+
+function pushSpectateFrame(serverId, frame, contentType) {
+  const feed = spectateFeedFor(serverId);
+  feed.frame = Buffer.from(frame);
+  feed.contentType = contentType;
+  feed.updatedAt = Date.now();
+  for (const client of [...feed.clients]) {
+    try {
+      writeSpectateFrame(client, feed);
+    } catch {
+      feed.clients.delete(client);
+    }
+  }
+  return feed;
+}
+
+function clearSpectateFeed(serverId) {
+  const feed = spectateFrameFeeds.get(Number(serverId));
+  if (!feed) return;
+  feed.frame = null;
+  feed.updatedAt = 0;
 }
 
 function spectateRendererPort(server) {
@@ -386,6 +448,8 @@ function spectateSessionPayload(server, req = null) {
   const bot = spectateBotPackage(server);
   const sessionActive = Boolean(session && session.status !== 'stopped' && session.status !== 'error' && (!session.child || !session.child.killed));
   const players = sessionActive && session?.players?.length ? session.players : [];
+  const frameFeed = spectateFrameFeeds.get(Number(server.id));
+  const framePushActive = Boolean(frameFeed?.frame && Date.now() - Number(frameFeed.updatedAt || 0) < 15000);
   const installed = (() => {
     try {
       require.resolve(bot.name);
@@ -420,6 +484,9 @@ function spectateSessionPayload(server, req = null) {
       ? 'Java screenshare renderer starts after the bot spawns. Install prismarine-viewer if it stays unavailable.'
       : 'Bedrock custom voxel renderer uses live chunk, block update, and entity packets.'),
     clientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
+    framePushActive,
+    framePushUpdatedAt: frameFeed?.updatedAt || 0,
+    framePushUrl: `/api/servers/${server.id}/spectate/frame-stream.mjpg`,
     target: session?.target || players[0] || '',
     players,
     entities: sessionActive ? sanitizeSpectateEntities(session?.entities || []) : [],
@@ -582,6 +649,7 @@ function stopSpectateSession(server) {
     }, 1500).unref();
   }
   spectateSessions.delete(Number(server.id));
+  clearSpectateFeed(server.id);
   appendLog(server.id, '[NexusPanel] Live Spectate session stopped.');
 }
 
@@ -598,6 +666,7 @@ function stopAllSpectateSessions(reason = 'Live Spectate was disabled.') {
     stopSpectateSession(server);
     appendLog(server.id, `[NexusPanel] ${reason}`);
   }
+  for (const serverId of [...spectateFrameFeeds.keys()]) clearSpectateFeed(serverId);
 }
 
 function pruneSpectateSessions() {
@@ -4856,6 +4925,36 @@ app.get('/api/servers/:id/spectate/stream', requirePermission(capabilities.CONSO
   const timer = setInterval(writePayload, server.type === 'bedrock' ? 180 : 500);
   timer.unref();
   req.on('close', () => clearInterval(timer));
+});
+
+app.post('/api/servers/:id/spectate/frame-push', (req, res) => {
+  const server = getServerOr404(req.params.id);
+  if (settingValue('live_spectate_enabled', '0') !== '1') return res.status(403).json({ error: 'Live spectate is disabled.' });
+  if (!validateSpectateFrameToken(req)) return res.status(401).json({ error: 'Invalid spectate frame token.' });
+  if (!Buffer.isBuffer(req.body) || req.body.length < 64) return res.status(400).json({ error: 'Frame body is required.' });
+  const contentType = String(req.headers['content-type'] || 'image/jpeg').split(';')[0].trim().toLowerCase();
+  if (!['image/jpeg', 'image/png', 'image/webp', 'application/octet-stream'].includes(contentType)) {
+    return res.status(415).json({ error: 'Use JPEG, PNG, or WebP frames.' });
+  }
+  const feed = pushSpectateFrame(server.id, req.body, contentType === 'application/octet-stream' ? 'image/jpeg' : contentType);
+  res.json({ ok: true, bytes: req.body.length, updatedAt: feed.updatedAt, viewers: feed.clients.size });
+});
+
+app.get('/api/servers/:id/spectate/frame-stream.mjpg', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const feed = spectateFeedFor(server.id);
+  res.setHeader('Content-Type', 'multipart/x-mixed-replace; boundary=nexuspanel-spectate');
+  res.setHeader('Cache-Control', 'no-store, no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  feed.clients.add(res);
+  writeSpectateFrame(res, feed);
+  const heartbeat = setInterval(() => writeSpectateFrame(res, feed), 5000);
+  heartbeat.unref();
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    feed.clients.delete(res);
+  });
 });
 
 app.post('/api/servers/:id/spectate/start', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {

@@ -635,6 +635,7 @@ code {
 
 .spectate-client-video {
   background: #020617;
+  object-fit: contain;
 }
 
 .spectate-empty-video {
