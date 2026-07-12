@@ -265,8 +265,61 @@ function spectateBotPackage(server) {
     : { name: 'bedrock-protocol', engine: 'Bedrock protocol bot' };
 }
 
-function spectateSessionPayload(server, req = null) {
+function spectateBotName(server) {
+  return server.type === 'java' ? 'live_update' : 'live-update';
+}
+
+function spectateAuthMode(server) {
+  return server.type === 'java'
+    ? (process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline')
+    : (process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline');
+}
+
+function sendSpectateModeCommand(server, botName) {
   const session = spectateSessions.get(Number(server.id));
+  if (!session || session.gamemodeSent || runtimeStatus(server.id) !== 'online') return;
+  session.gamemodeSent = true;
+  try {
+    sendCommand(server.id, `gamemode spectator ${botName}`);
+    appendLog(server.id, `[NexusPanel] Live Spectate set ${botName} to spectator mode.`);
+  } catch (error) {
+    appendLog(server.id, `[NexusPanel] Live Spectate spectator command failed: ${error.message}`);
+  }
+}
+
+function inferSpectateFromServerLogs(server, session) {
+  if (!session) return session;
+  const botName = session.botName || spectateBotName(server);
+  const recent = consoleLogs(server.id)
+    .filter((line) => String(line).includes(botName))
+    .slice(-20)
+    .join('\n');
+  if (!recent) return session;
+  if (/Player (?:connected|Spawned):\s*/i.test(recent) || /Player Spawned:/i.test(recent)) {
+    const players = new Set([...(session.players || []), botName]);
+    session.players = [...players];
+    session.target = session.target || botName;
+    if (['connecting', 'ready', 'stopped', 'error'].includes(session.status)) {
+      session.status = 'connected';
+      session.message = `${botName} is connected and spawned. Live feed is following the bot perspective.`;
+    }
+    session.updatedAt = Date.now();
+    if (session.timeout) {
+      clearTimeout(session.timeout);
+      session.timeout = null;
+    }
+    sendSpectateModeCommand(server, botName);
+  }
+  if (/Player disconnected:\s*/i.test(recent)) {
+    session.status = 'stopped';
+    session.updatedAt = Date.now();
+    session.message = `${botName} disconnected from the server.`;
+  }
+  return session;
+}
+
+function spectateSessionPayload(server, req = null) {
+  const session = inferSpectateFromServerLogs(server, spectateSessions.get(Number(server.id)));
   const bot = spectateBotPackage(server);
   const players = session?.players?.length ? session.players : runtimeDetails(server.id).players || [];
   const installed = (() => {
@@ -293,8 +346,8 @@ function spectateSessionPayload(server, req = null) {
     startedAt: session?.startedAt || 0,
     updatedAt: session?.updatedAt || 0,
     pid: session?.child?.pid || 0,
-    botName: session?.botName || (server.type === 'java' ? 'live_update' : 'live-update'),
-    authMode: session?.authMode || (server.type === 'java' ? (process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline') : (process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline')),
+    botName: session?.botName || spectateBotName(server),
+    authMode: session?.authMode || spectateAuthMode(server),
     target: session?.target || players[0] || '',
     players,
     frameUrl: `/api/servers/${server.id}/spectate/frame.svg`,
@@ -332,8 +385,8 @@ function startSpectateSession(server, req = null) {
     type: server.type === 'java' ? 'java' : 'bedrock',
     host: '127.0.0.1',
     port: Number(server.port || (server.type === 'bedrock' ? 19132 : 25565)),
-    username: server.type === 'java' ? 'live_update' : 'live-update',
-    auth: server.type === 'java' ? (process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline') : (process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline'),
+    username: spectateBotName(server),
+    auth: spectateAuthMode(server),
     runtimeDir,
   };
   const encoded = Buffer.from(JSON.stringify(config), 'utf8').toString('base64url');
@@ -380,6 +433,7 @@ function startSpectateSession(server, req = null) {
         clearTimeout(session.timeout);
         session.timeout = null;
       }
+      if (session.status === 'connected') sendSpectateModeCommand(server, session.botName || config.username);
     }
     if (message.type === 'error') {
       session.status = 'error';
@@ -454,7 +508,8 @@ function pruneSpectateSessions() {
 function spectateFrameSvg(payload) {
   const players = payload.players || [];
   const target = payload.target || players[0] || 'Overview';
-  const status = payload.status === 'ready' ? 'LIVE' : payload.status.toUpperCase();
+  const status = ['ready', 'connected'].includes(payload.status) ? 'LIVE' : payload.status.toUpperCase();
+  const stamp = new Date().toLocaleTimeString('en-US', { hour12: true });
   const rows = players.slice(0, 8).map((player, index) => {
     const y = 285 + index * 35;
     const active = player === target;
@@ -479,6 +534,7 @@ function spectateFrameSvg(payload) {
   <text x="880" y="260" font-family="Inter,Segoe UI,Arial" font-size="20" fill="#f8fafc">Players</text>
   ${rows || '<text x="880" y="306" font-family="Inter,Segoe UI,Arial" font-size="16" fill="#94a3b8">No players detected yet.</text>'}
   <text x="72" y="605" font-family="Inter,Segoe UI,Arial" font-size="15" fill="#cbd5e1">${escapeXml(payload.message || '')}</text>
+  <text x="1060" y="605" text-anchor="end" font-family="Inter,Segoe UI,Arial" font-size="15" fill="#a7f3d0">${escapeXml(stamp)}</text>
 </svg>`;
 }
 
