@@ -47,6 +47,7 @@
           <button class="nav-item is-active" type="button" data-view="dashboard">Dashboard</button>
           <button class="nav-item" type="button" data-view="servers">Servers</button>
           <button class="nav-item" type="button" data-view="console">Console</button>
+          <button class="nav-item" type="button" data-view="spectate">Live Spectate</button>
           <button class="nav-item" type="button" data-view="files">File Manager</button>
           <button class="nav-item" type="button" data-view="templates">Templates</button>
           <button class="nav-item" type="button" data-view="software">Software</button>
@@ -173,6 +174,10 @@
               <button type="submit">Send</button>
             </form>
           </div>
+        </section>
+
+        <section class="view-section" id="view-spectate" hidden>
+          <div class="surface tool-surface" id="spectatePanel"></div>
         </section>
 
         <section class="view-section" id="view-files" hidden>

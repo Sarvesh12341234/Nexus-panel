@@ -575,6 +575,20 @@ code {
   transition: width 160ms ease;
 }
 
+.spectate-frame-wrap {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(5, 11, 20, 0.72);
+}
+
+.spectate-frame {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
 .switch {
   display: flex;
   align-items: center;

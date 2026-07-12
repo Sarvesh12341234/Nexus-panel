@@ -55,6 +55,7 @@ const healthPath = path.join(dataRoot, 'panel_health.json');
 const editionPath = path.join(dataRoot, 'edition');
 const terminalSessions = new Map();
 const wakeWatchers = new Map();
+const spectateSessions = new Map();
 const passwordResetRequests = new Map();
 const keyedOperations = new Map();
 const crashHistory = new Map();
@@ -241,6 +242,7 @@ function panelSettingsPayload(user = null) {
     repairAgentLiveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
     repairAgentFullAccessEnabled: repairFullAccessEnabled(),
     repairAgentFullAccessUntil: repairFullAccessUntil(),
+    liveSpectateEnabled: settingValue('live_spectate_enabled', '0') === '1',
     normalTunnelsEnabled: edition === 'normal',
     ngrokConfigured: edition === 'normal' && Boolean(settingValue('ngrok_auth_token', '')),
     ngrokAuthtokenPreview: edition === 'normal' && settingValue('ngrok_auth_token', '') ? `${settingValue('ngrok_auth_token', '').slice(0, 6)}....${settingValue('ngrok_auth_token', '').slice(-4)}` : '',
@@ -255,6 +257,123 @@ function panelSettingsPayload(user = null) {
     hostMaintenanceMode: edition === 'host' && settingValue('host_maintenance_mode', '0') === '1',
     hostServerQuota: edition === 'host' ? clampNumber(settingValue('host_server_quota', '10'), 1, 500, 10) : 0,
   };
+}
+
+function spectateBotPackage(server) {
+  return server.type === 'java'
+    ? { name: 'mineflayer', engine: 'Mineflayer Java bot' }
+    : { name: 'bedrock-protocol', engine: 'Bedrock protocol bot' };
+}
+
+function spectateSessionPayload(server, req = null) {
+  const session = spectateSessions.get(Number(server.id));
+  const bot = spectateBotPackage(server);
+  const players = runtimeDetails(server.id).players || [];
+  const installed = (() => {
+    try {
+      require.resolve(bot.name);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  return {
+    enabled: settingValue('live_spectate_enabled', '0') === '1',
+    serverId: server.id,
+    serverName: server.name,
+    serverType: server.type,
+    serverStatus: runtimeStatus(server.id),
+    host: server.host && server.host !== '127.0.0.1' ? server.host : (req ? requestPublicHost(req) : server.host || '127.0.0.1'),
+    port: Number(server.port || (server.type === 'bedrock' ? 19132 : 25565)),
+    engine: bot.engine,
+    packageName: bot.name,
+    packageInstalled: installed,
+    installCommand: `npm install ${bot.name}`,
+    status: session?.status || 'stopped',
+    startedAt: session?.startedAt || 0,
+    updatedAt: session?.updatedAt || 0,
+    target: session?.target || players[0] || '',
+    players,
+    frameUrl: `/api/servers/${server.id}/spectate/frame.svg`,
+    message: session?.message || (installed ? 'Ready to start a spectate bot.' : `Install ${bot.name} to enable a real spectate bot for this server type.`),
+  };
+}
+
+function startSpectateSession(server, req = null) {
+  if (settingValue('live_spectate_enabled', '0') !== '1') throw new Error('Live spectate is disabled in Settings.');
+  if (runtimeStatus(server.id) !== 'online') throw new Error('Start the server before opening a live spectate session.');
+  const bot = spectateBotPackage(server);
+  try {
+    require.resolve(bot.name);
+  } catch {
+    const payload = {
+      status: 'missing-engine',
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      target: '',
+      message: `${bot.engine} package is not installed. Run: npm install ${bot.name}`,
+    };
+    spectateSessions.set(Number(server.id), payload);
+    appendLog(server.id, `[NexusPanel] Live Spectate waiting for bot engine: npm install ${bot.name}`);
+    return spectateSessionPayload(server, req);
+  }
+  const players = runtimeDetails(server.id).players || [];
+  const payload = {
+    status: 'ready',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    target: players[0] || '',
+    message: `${bot.engine} detected. Live frame is following ${players[0] || 'server overview'}.`,
+  };
+  spectateSessions.set(Number(server.id), payload);
+  appendLog(server.id, `[NexusPanel] Live Spectate session armed with ${bot.engine}.`);
+  return spectateSessionPayload(server, req);
+}
+
+function stopSpectateSession(server) {
+  spectateSessions.delete(Number(server.id));
+  appendLog(server.id, '[NexusPanel] Live Spectate session stopped.');
+}
+
+function spectateFrameSvg(payload) {
+  const players = payload.players || [];
+  const target = payload.target || players[0] || 'Overview';
+  const status = payload.status === 'ready' ? 'LIVE' : payload.status.toUpperCase();
+  const rows = players.slice(0, 8).map((player, index) => {
+    const y = 285 + index * 35;
+    const active = player === target;
+    return `<rect x="880" y="${y - 22}" width="300" height="28" rx="8" fill="${active ? '#34d399' : '#172033'}" opacity="${active ? '0.9' : '0.74'}"/><text x="895" y="${y}" font-size="16" fill="${active ? '#06110c' : '#dbeafe'}">${escapeXml(String(player))}</text>`;
+  }).join('');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-label="NexusPanel live spectate frame">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#07111f"/><stop offset="0.55" stop-color="#0f2a2f"/><stop offset="1" stop-color="#161024"/></linearGradient>
+    <radialGradient id="pulse" cx="38%" cy="44%" r="55%"><stop offset="0" stop-color="#34d399" stop-opacity="0.38"/><stop offset="1" stop-color="#34d399" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1200" height="675" fill="url(#bg)"/>
+  <rect width="1200" height="675" fill="url(#pulse)"/>
+  <g opacity="0.35" stroke="#8ce7c8" stroke-width="1">${Array.from({ length: 18 }, (_, i) => `<path d="M0 ${i * 42} H1200"/>`).join('')}${Array.from({ length: 24 }, (_, i) => `<path d="M${i * 52} 0 V675"/>`).join('')}</g>
+  <rect x="42" y="38" width="1116" height="599" rx="26" fill="#050b14" opacity="0.55" stroke="#93c5fd" stroke-opacity="0.25"/>
+  <text x="72" y="92" font-family="Inter,Segoe UI,Arial" font-size="22" fill="#bfdbfe">NexusPanel Live Spectate</text>
+  <text x="72" y="145" font-family="Inter,Segoe UI,Arial" font-size="58" font-weight="700" fill="#ecfeff">${escapeXml(String(target))}</text>
+  <text x="72" y="188" font-family="Inter,Segoe UI,Arial" font-size="18" fill="#a7f3d0">${escapeXml(payload.serverName)} - ${escapeXml(payload.engine)} - ${escapeXml(status)}</text>
+  <circle cx="115" cy="362" r="96" fill="#22c55e" opacity="0.18"/><circle cx="115" cy="362" r="36" fill="#34d399" opacity="0.86"/>
+  <path d="M210 520 C330 350 440 350 550 520 S775 690 870 450" fill="none" stroke="#60a5fa" stroke-width="16" stroke-linecap="round" opacity="0.65"/>
+  <rect x="850" y="220" width="340" height="380" rx="18" fill="#08111f" opacity="0.78" stroke="#60a5fa" stroke-opacity="0.32"/>
+  <text x="880" y="260" font-family="Inter,Segoe UI,Arial" font-size="20" fill="#f8fafc">Players</text>
+  ${rows || '<text x="880" y="306" font-family="Inter,Segoe UI,Arial" font-size="16" fill="#94a3b8">No players detected yet.</text>'}
+  <text x="72" y="605" font-family="Inter,Segoe UI,Arial" font-size="15" fill="#cbd5e1">${escapeXml(payload.message || '')}</text>
+</svg>`;
+}
+
+function escapeXml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&apos;',
+  }[char]));
 }
 
 function serverTombstoneKey(serverId) {
@@ -2373,6 +2492,57 @@ async function applyAgentOptimizations(server, root, analysis) {
   return { applied, skipped: [] };
 }
 
+async function ensureJsonFile(server, root, relativePath, fallbackValue) {
+  const target = assertInside(root, path.join(root, relativePath));
+  const exists = fs.existsSync(target);
+  let repaired = false;
+  if (exists) {
+    try {
+      JSON.parse(await fs.promises.readFile(target, 'utf8'));
+    } catch {
+      const recoveryDir = assertInside(root, path.join(root, 'runtime', 'config-recovery'));
+      await fs.promises.mkdir(recoveryDir, { recursive: true });
+      await fs.promises.copyFile(target, path.join(recoveryDir, `${path.basename(relativePath)}.${Date.now()}.broken`)).catch(() => {});
+      repaired = true;
+    }
+  } else {
+    repaired = true;
+  }
+  if (repaired) {
+    await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    await fs.promises.writeFile(target, JSON.stringify(fallbackValue, null, 2), { encoding: 'utf8', mode: 0o644 });
+    appendLog(server.id, `[NexusPanel] Repair agent rebuilt ${relativePath}.`);
+  }
+  return repaired ? `Rebuilt ${relativePath}` : '';
+}
+
+async function repairMissingSupportConfigs(server, root) {
+  const actions = [];
+  const warnings = [];
+  if (server.type === 'bedrock') {
+    for (const action of [
+      await ensureJsonFile(server, root, 'allowlist.json', []),
+      await ensureJsonFile(server, root, 'permissions.json', []),
+      await ensureJsonFile(server, root, 'valid_known_packs.json', []),
+      await ensureJsonFile(server, root, path.join('worlds', 'Bedrock level', 'world_behavior_packs.json'), []),
+      await ensureJsonFile(server, root, path.join('worlds', 'Bedrock level', 'world_resource_packs.json'), []),
+    ]) {
+      if (action) actions.push(action);
+    }
+  }
+  if (server.type === 'java') {
+    for (const action of [
+      await ensureJsonFile(server, root, 'whitelist.json', []),
+      await ensureJsonFile(server, root, 'banned-players.json', []),
+      await ensureJsonFile(server, root, 'banned-ips.json', []),
+      await ensureJsonFile(server, root, 'ops.json', []),
+    ]) {
+      if (action) actions.push(action);
+    }
+  }
+  return { actions, warnings };
+}
+
 function compareVersionParts(left, right) {
   const a = Array.isArray(left) ? left.map(Number) : String(left || '').split('.').map(Number);
   const b = Array.isArray(right) ? right.map(Number) : String(right || '').split('.').map(Number);
@@ -2492,6 +2662,14 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     });
     if (properties.repaired) actions.push(`Repaired server.properties (${properties.issues.join(' ') || 'created missing file'}).`);
   }
+  const supportRepair = await repairMissingSupportConfigs(server, root);
+  supportRepair.actions.forEach((item) => actions.push(item));
+  supportRepair.warnings.forEach((item) => warnings.push(item));
+  checks.push({
+    name: 'Support config files',
+    ok: true,
+    detail: supportRepair.actions.length ? supportRepair.actions.join(', ') : 'Required support config files are present and valid.',
+  });
   if (server.type === 'bedrock' && diagnostics.some((item) => item.id === 'bedrock-pack-version' || item.id === 'bedrock-world-native-crash')) {
     const packRepair = await quarantineIncompatibleBedrockPacks(server, root, consoleLogs(server.id));
     packRepair.actions.forEach((item) => actions.push(item));
@@ -2560,7 +2738,9 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     actions.push(`Applied ${optimization.applied.length} bounded game setting optimization(s): ${optimization.applied.join(', ')}.`);
   }
   optimization.skipped.forEach((item) => warnings.push(item));
-  const summary = `${checks.filter((check) => check.ok).length}/${checks.length} checks passed, ${actions.length} repair action(s), ${warnings.length} warning(s).`;
+  const concreteActions = actions.filter((action) => !/^Removed 0 stale partial transfer/.test(action) && !/^Rebuilt the Nexus-Mark resource profile/.test(action) && !/^Repaired executable/.test(action) && !/^Executable found/.test(action));
+  const summary = `${checks.filter((check) => check.ok).length}/${checks.length} checks passed, ${concreteActions.length} concrete repair action(s), ${warnings.length} warning(s).`;
+  const criticalWorldCrash = diagnostics.some((item) => item.id === 'bedrock-world-native-crash');
   logFixed({
     serverId: server.id,
     category: applyOptimizations ? 'repair' : 'repair-preview',
@@ -2578,6 +2758,8 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     knowledge,
     agent: { episodeId, ...publicAgentAnalysis(agentAnalysis), optimization },
     summary,
+    concreteActions,
+    shouldRestart: !criticalWorldCrash || concreteActions.length > 0,
   };
 }
 
@@ -3450,6 +3632,7 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
   setSettingValue('repair_web_enabled', toBool(req.body.repairWebEnabled, true) ? '1' : '0');
   setSettingValue('repair_agent_terminal_enabled', toBool(req.body.repairAgentTerminalEnabled, true) ? '1' : '0');
+  setSettingValue('live_spectate_enabled', toBool(req.body.liveSpectateEnabled) ? '1' : '0');
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
   if (publicBaseUrl) {
@@ -4352,6 +4535,44 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
   });
 });
 
+app.get('/api/servers/:id/spectate', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  res.json(spectateSessionPayload(server, req));
+});
+
+app.post('/api/servers/:id/spectate/start', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  res.json(startSpectateSession(server, req));
+});
+
+app.post('/api/servers/:id/spectate/stop', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  stopSpectateSession(server);
+  res.json(spectateSessionPayload(server, req));
+});
+
+app.post('/api/servers/:id/spectate/target', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const session = spectateSessions.get(Number(server.id)) || {
+    status: 'ready',
+    startedAt: Date.now(),
+    updatedAt: 0,
+    message: 'Live frame target selected.',
+  };
+  session.target = String(req.body.target || '').slice(0, 80);
+  session.updatedAt = Date.now();
+  spectateSessions.set(Number(server.id), session);
+  res.json(spectateSessionPayload(server, req));
+});
+
+app.get('/api/servers/:id/spectate/frame.svg', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const payload = spectateSessionPayload(server, req);
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(spectateFrameSvg(payload));
+});
+
 app.use('/api/servers/:id/timeline', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
   res.status(410).json({ error: 'Server Time Machine has been removed from this build.' });
 });
@@ -4440,7 +4661,7 @@ app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, p
   await safeTimelinePoint(server, req, 'Before Repair & Diagnose', 'Captured configuration before repair workflow.');
   const report = await runServerRepair(server, software, { applyOptimizations: true });
   const learned = learnRepairPlaybook(server, report);
-  appendLog(server.id, `[NexusPanel] Repair & Diagnose checks completed: ${report.summary}. Start the server and keep it online for 60 seconds before the repair is trusted.`);
+  appendLog(server.id, `[NexusPanel] Repair & Diagnose checks completed: ${report.summary} Start the server and keep it online for 60 seconds before the repair is trusted.`);
   if (learned) appendLog(server.id, `[NexusPanel] Repair playbook ${learned.signature} recorded as an untrusted candidate; it will not be replayed until stable runtime validates it.`);
   if (learned) logFixed({ serverId: server.id, category: 'learning', title: 'Repair playbook candidate recorded', detail: `Signature ${learned.signature}; ${learned.actions} action(s).`, source: 'repair-agent' });
   res.json({ ok: true, ...report, learned, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
@@ -5258,6 +5479,19 @@ async function runLiveAgentSweep() {
           });
         }
       }
+      if (runtimeStatus(server.id) === 'offline' && diagnostics.some((item) => item.id === 'support-config-missing')) {
+        const support = await repairMissingSupportConfigs(server, root);
+        if (support.actions.length) {
+          actions.push(`Live agent rebuilt support config for ${server.name}`);
+          logFixed({
+            serverId: server.id,
+            category: 'live-agent',
+            title: 'Live agent rebuilt support config',
+            detail: support.actions.join('\n'),
+            source: 'live-agent',
+          });
+        }
+      }
       if (repairFullAccessEnabled() && diagnostics.some((item) => ['disk-full', 'inode-full', 'read-only-fs', 'disk-io-error'].includes(item.id))) {
         const existing = db.prepare(`
           SELECT id FROM repair_agent_command_queue
@@ -5382,10 +5616,21 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
         appendLog(current.id, `[NexusPanel] Learned recovery could not complete: ${error.message}`);
         return null;
       });
+  let proactiveReport = null;
   if (!learnedRecovery && !targetedPropertyHeal) {
-    await runServerRepair(current, software)
-      .then((report) => appendLog(current.id, `[NexusPanel] Proactive crash repair completed: ${report.summary}`))
+    proactiveReport = await runServerRepair(current, software)
+      .then((report) => {
+        appendLog(current.id, `[NexusPanel] Proactive crash repair completed: ${report.summary}`);
+        (report.concreteActions || []).forEach((action) => appendLog(current.id, `[NexusPanel] Repair action: ${action}`));
+        (report.warnings || []).slice(0, 4).forEach((warning) => appendLog(current.id, `[NexusPanel] Repair warning: ${warning}`));
+        return report;
+      })
       .catch((error) => appendLog(current.id, `[NexusPanel] Proactive crash repair warning: ${error.message}`));
+    if (proactiveReport && proactiveReport.shouldRestart === false) {
+      pauseServerBackups(current.id, 60 * 60 * 1000, 'repair did not find a safe automatic world fix');
+      appendLog(current.id, '[NexusPanel] Auto-restart stopped because Repair did not apply a concrete fix for this Bedrock world crash. Restore a verified backup or remove the incompatible world/pack files, then start manually.');
+      return;
+    }
   }
   const restartDelaySeconds = launchFailure ? 10 * recent.length : 5;
   appendLog(current.id, `[NexusPanel] Unexpected exit detected. Restarting in ${restartDelaySeconds} seconds...`);

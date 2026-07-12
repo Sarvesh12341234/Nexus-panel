@@ -73,6 +73,7 @@ const elements = {
   consoleBox: document.querySelector('#consoleBox'),
   consoleMetrics: document.querySelector('#consoleMetrics'),
   presencePanel: document.querySelector('#presencePanel'),
+  spectatePanel: document.querySelector('#spectatePanel'),
   commandForm: document.querySelector('#commandForm'),
   serverConfigForm: document.querySelector('#serverConfigForm'),
   adminServerAssign: document.querySelector('#adminServerAssign'),
@@ -213,6 +214,7 @@ const viewTitles = {
   dashboard: ['Dashboard', 'Servers'],
   servers: ['Servers', 'Specific Servers'],
   console: ['Server', 'Console'],
+  spectate: ['Live', 'Spectate'],
   files: ['Server', 'File Manager'],
   templates: ['Templates', 'One-click Setup'],
   software: ['Server', 'Software Installer'],
@@ -232,6 +234,7 @@ const viewAccess = {
   dashboard: { keys: [], level: 'VIEW_ONLY' },
   servers: { keys: [CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART, CAPABILITIES.SERVER_KILL, CAPABILITIES.SERVER_MANAGE], level: 'POWER_SERVERS' },
   console: { keys: [CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.CONSOLE_COMMAND], level: 'VIEW_CONSOLE' },
+  spectate: { keys: [CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.NETWORK_MANAGE], level: 'VIEW_CONSOLE' },
   files: { keys: [CAPABILITIES.FILES_MANAGE], level: 'MANAGE_FILES' },
   templates: { keys: [CAPABILITIES.SERVER_MANAGE], level: 'MANAGE_SERVERS' },
   software: { keys: [CAPABILITIES.SOFTWARE_MANAGE], level: 'MANAGE_SERVERS' },
@@ -1183,6 +1186,7 @@ function canView(view) {
   if (!state.user || !Object.hasOwn(viewAccess, view)) return false;
   if (view === 'templates' && state.settings?.edition !== 'host') return false;
   if (view === 'terminal') return state.user.role === 'owner';
+  if (view === 'spectate' && !state.settings?.liveSpectateEnabled) return false;
   const access = viewAccess[view];
   if (!access.keys.length) return true;
   return can(access.keys, Number(state.permissions[access.level] || 0));
@@ -1733,6 +1737,7 @@ async function renderActiveView() {
   if (state.activeView === 'whitelist') await renderWhitelist();
   if (state.activeView === 'plugins') renderPlugins();
   if (state.activeView === 'console') await renderConsole();
+  if (state.activeView === 'spectate') await renderSpectate();
   if (state.activeView === 'files') {
     await renderFiles();
     await renderUploadSessions();
@@ -1869,6 +1874,50 @@ async function renderPresence(server) {
   elements.presencePanel.innerHTML = users.length
     ? users.map((user) => `<div class="plugin-row"><div><strong>${escapeHtml(user.name || user.email)}</strong><div class="muted">Viewing ${escapeHtml(user.view || 'panel')} now</div></div><span class="badge is-on">Live</span></div>`).join('')
     : '<div class="plugin-row"><div><strong>Live collaborators</strong><div class="muted">No other owner/admin is viewing this server right now.</div></div><span class="badge">Solo</span></div>';
+}
+
+async function renderSpectate() {
+  if (!elements.spectatePanel) return;
+  const server = activeServer();
+  if (!state.settings?.liveSpectateEnabled) {
+    elements.spectatePanel.innerHTML = '<div class="section-head"><div><p class="eyebrow">Live Spectate</p><h2>Disabled</h2></div></div><p class="empty-state">Enable Live spectate section in Settings.</p>';
+    return;
+  }
+  if (!server) {
+    elements.spectatePanel.innerHTML = '<div class="section-head"><div><p class="eyebrow">Live Spectate</p><h2>No server</h2></div></div><p class="empty-state">Create a server before opening a live spectate session.</p>';
+    return;
+  }
+  const data = await api(`/api/servers/${server.id}/spectate`).catch((error) => ({ error: error.message, players: [] }));
+  const playerButtons = (data.players || []).map((player) => `
+    <button class="secondary" type="button" data-action="spectate-target" data-player-name="${escapeHtml(player)}">${escapeHtml(player)}</button>
+  `).join('');
+  elements.spectatePanel.innerHTML = `
+    <div class="section-head">
+      <div><p class="eyebrow">Live Spectate</p><h2>${escapeHtml(server.name)}</h2></div>
+      <div class="row-actions">
+        <button type="button" data-action="spectate-start" ${data.serverStatus === 'online' ? '' : 'disabled'}>Start Bot</button>
+        <button class="secondary" type="button" data-action="spectate-refresh">Refresh</button>
+        <button class="danger" type="button" data-action="spectate-stop" ${data.status === 'stopped' ? 'disabled' : ''}>Stop</button>
+      </div>
+    </div>
+    <div class="metric-grid">
+      <div><strong>${escapeHtml(data.status || 'stopped')}</strong><span>Session</span></div>
+      <div><strong>${escapeHtml(data.serverStatus || server.status)}</strong><span>Server</span></div>
+      <div><strong>${escapeHtml(data.engine || 'Bot engine')}</strong><span>${data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
+      <div><strong>${escapeHtml(data.target || 'Overview')}</strong><span>Target</span></div>
+    </div>
+    <div class="spectate-frame-wrap">
+      <img class="spectate-frame" alt="Live spectate frame" src="${escapeHtml(data.frameUrl || `/api/servers/${server.id}/spectate/frame.svg`)}?t=${Date.now()}">
+    </div>
+    <div class="plugin-row">
+      <div><strong>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted">${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)}` : `Install on VPS: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
+      <span class="badge ${data.packageInstalled && data.status !== 'missing-engine' ? 'is-on' : ''}">${data.packageInstalled ? 'Engine ready' : 'Needs engine'}</span>
+    </div>
+    <div class="settings-group">
+      <strong>Switch Player</strong>
+      <div class="row-actions">${playerButtons || '<span class="muted">No players detected from console telemetry yet.</span>'}</div>
+    </div>
+  `;
 }
 
 function syncConsoleActionButtons(server, status) {
@@ -2029,6 +2078,7 @@ function renderSettings() {
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
       <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
+      <label class="switch"><input name="liveSpectateEnabled" type="checkbox" ${settings.liveSpectateEnabled ? 'checked' : ''}><span></span>Live spectate section</label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '2.0.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v2.0.0"></label>
@@ -4265,6 +4315,36 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       fileClipboard = { mode: action === 'file-copy-selected' ? 'copy' : 'move', paths: selected, serverId: server?.id || null };
       showToast(`${fileClipboard.mode === 'copy' ? 'Copied' : 'Cut'} ${selected.length} item(s).`);
+      return;
+    }
+    if (action === 'spectate-start') {
+      const server = activeServer();
+      if (!server) return showToast('Create a server first.');
+      const data = await api(`/api/servers/${server.id}/spectate/start`, { method: 'POST' });
+      showToast(data.message || 'Live spectate started.');
+      await renderSpectate();
+      return;
+    }
+    if (action === 'spectate-stop') {
+      const server = activeServer();
+      if (!server) return showToast('Create a server first.');
+      await api(`/api/servers/${server.id}/spectate/stop`, { method: 'POST' });
+      showToast('Live spectate stopped.');
+      await renderSpectate();
+      return;
+    }
+    if (action === 'spectate-refresh') {
+      await renderSpectate();
+      return;
+    }
+    if (action === 'spectate-target') {
+      const server = activeServer();
+      if (!server) return showToast('Create a server first.');
+      await api(`/api/servers/${server.id}/spectate/target`, {
+        method: 'POST',
+        body: JSON.stringify({ target: actionTarget.dataset.playerName || '' }),
+      });
+      await renderSpectate();
       return;
     }
     if (action === 'fix-server') {
