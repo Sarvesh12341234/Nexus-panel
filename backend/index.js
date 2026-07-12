@@ -199,7 +199,8 @@ function ensureRepairAgentModelFresh() {
   const signature = `v${REPAIR_AGENT_MODEL_VERSION}:${REPAIR_AGENT_PARAMETER_COUNT}:${knowledgeStatus().rules}:${knowledgeStatus().diagnosticSignals}`;
   const previous = settingValue('repair_agent_model_signature', '');
   if (previous === signature) return { reset: false, signature };
-  db.transaction(() => {
+  db.exec('BEGIN IMMEDIATE');
+  try {
     db.prepare('DELETE FROM repair_agent_weights').run();
     db.prepare('DELETE FROM repair_agent_episodes').run();
     db.prepare('DELETE FROM repair_agent_plans').run();
@@ -208,7 +209,11 @@ function ensureRepairAgentModelFresh() {
     db.prepare('DELETE FROM repair_web_cache').run();
     setSettingValue('repair_agent_model_signature', signature);
     setSettingValue('repair_agent_model_reset_at', String(Date.now()));
-  })();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
   repairAgent.resetModel();
   return { reset: true, signature, previous };
 }
