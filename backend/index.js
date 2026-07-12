@@ -392,9 +392,10 @@ function startLocalFramePush(server, session) {
   if (session.framePushChild && !session.framePushChild.killed) return;
   const readiness = localFramePushReadiness();
   if (!readiness.ok) {
-    session.rendererStatus = 'capture-unavailable';
-    session.rendererMessage = readiness.message;
-    session.message = `${session.message || 'Live spectate started.'} ${readiness.message}`;
+    session.rendererMode = 'bedrock-packet-renderer';
+    session.rendererStatus = 'packet-renderer';
+    session.rendererMessage = `${readiness.message} NexusPanel is using the headless packet renderer instead.`;
+    session.message = `${session.message || 'Live spectate started.'} Headless packet renderer is active.`;
     appendLog(server.id, `[NexusPanel] Live Spectate local video capture unavailable: ${readiness.message}`);
     return;
   }
@@ -605,13 +606,13 @@ function spectateSessionPayload(server, req = null) {
     pid: session?.child?.pid || 0,
     botName: session?.botName || spectateBotName(server),
     authMode: session?.authMode || spectateAuthMode(server),
-    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-frame-push'),
-    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'waiting-for-frame-push'),
+    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-packet-renderer'),
+    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'packet-renderer'),
     rendererPort: session?.rendererPort || (server.type === 'java' ? spectateRendererPort(server) : 0),
     rendererUrl: spectateRendererUrl(server, session, req),
     rendererMessage: session?.rendererMessage || (server.type === 'java'
       ? 'Java screenshare renderer starts after the bot spawns. Install prismarine-viewer if it stays unavailable.'
-      : 'Bedrock protocol bots can join but cannot render video. Start the real frame-push client stream to show gameplay pixels.'),
+      : 'Headless Bedrock packet renderer is active. Real frame-push video will replace it if a client capture becomes available.'),
     clientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
     framePushActive,
     framePushUpdatedAt: frameFeed?.updatedAt || 0,
@@ -646,18 +647,18 @@ function startSpectateSession(server, req = null) {
       updatedAt: Date.now(),
       botName,
       authMode: spectateAuthMode(server),
-      rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-frame-push',
-      rendererStatus: server.type === 'java' ? 'waiting' : 'waiting-for-frame-push',
+      rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-packet-renderer',
+      rendererStatus: server.type === 'java' ? 'waiting' : 'packet-renderer',
       rendererPort: server.type === 'java' ? spectateRendererPort(server) : 0,
       rendererMessage: server.type === 'bedrock'
-        ? 'The Bedrock spectate account is already joined. Start the real frame-push client stream to show video.'
+        ? 'The Bedrock spectate account is already joined. Headless packet renderer is active; real frame-push video will replace it if available.'
         : 'The spectate account is already joined.',
       target: botName,
       players: [botName],
       entities: [],
       world: sanitizeSpectateWorld({}),
       message: server.type === 'bedrock'
-        ? `${botName} is already in the server. No duplicate bot was started; waiting for real frame-push video.`
+        ? `${botName} is already in the server. No duplicate bot was started; headless packet renderer is active.`
         : `${botName} is already in the server. No duplicate bot was started.`,
     };
     spectateSessions.set(Number(server.id), payload);
@@ -707,12 +708,12 @@ function startSpectateSession(server, req = null) {
     updatedAt: Date.now(),
     botName: config.username,
     authMode: config.auth,
-    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-frame-push',
-    rendererStatus: server.type === 'java' ? 'starting' : 'waiting-for-frame-push',
+    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-packet-renderer',
+    rendererStatus: server.type === 'java' ? 'starting' : 'packet-renderer',
     rendererPort: config.rendererPort,
     rendererMessage: server.type === 'java'
       ? `Starting Java first-person renderer on port ${config.rendererPort}...`
-      : 'Bedrock bot is only the spectator account. Start frame push from a real Bedrock client to show video.',
+      : 'Using headless Bedrock packet renderer. Real frame-push video will replace it if a client capture becomes available.',
     target: players[0] || '',
     players,
     entities: [],

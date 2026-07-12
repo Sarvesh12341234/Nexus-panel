@@ -249,16 +249,6 @@ function startBedrockBot(config) {
     }
     send('status', { status: 'connected', target: config.username, message: `Bedrock spectate bot joined ${config.host}:${config.port}.` });
     publishPlayers();
-    setTimeout(() => {
-      try {
-        client.queue('command_request', {
-          command: `/gamemode spectator ${config.username}`,
-          origin: { type: 0, uuid: '', request_id: '' },
-          internal: false,
-          version: 66,
-        });
-      } catch {}
-    }, 1200);
   };
 
   client.once('join', markConnected);

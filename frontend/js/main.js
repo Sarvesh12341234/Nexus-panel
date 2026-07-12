@@ -1960,14 +1960,7 @@ function renderSpectateSurface(data) {
     `;
   }
   if (data.serverType === 'bedrock') {
-    return `
-      <div class="spectate-video spectate-empty-video">
-        <div>
-          <strong>No real spectator-client video connected</strong>
-          <span>Bedrock protocol bots do not output pixels. Start a real Bedrock client capture and push frames to NexusPanel.</span>
-        </div>
-      </div>
-    `;
+    return '<canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="NexusPanel Bedrock packet-rendered spectate video"></canvas>';
   }
   return '<canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>';
 }
@@ -2013,13 +2006,10 @@ function syncSpectateSurface(data) {
     }
     return;
   }
-  if (!canvas && data.serverType !== 'bedrock') {
+  if (!canvas) {
     surface.innerHTML = renderSpectateSurface(data);
     const server = activeServer();
     if (server) startSpectateVideo(server.id);
-  } else if (data.serverType === 'bedrock' && !surface.querySelector('.spectate-empty-video')) {
-    stopSpectateVideo();
-    surface.innerHTML = renderSpectateSurface(data);
   }
 }
 
@@ -2042,11 +2032,13 @@ function updateSpectateLiveDom(data) {
   setText('[data-spectate-bot]', data.botName || 'live-update');
   setText('[data-spectate-target]', data.target || 'Overview');
   setText('[data-spectate-pid]', data.pid ? String(Number(data.pid)) : '-');
-  setText('[data-spectate-message]', data.error || (data.framePushActive ? 'Real spectator-client frame stream is active.' : data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
+  setText('[data-spectate-message]', data.error || (data.framePushActive ? 'Real spectator-client frame stream is active.' : data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.serverType === 'bedrock' ? 'Headless Bedrock packet renderer is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
   const detail = panel.querySelector('[data-spectate-detail]');
   if (detail) {
     detail.textContent = data.framePushActive
       ? `Frame stream updated ${data.framePushUpdatedAt ? new Date(data.framePushUpdatedAt).toLocaleTimeString() : 'now'}`
+      : data.serverType === 'bedrock'
+      ? (data.rendererMessage || 'Rendering live bot packets in the browser. A real client capture will replace this automatically when available.')
       : data.packageInstalled
       ? `${data.host || '127.0.0.1'}:${Number(data.port || 0)} - ${data.botName || 'live-update'} - ${(data.authMode || 'offline')} auth`
       : `Install inside /opt/nexuspanel: ${data.installCommand || 'npm install mineflayer'}`;
