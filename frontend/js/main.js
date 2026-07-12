@@ -21,7 +21,6 @@ const state = {
   statusRefreshAt: 0,
   consolePollAt: {},
   consoleMetricsAt: {},
-  timelineAt: {},
   presenceAt: 0,
   serverStatusSignature: '',
 };
@@ -74,7 +73,6 @@ const elements = {
   consoleBox: document.querySelector('#consoleBox'),
   consoleMetrics: document.querySelector('#consoleMetrics'),
   presencePanel: document.querySelector('#presencePanel'),
-  timelinePanel: document.querySelector('#timelinePanel'),
   commandForm: document.querySelector('#commandForm'),
   serverConfigForm: document.querySelector('#serverConfigForm'),
   adminServerAssign: document.querySelector('#adminServerAssign'),
@@ -1848,7 +1846,6 @@ async function renderConsole() {
   if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
   if (metricsBundle) renderConsoleMetrics(server, metricsBundle[0], metricsBundle[1]);
   renderPresence(server).catch(() => {});
-  renderTimeline(server).catch(() => {});
 }
 
 function appendConsoleImmediate(line) {
@@ -1872,33 +1869,6 @@ async function renderPresence(server) {
   elements.presencePanel.innerHTML = users.length
     ? users.map((user) => `<div class="plugin-row"><div><strong>${escapeHtml(user.name || user.email)}</strong><div class="muted">Viewing ${escapeHtml(user.view || 'panel')} now</div></div><span class="badge is-on">Live</span></div>`).join('')
     : '<div class="plugin-row"><div><strong>Live collaborators</strong><div class="muted">No other owner/admin is viewing this server right now.</div></div><span class="badge">Solo</span></div>';
-}
-
-async function renderTimeline(server, force = false) {
-  if (!elements.timelinePanel || !server || !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS)) {
-    if (elements.timelinePanel) elements.timelinePanel.innerHTML = '';
-    return;
-  }
-  const now = Date.now();
-  if (!force && now - Number(state.timelineAt[server.id] || 0) < 9000) return;
-  state.timelineAt[server.id] = now;
-  const data = await api(`/api/servers/${server.id}/timeline`).catch(() => ({ events: [] }));
-  const events = (data.events || []).slice(0, 5);
-  elements.timelinePanel.innerHTML = `
-    <div class="plugin-row">
-      <div><strong>Server Time Machine</strong><div class="muted">${events.length ? `${events.length} recent restore point(s)` : 'No restore points yet.'}</div></div>
-      <button class="secondary" type="button" data-action="timeline-snapshot">Create point</button>
-    </div>
-    ${events.map((event) => `
-      <div class="plugin-row">
-        <div><strong>${escapeHtml(event.title || 'Timeline point')}</strong><div class="muted">${escapeHtml(formatPanelDate(event.createdAt))} - ${(event.changedFiles || []).length} tracked file(s) - ${(event.plugins || []).length} plugin(s)</div></div>
-        <div class="row-actions">
-          ${(event.changedFiles || []).some((file) => file.path === 'server.properties' && file.content) ? `<button class="secondary" type="button" data-action="timeline-restore-properties" data-event-id="${event.id}">Restore properties</button>` : '<span class="badge">Tracked</span>'}
-          <button class="danger" type="button" data-action="timeline-delete" data-event-id="${event.id}">Delete</button>
-        </div>
-      </div>
-    `).join('')}
-  `;
 }
 
 function syncConsoleActionButtons(server, status) {
@@ -3650,38 +3620,6 @@ document.addEventListener('click', async (event) => {
         CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.CONSOLE_COMMAND,
         CAPABILITIES.PROPERTIES_MANAGE, CAPABILITIES.WHITELIST_MANAGE,
       ]);
-      return;
-    }
-    if (action === 'timeline-snapshot') {
-      const server = activeServer();
-      if (!server) return;
-      await api(`/api/servers/${server.id}/timeline/snapshot`, {
-        method: 'POST',
-        body: JSON.stringify({ title: 'Manual console checkpoint' }),
-      });
-      state.timelineAt[server.id] = 0;
-      await renderTimeline(server, true);
-      showToast('Timeline point created.');
-      return;
-    }
-    if (action === 'timeline-restore-properties') {
-      const server = activeServer();
-      if (!server) return;
-      if (!confirm('Restore server.properties from this timeline point? Stop the server first.')) return;
-      await api(`/api/servers/${server.id}/timeline/${actionTarget.dataset.eventId}/restore-properties`, { method: 'POST' });
-      state.timelineAt[server.id] = 0;
-      await renderTimeline(server, true);
-      showToast('server.properties restored from timeline.');
-      return;
-    }
-    if (action === 'timeline-delete') {
-      const server = activeServer();
-      if (!server) return;
-      if (!confirm('Delete this timeline point?')) return;
-      await api(`/api/servers/${server.id}/timeline/${actionTarget.dataset.eventId}`, { method: 'DELETE' });
-      state.timelineAt[server.id] = 0;
-      await renderTimeline(server, true);
-      showToast('Timeline point deleted.');
       return;
     }
     if (action === 'ddos-scan') {

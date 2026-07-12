@@ -2373,6 +2373,63 @@ async function applyAgentOptimizations(server, root, analysis) {
   return { applied, skipped: [] };
 }
 
+function compareVersionParts(left, right) {
+  const a = Array.isArray(left) ? left.map(Number) : String(left || '').split('.').map(Number);
+  const b = Array.isArray(right) ? right.map(Number) : String(right || '').split('.').map(Number);
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    const av = Number.isFinite(a[index]) ? a[index] : 0;
+    const bv = Number.isFinite(b[index]) ? b[index] : 0;
+    if (av > bv) return 1;
+    if (av < bv) return -1;
+  }
+  return 0;
+}
+
+function acceptedBedrockEngineVersion(logs) {
+  const text = (Array.isArray(logs) ? logs : []).join('\n');
+  const accepted = text.match(/highest value we accept is ['"]?(\d+\.\d+\.\d+)['"]?/i)?.[1];
+  if (accepted) return accepted;
+  const version = text.match(/\bVersion:\s*(\d+\.\d+\.\d+)/i)?.[1];
+  return version || '';
+}
+
+async function quarantineIncompatibleBedrockPacks(server, root, logs) {
+  if (server.type !== 'bedrock' || runtimeStatus(server.id) === 'online') return { actions: [], warnings: [] };
+  const accepted = acceptedBedrockEngineVersion(logs);
+  if (!accepted) return { actions: [], warnings: ['Bedrock pack scan skipped because the accepted engine version was not visible in recent logs.'] };
+  const actions = [];
+  const warnings = [];
+  const queue = [root];
+  let scanned = 0;
+  while (queue.length && scanned < 2500 && actions.length < 20) {
+    const directory = queue.shift();
+    const entries = await fs.promises.readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      scanned += 1;
+      const absolute = assertInside(root, path.join(directory, entry.name));
+      if (entry.isDirectory()) {
+        const lower = entry.name.toLowerCase();
+        if (!['db', 'runtime', 'software', 'backups', 'logs'].includes(lower) && !lower.includes('.disabled-')) queue.push(absolute);
+        continue;
+      }
+      if (entry.name !== 'manifest.json') continue;
+      const manifest = parseJsonObject(await fs.promises.readFile(absolute, 'utf8').catch(() => '{}'));
+      const required = manifest?.header?.min_engine_version;
+      if (!Array.isArray(required) || compareVersionParts(required, accepted) <= 0) continue;
+      const packDir = path.dirname(absolute);
+      const disabled = assertInside(path.dirname(packDir), `${packDir}.disabled-${Date.now()}`);
+      await fs.promises.rename(packDir, disabled);
+      const requiredText = required.join('.');
+      actions.push(`Quarantined incompatible Bedrock pack ${path.basename(packDir)} (${requiredText} > ${accepted}).`);
+      appendLog(server.id, `[NexusPanel] Repair agent quarantined incompatible Bedrock pack: ${displayPath(packDir)} requires ${requiredText}, server accepts ${accepted}.`);
+      break;
+    }
+  }
+  if (!actions.length) warnings.push(`No incompatible Bedrock pack manifest was found for accepted engine ${accepted}.`);
+  return { actions, warnings };
+}
+
 async function runServerRepair(server, software, { applyOptimizations = false } = {}) {
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const actions = [];
@@ -2434,6 +2491,16 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
       detail: properties.repaired ? `Repaired ${properties.issues.length || 1} issue(s).` : 'Syntax and values validated.',
     });
     if (properties.repaired) actions.push(`Repaired server.properties (${properties.issues.join(' ') || 'created missing file'}).`);
+  }
+  if (server.type === 'bedrock' && diagnostics.some((item) => item.id === 'bedrock-pack-version' || item.id === 'bedrock-world-native-crash')) {
+    const packRepair = await quarantineIncompatibleBedrockPacks(server, root, consoleLogs(server.id));
+    packRepair.actions.forEach((item) => actions.push(item));
+    packRepair.warnings.forEach((item) => warnings.push(item));
+    checks.push({
+      name: 'Bedrock pack compatibility',
+      ok: Boolean(packRepair.actions.length),
+      detail: packRepair.actions[0] || packRepair.warnings[0] || 'No incompatible packs found.',
+    });
   }
 
   const queue = [root];
@@ -4285,45 +4352,8 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
   });
 });
 
-app.get('/api/servers/:id/timeline', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  res.json({ events: timelineRows(server.id) });
-});
-
-app.post('/api/servers/:id/timeline/snapshot', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
-  const event = await createTimelineEvent(server, {
-    type: 'manual',
-    title: String(req.body.title || 'Manual timeline point').slice(0, 120),
-    detail: String(req.body.detail || '').slice(0, 400),
-    userId: req.user?.id || null,
-  });
-  logFixed({ serverId: server.id, category: 'timeline', title: 'Timeline point created', detail: event.server?.name || server.name, source: 'time-machine' });
-  res.status(201).json({ ok: true, event, events: timelineRows(server.id) });
-}));
-
-app.post('/api/servers/:id/timeline/:eventId/restore-properties', requirePermission(capabilities.PROPERTIES_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
-  if (runtimeStatus(server.id) === 'online') return res.status(409).json({ error: 'Stop the server before restoring timeline properties.' });
-  const row = db.prepare('SELECT * FROM server_timeline_events WHERE id = ? AND server_id = ?').get(Number(req.params.eventId), server.id);
-  if (!row) return res.status(404).json({ error: 'Timeline point not found.' });
-  await safeTimelinePoint(server, req, 'Before timeline properties restore', `Restoring from event ${row.id}`);
-  const manifest = parseJsonObject(row.manifest_json);
-  const properties = (manifest.files || []).find((file) => file.path === 'server.properties' && file.content);
-  if (!properties) return res.status(404).json({ error: 'This timeline point does not include server.properties content.' });
-  const target = assertInside(ensureServerDirs(server), path.join(ensureServerDirs(server), 'server.properties'));
-  await fs.promises.writeFile(target, properties.content, { encoding: 'utf8', mode: 0o644 });
-  appendLog(server.id, `[NexusPanel] Time Machine restored server.properties from timeline event ${row.id}.`);
-  res.json({ ok: true, events: timelineRows(server.id) });
-}));
-
-app.delete('/api/servers/:id/timeline/:eventId', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  const result = db.prepare('DELETE FROM server_timeline_events WHERE id = ? AND server_id = ?')
-    .run(Number(req.params.eventId), server.id);
-  if (!result.changes) return res.status(404).json({ error: 'Timeline point not found.' });
-  logFixed({ serverId: server.id, category: 'timeline', title: 'Timeline point deleted', detail: `Event ${req.params.eventId}`, source: 'time-machine' });
-  res.json({ ok: true, events: timelineRows(server.id) });
+app.use('/api/servers/:id/timeline', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
+  res.status(410).json({ error: 'Server Time Machine has been removed from this build.' });
 });
 
 app.post('/api/presence', requireAuth, (req, res) => {

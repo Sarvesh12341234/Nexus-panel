@@ -4,15 +4,14 @@
 
 ### Added
 
-- Server Time Machine records lightweight restore points before risky server, plugin, backup, whitelist, property, and file actions.
-- Timeline points include selected config hashes, small `server.properties` content, plugin inventory, actor, timestamp, and server allocation metadata.
-- Console timeline can restore `server.properties` while the server is offline.
 - Live collaborator presence shows when another owner/admin is viewing the same server.
 - DDoS Guard adds a bounded 999,999-parameter defensive classifier for TCP SYN pressure, UDP/Bedrock floods, connection fanout, bandwidth saturation, conntrack pressure, and firewall misconfiguration.
 - DDoS Guard exposes local VPS evidence and owner-reviewed mitigation commands without silently changing firewall rules.
 - Normal edition now includes ngrok token storage, playit.gg setup guidance, no-login quick tunnel command generation, and best-effort installer downloads for ngrok/playit.
-- Console command echoes redraw immediately, network speed testing uses a bounded quick probe, Time Machine points are manual by default with delete support, and scheduled backups pause during crash storms until stable runtime resumes.
+- Console command echoes redraw immediately, network speed testing uses a bounded quick probe, and scheduled backups pause during crash storms until stable runtime resumes.
 - Repair intelligence now recognizes Bedrock native crashes during world database open and validates learned fixes only after stable runtime.
+- Repair & Diagnose now quarantines incompatible Bedrock packs when `min_engine_version` exceeds the installed Bedrock server version.
+- Server Time Machine/create point UI and API were removed from this build.
 - Repair AI now resets stale learned weights, episodes, playbooks, terminal observations, and web cache when the model signature changes, then starts fresh with the upgraded brain.
 - Repair web research now uses broader natural-language intent detection, DuckDuckGo instant answers, a Minecraft-focused GitHub issue search, and more cached results.
 - Repair terminal diagnostics now expose more audited read-only tools for filesystem, archive, DNS, package, process, and network debugging.

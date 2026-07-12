@@ -73,21 +73,19 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 
 ## v2.0.0 Editions
 
-- `normal-v2.0.0`: advanced solo panel with manual Server Time Machine, normal-only tunnel helpers, DDoS Guard, faster console metrics, backups, plugin/file/software managers, shared admin visibility, and host-only features hidden.
-- `host-v2.0.0`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, assigned-user server isolation, Server Time Machine, and DDoS Guard.
+- `normal-v2.0.0`: advanced solo panel with normal-only tunnel helpers, DDoS Guard, faster console metrics, backups, plugin/file/software managers, shared admin visibility, and host-only features hidden.
+- `host-v2.0.0`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, assigned-user server isolation, backups, and DDoS Guard.
 - The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v2.0.0` or `host-v2.0.0`.
 - The update repository is locked to `Sarvesh12341234/Nexus-panel`; users cannot change it from the panel UI.
 - If an update finds server folders such as `5-summa` missing from SQLite, NexusPanel recovers them into the server list on boot.
 
-## v2.0.0 Time Machine + Protection
+## v2.0.0 Protection
 
-- Server Time Machine records lightweight restore points before launches, repair, EULA changes, property edits, whitelist edits, plugin registration, backup restores, file edits, uploads, moves, deletes, and archive extraction.
-- Timeline points track server settings, selected config hashes, `server.properties` content when small enough, plugin inventory, actor, and timestamp.
-- Offline `server.properties` restore is available directly from the Console timeline.
 - Live collaborators show when another owner/admin is viewing the same server.
 - DDoS Guard adds a bounded 999,999-parameter defensive classifier for TCP SYN pressure, UDP/Bedrock floods, connection fanout, bandwidth drops, conntrack pressure, and firewall misconfiguration signals.
 - DDoS Guard uses local VPS telemetry and presents owner-reviewed mitigation commands instead of silently changing firewall rules.
 - Normal edition settings include ngrok token storage, playit.gg setup guidance, and no-login quick tunnel command generation for temporary Java testing.
+- Repair & Diagnose quarantines incompatible Bedrock packs when recent logs show `min_engine_version` is higher than the installed server supports.
 - Console metrics now read Nexus-Mark cgroups or full process trees, so Java/Bedrock child memory is counted instead of only the wrapper process.
 - Console logs and metrics load together and refresh with shorter throttles to reduce the slow first-open delay.
 
