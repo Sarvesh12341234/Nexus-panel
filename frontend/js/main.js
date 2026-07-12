@@ -1950,12 +1950,26 @@ function renderSpectateSurface(data) {
       <video class="spectate-video spectate-client-video" id="spectateClientVideo" autoplay muted playsinline></video>
     `;
   }
+  if (data.clientVideoUrl) {
+    return renderClientVideoUrl(data.clientVideoUrl);
+  }
   if (data.rendererUrl) {
     return `
       <iframe class="spectate-frame" src="${escapeHtml(data.rendererUrl)}" title="Live Minecraft renderer" loading="eager" allow="fullscreen"></iframe>
     `;
   }
   return '<canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>';
+}
+
+function isDirectVideoUrl(url) {
+  return /\.(?:mp4|webm|ogg|ogv|mov)(?:[?#].*)?$/i.test(String(url || ''));
+}
+
+function renderClientVideoUrl(url) {
+  if (isDirectVideoUrl(url)) {
+    return `<video class="spectate-video spectate-client-video" src="${escapeHtml(url)}" autoplay muted playsinline controls></video>`;
+  }
+  return `<iframe class="spectate-frame" src="${escapeHtml(url)}" title="Watch-only Minecraft client stream" loading="eager" allow="autoplay; fullscreen; encrypted-media; picture-in-picture"></iframe>`;
 }
 
 function attachSpectateClientVideo() {
@@ -1977,6 +1991,15 @@ function syncSpectateSurface(data) {
       surface.innerHTML = renderSpectateSurface(data);
     }
     attachSpectateClientVideo();
+    return;
+  }
+  if (data.clientVideoUrl) {
+    const directVideo = isDirectVideoUrl(data.clientVideoUrl);
+    const expectedSource = directVideo ? video?.getAttribute('src') : iframe?.getAttribute('src');
+    if (expectedSource !== data.clientVideoUrl) {
+      stopSpectateVideo();
+      surface.innerHTML = renderClientVideoUrl(data.clientVideoUrl);
+    }
     return;
   }
   if (data.rendererUrl) {
@@ -2049,7 +2072,7 @@ function updateSpectateLiveDom(data) {
   setText('[data-spectate-bot]', data.botName || 'live-update');
   setText('[data-spectate-target]', data.target || 'Overview');
   setText('[data-spectate-pid]', data.pid ? String(Number(data.pid)) : '-');
-  setText('[data-spectate-message]', data.error || data.rendererMessage || data.message || 'Live spectate ready.');
+  setText('[data-spectate-message]', data.error || (data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
   const detail = panel.querySelector('[data-spectate-detail]');
   if (detail) {
     detail.textContent = data.packageInstalled
@@ -2607,6 +2630,7 @@ function renderSettings() {
       <label class="switch"><input name="liveSpectateEnabled" type="checkbox" ${settings.liveSpectateEnabled ? 'checked' : ''}><span></span>Live spectate section</label>
       <label>Java spectate auth <select name="spectateJavaAuth"><option value="offline" ${settings.spectateJavaAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateJavaAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
       <label>Bedrock spectate auth <select name="spectateBedrockAuth"><option value="offline" ${settings.spectateBedrockAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateBedrockAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
+      <label>Watch-only client video URL <input name="spectateClientVideoUrl" type="url" value="${escapeHtml(settings.spectateClientVideoUrl || '')}" placeholder="https://your-stream.example/watch"></label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '2.0.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v2.0.0"></label>

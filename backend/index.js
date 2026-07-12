@@ -245,6 +245,7 @@ function panelSettingsPayload(user = null) {
     liveSpectateEnabled: settingValue('live_spectate_enabled', '0') === '1',
     spectateJavaAuth: settingValue('spectate_java_auth', process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline'),
     spectateBedrockAuth: settingValue('spectate_bedrock_auth', process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline'),
+    spectateClientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
     normalTunnelsEnabled: edition === 'normal',
     ngrokConfigured: edition === 'normal' && Boolean(settingValue('ngrok_auth_token', '')),
     ngrokAuthtokenPreview: edition === 'normal' && settingValue('ngrok_auth_token', '') ? `${settingValue('ngrok_auth_token', '').slice(0, 6)}....${settingValue('ngrok_auth_token', '').slice(-4)}` : '',
@@ -418,6 +419,7 @@ function spectateSessionPayload(server, req = null) {
     rendererMessage: session?.rendererMessage || (server.type === 'java'
       ? 'Java screenshare renderer starts after the bot spawns. Install prismarine-viewer if it stays unavailable.'
       : 'Bedrock custom voxel renderer uses live chunk, block update, and entity packets.'),
+    clientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
     target: session?.target || players[0] || '',
     players,
     entities: sanitizeSpectateEntities(session?.entities || []),
@@ -3923,6 +3925,14 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   const spectateBedrockAuth = String(req.body.spectateBedrockAuth || settingValue('spectate_bedrock_auth', 'offline')).trim().toLowerCase();
   if (['offline', 'microsoft'].includes(spectateJavaAuth)) setSettingValue('spectate_java_auth', spectateJavaAuth);
   if (['offline', 'microsoft'].includes(spectateBedrockAuth)) setSettingValue('spectate_bedrock_auth', spectateBedrockAuth);
+  const spectateClientVideoUrl = String(req.body.spectateClientVideoUrl || '').trim();
+  if (spectateClientVideoUrl) {
+    const parsed = new URL(spectateClientVideoUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+      return res.status(400).json({ error: 'Client video URL must be HTTP or HTTPS without embedded credentials.' });
+    }
+  }
+  setSettingValue('spectate_client_video_url', spectateClientVideoUrl);
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
   if (publicBaseUrl) {
