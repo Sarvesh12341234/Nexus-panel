@@ -2055,6 +2055,10 @@ function updateSpectateLiveDom(data) {
     if (players) players.innerHTML = renderSpectatePlayerButtons(data);
   }
   syncSpectateSurface(data);
+  const canvas = panel.querySelector('#spectateVideo');
+  if (canvas && state.activeServerId) {
+    startSpectateVideo(state.activeServerId);
+  }
 }
 
 function closeSpectateStream() {
@@ -2467,6 +2471,47 @@ function roundRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
+function prepareSpectateCanvas(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const targetWidth = Math.max(640, Math.round(rect.width || 1280));
+  const targetHeight = Math.max(360, Math.round(targetWidth * 9 / 16));
+  if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+  }
+}
+
+function drawSpectateFailure(canvas, error) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  prepareSpectateCanvas(canvas);
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.fillStyle = '#020617';
+  ctx.fillRect(0, 0, width, height);
+  const glow = ctx.createRadialGradient(width / 2, height / 2, 10, width / 2, height / 2, width * 0.58);
+  glow.addColorStop(0, 'rgba(65, 230, 155, 0.22)');
+  glow.addColorStop(1, 'rgba(65, 230, 155, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#41e69b';
+  ctx.font = '800 22px Inter, Segoe UI, Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('NexusVision renderer fault', width / 2, height / 2 - 24);
+  ctx.fillStyle = '#cbd5e1';
+  ctx.font = '600 14px Inter, Segoe UI, Arial';
+  ctx.fillText(String(error?.message || error || 'Unknown render error').slice(0, 120), width / 2, height / 2 + 8);
+}
+
+function drawSpectateFrame(canvas, data, elapsed) {
+  prepareSpectateCanvas(canvas);
+  try {
+    drawSpectateVideo(canvas, data, elapsed);
+  } catch (error) {
+    drawSpectateFailure(canvas, error);
+  }
+}
+
 function startSpectateVideo(serverId) {
   const canvas = document.querySelector('#spectateVideo');
   if (!canvas) return stopSpectateVideo();
@@ -2475,13 +2520,15 @@ function startSpectateVideo(serverId) {
     spectateAnimation.serverId = serverId;
     spectateAnimation.startedAt = performance.now();
   }
+  drawSpectateFrame(canvas, state.spectateData || {}, performance.now() - spectateAnimation.startedAt);
   if (spectateAnimation.id) return;
   const tick = (now) => {
-    if (state.activeView !== 'spectate' || !document.querySelector('#spectateVideo')) {
+    const liveCanvas = document.querySelector('#spectateVideo');
+    if (state.activeView !== 'spectate' || !liveCanvas) {
       stopSpectateVideo();
       return;
     }
-    drawSpectateVideo(canvas, state.spectateData || {}, now - spectateAnimation.startedAt);
+    drawSpectateFrame(liveCanvas, state.spectateData || {}, now - spectateAnimation.startedAt);
     spectateAnimation.id = window.requestAnimationFrame(tick);
   };
   spectateAnimation.id = window.requestAnimationFrame(tick);
