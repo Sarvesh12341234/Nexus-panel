@@ -340,6 +340,123 @@ function clearSpectateFeed(serverId) {
   feed.updatedAt = 0;
 }
 
+function localFramePushPython() {
+  const configured = String(process.env.NEXUSPANEL_PYTHON || '').trim();
+  if (configured) return { command: configured, prefixArgs: [] };
+  return process.platform === 'win32'
+    ? { command: 'py', prefixArgs: ['-3'] }
+    : { command: 'python3', prefixArgs: [] };
+}
+
+function localFramePushReadiness() {
+  const scriptPath = path.join(__dirname, '..', 'tools', 'spectate_frame_push.py');
+  if (!fs.existsSync(scriptPath)) {
+    return { ok: false, scriptPath, message: 'Frame push helper is missing from tools/spectate_frame_push.py.' };
+  }
+  if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    return {
+      ok: false,
+      scriptPath,
+      message: 'VPS local capture cannot start because no graphical DISPLAY/WAYLAND_DISPLAY is available. A Bedrock server/bot has no video output by itself.',
+    };
+  }
+  const python = localFramePushPython();
+  const importCheck = spawnSync(python.command, [...python.prefixArgs, '-c', 'import mss, PIL, requests'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (importCheck.error || importCheck.status !== 0) {
+    return {
+      ok: false,
+      scriptPath,
+      message: `Install frame capture dependencies on the panel machine: ${process.platform === 'win32' ? 'py -3' : 'python3'} -m pip install mss pillow requests`,
+    };
+  }
+  return { ok: true, scriptPath, python };
+}
+
+function stopLocalFramePush(session) {
+  if (!session?.framePushChild) return;
+  try {
+    if (!session.framePushChild.killed) session.framePushChild.kill();
+  } catch {}
+  session.framePushChild = null;
+}
+
+function startLocalFramePush(server, session) {
+  if (server.type !== 'bedrock') return;
+  if (process.env.NEXUSPANEL_SPECTATE_AUTO_CAPTURE === '0') {
+    session.rendererMessage = 'Automatic VPS frame capture is disabled by NEXUSPANEL_SPECTATE_AUTO_CAPTURE=0.';
+    return;
+  }
+  if (session.framePushChild && !session.framePushChild.killed) return;
+  const readiness = localFramePushReadiness();
+  if (!readiness.ok) {
+    session.rendererStatus = 'capture-unavailable';
+    session.rendererMessage = readiness.message;
+    session.message = `${session.message || 'Live spectate started.'} ${readiness.message}`;
+    appendLog(server.id, `[NexusPanel] Live Spectate local video capture unavailable: ${readiness.message}`);
+    return;
+  }
+  const fps = clampNumber(process.env.NEXUSPANEL_SPECTATE_CAPTURE_FPS, 1, 30, 12);
+  const quality = clampNumber(process.env.NEXUSPANEL_SPECTATE_CAPTURE_QUALITY, 35, 95, 72);
+  const monitor = clampNumber(process.env.NEXUSPANEL_SPECTATE_CAPTURE_MONITOR, 1, 16, 1);
+  const url = `http://127.0.0.1:${port}/api/servers/${server.id}/spectate/frame-push`;
+  const args = [
+    ...readiness.python.prefixArgs,
+    readiness.scriptPath,
+    '--url', url,
+    '--token', spectateFramePushToken(),
+    '--fps', String(fps),
+    '--quality', String(quality),
+    '--monitor', String(monitor),
+  ];
+  const region = String(process.env.NEXUSPANEL_SPECTATE_CAPTURE_REGION || '').trim();
+  if (region) args.push('--region', region);
+  const child = spawn(readiness.python.command, args, {
+    cwd: path.join(__dirname, '..'),
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  session.framePushChild = child;
+  session.rendererStatus = 'capture-starting';
+  session.rendererMessage = 'Starting automatic VPS client capture for Bedrock Live Spectate...';
+  appendLog(server.id, `[NexusPanel] Live Spectate automatic frame capture starting on monitor ${monitor} at ${fps} FPS.`);
+  child.stdout.on('data', (chunk) => {
+    const text = String(chunk).trim().slice(-1200);
+    if (text) appendLog(server.id, `[NexusPanel FramePush] ${text}`);
+    if (/Live frames sent:/i.test(text)) {
+      session.rendererStatus = 'capture-running';
+      session.rendererMessage = 'Automatic VPS frame capture is pushing real client frames.';
+      session.updatedAt = Date.now();
+    }
+  });
+  child.stderr.on('data', (chunk) => {
+    const text = String(chunk).trim().slice(-1200);
+    if (text) {
+      session.rendererStatus = 'capture-error';
+      session.rendererMessage = text;
+      session.updatedAt = Date.now();
+      appendLog(server.id, `[NexusPanel FramePush] ${text}`);
+    }
+  });
+  child.on('error', (error) => {
+    if (session.framePushChild === child) session.framePushChild = null;
+    session.rendererStatus = 'capture-error';
+    session.rendererMessage = `Automatic VPS frame capture failed: ${error.message}`;
+    session.updatedAt = Date.now();
+    appendLog(server.id, `[NexusPanel] Live Spectate automatic frame capture failed: ${error.message}`);
+  });
+  child.on('exit', (code, signal) => {
+    if (session.framePushChild === child) session.framePushChild = null;
+    session.rendererStatus = code === 0 ? 'capture-stopped' : 'capture-error';
+    session.rendererMessage = `Automatic VPS frame capture exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
+    session.updatedAt = Date.now();
+    appendLog(server.id, `[NexusPanel] Live Spectate automatic frame capture exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`);
+  });
+}
+
 function spectateRendererPort(server) {
   const base = clampNumber(process.env.NEXUSPANEL_SPECTATE_VIEWER_PORT_BASE, 20000, 60000, 33000);
   return Math.min(65535, base + (Number(server.id) % 20000));
@@ -545,6 +662,7 @@ function startSpectateSession(server, req = null) {
     };
     spectateSessions.set(Number(server.id), payload);
     sendSpectateModeCommand(server, botName);
+    startLocalFramePush(server, payload);
     return spectateSessionPayload(server, req);
   }
   try {
@@ -602,6 +720,7 @@ function startSpectateSession(server, req = null) {
     message: `${bot.engine} detected. Connecting bot to 127.0.0.1:${config.port}...`,
   };
   spectateSessions.set(Number(server.id), payload);
+  startLocalFramePush(server, payload);
   payload.timeout = setTimeout(() => {
     const session = spectateSessions.get(Number(server.id));
     if (!session || session.status !== 'connecting') return;
@@ -668,6 +787,7 @@ function startSpectateSession(server, req = null) {
     const session = spectateSessions.get(Number(server.id));
     if (!session) return;
     if (session.timeout) clearTimeout(session.timeout);
+    stopLocalFramePush(session);
     session.status = 'stopped';
     session.updatedAt = Date.now();
     session.message = `Spectate bot exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
@@ -687,6 +807,7 @@ function stopSpectateSession(server) {
       } catch {}
     }, 1500).unref();
   }
+  stopLocalFramePush(session);
   spectateSessions.delete(Number(server.id));
   clearSpectateFeed(server.id);
   appendLog(server.id, '[NexusPanel] Live Spectate session stopped.');
@@ -698,6 +819,7 @@ function stopAllSpectateSessions(reason = 'Live Spectate was disabled.') {
     if (!server) {
       const session = spectateSessions.get(Number(serverId));
       if (session?.timeout) clearTimeout(session.timeout);
+      stopLocalFramePush(session);
       try { session?.child?.kill(); } catch {}
       spectateSessions.delete(Number(serverId));
       continue;
@@ -720,6 +842,7 @@ function pruneSpectateSessions() {
       else {
         const session = spectateSessions.get(Number(serverId));
         if (session?.timeout) clearTimeout(session.timeout);
+        stopLocalFramePush(session);
         try { session?.child?.kill(); } catch {}
         spectateSessions.delete(Number(serverId));
       }
