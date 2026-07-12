@@ -631,6 +631,8 @@ code {
 
 .spectate-video {
   min-height: 260px;
+  transform: translateZ(0);
+  will-change: contents;
 }
 
 .spectate-client-video {

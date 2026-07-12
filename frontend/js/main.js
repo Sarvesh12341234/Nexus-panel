@@ -2140,6 +2140,28 @@ function drawVoxelCube(ctx, x, y, size, height, palette) {
   poly(top, palette.top);
 }
 
+function colorChannel(value, amount) {
+  return Math.max(0, Math.min(255, Math.round(value * amount)));
+}
+
+function rgbShade(color, amount) {
+  return `rgb(${colorChannel(color[0], amount)}, ${colorChannel(color[1], amount)}, ${colorChannel(color[2], amount)})`;
+}
+
+function packetTerrainColor(column, seed) {
+  const density = Math.max(0, Math.min(1, Number(column.d || 0)));
+  const y = Number(column.y || 64);
+  const hash = spectateHash(`${column.x}:${column.z}:${Math.round(y)}:${seed}`);
+  const band = hash % 9;
+  if (y < 55) return [42, 93 + band * 3, 151 + band * 2];
+  if (density > 0.78) return [111 + band * 3, 116 + band * 2, 120 + band * 2];
+  if (density > 0.58) return [105 + band * 4, 82 + band * 2, 55 + band];
+  if (y > 94) return [213, 226, 229];
+  if (band < 3) return [74 + band * 7, 151 + band * 8, 75 + band * 4];
+  if (band < 6) return [120 + band * 3, 171 + band * 5, 79 + band * 2];
+  return [151 + band * 2, 122 + band * 2, 82 + band];
+}
+
 function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   const world = data.world || {};
   const chunks = Array.isArray(world.chunks) ? world.chunks : [];
@@ -2202,12 +2224,12 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     ctx.restore();
   };
 
-  const drawWireColumn = (column) => {
+  const drawSolidColumn = (column) => {
     const baseY = Number(column.y || 64);
     const heightY = Number(column.h || 4);
     const x = Number(column.x || 0);
     const z = Number(column.z || 0);
-    const size = 2;
+    const size = 2.15;
     const bottom = [
       project(x, baseY, z),
       project(x + size, baseY, z),
@@ -2221,27 +2243,39 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
       project(x, baseY + heightY, z + size),
     ];
     const density = Number(column.d || 0);
-    ctx.save();
-    ctx.globalAlpha = 0.28 + density * 0.62;
-    ctx.strokeStyle = '#f8fafc';
-    ctx.lineWidth = 1 + density;
-    const drawLoop = (points) => {
+    const baseColor = packetTerrainColor(column, seed);
+    const distance = Math.hypot(x - Number(focus.x || 0), z - Number(focus.z || 0));
+    const fog = Math.max(0.34, Math.min(1, 1 - distance / 170));
+    const alpha = Math.max(0.68, Math.min(0.98, 0.74 + density * 0.22)) * fog;
+    const poly = (points, color) => {
+      ctx.fillStyle = color;
       ctx.beginPath();
       points.forEach((point, index) => {
         if (index) ctx.lineTo(point.x, point.y);
         else ctx.moveTo(point.x, point.y);
       });
       ctx.closePath();
-      ctx.stroke();
+      ctx.fill();
     };
-    drawLoop(bottom);
-    drawLoop(top);
-    for (let index = 0; index < 4; index += 1) {
-      ctx.beginPath();
-      ctx.moveTo(bottom[index].x, bottom[index].y);
-      ctx.lineTo(top[index].x, top[index].y);
-      ctx.stroke();
-    }
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    const left = [top[3], top[2], bottom[2], bottom[3]];
+    const right = [top[1], top[2], bottom[2], bottom[1]];
+    const front = [top[0], top[1], bottom[1], bottom[0]];
+    poly(left, rgbShade(baseColor, 0.62));
+    poly(right, rgbShade(baseColor, 0.78));
+    poly(front, rgbShade(baseColor, 0.7));
+    poly(top, rgbShade(baseColor, 1.18));
+    ctx.globalAlpha = Math.min(0.38, alpha * 0.45);
+    ctx.strokeStyle = rgbShade(baseColor, 1.55);
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    top.forEach((point, index) => {
+      if (index) ctx.lineTo(point.x, point.y);
+      else ctx.moveTo(point.x, point.y);
+    });
+    ctx.closePath();
+    ctx.stroke();
     ctx.restore();
   };
 
@@ -2272,7 +2306,7 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     for (const column of sortedColumns) {
       const point = project(column.x, column.y, column.z);
       if (point.x < -100 || point.x > width + 100 || point.y < height * 0.08 || point.y > height + 120) continue;
-      drawWireColumn(column);
+      drawSolidColumn(column);
     }
   } else if (chunks.length) {
     visible.sort((a, b) => a.sort - b.sort);
@@ -2282,9 +2316,9 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
       const distance = Math.hypot(block.x - Number(focus.x || 0), block.z - Number(focus.z || 0));
       ctx.save();
       ctx.globalAlpha = Math.max(0.12, Math.min(0.62, 1 - distance / 120));
-      ctx.strokeStyle = '#f8fafc';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(point.x - 2, point.y - 2, 4, 4);
+      const color = packetTerrainColor(block, seed);
+      ctx.fillStyle = rgbShade(color, 1.08);
+      ctx.fillRect(point.x - 3, point.y - 3, 6, 6);
       ctx.restore();
     }
   }
@@ -2314,7 +2348,7 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   ctx.fillStyle = '#f8fafc';
   ctx.font = '700 13px Inter, Segoe UI, Arial';
   ctx.textAlign = 'left';
-  ctx.fillText('NexusVision packet constructor', width - 398, 56);
+  ctx.fillText('NexusVision GPU packet renderer', width - 398, 56);
   ctx.fillStyle = '#cbd5e1';
   ctx.font = '13px Inter, Segoe UI, Arial';
   ctx.fillText(`chunks ${chunks.length}  columns ${geometryColumns.length}  packets ${Number(packetStats.total || 0)}`, width - 398, 80);
@@ -2344,7 +2378,7 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
 }
 
 function drawSpectateVideo(canvas, data, elapsed) {
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
   if (!ctx) return;
   const width = canvas.width;
   const height = canvas.height;
