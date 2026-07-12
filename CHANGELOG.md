@@ -8,8 +8,11 @@
 - Timeline points include selected config hashes, small `server.properties` content, plugin inventory, actor, timestamp, and server allocation metadata.
 - Console timeline can restore `server.properties` while the server is offline.
 - Live collaborator presence shows when another owner/admin is viewing the same server.
-- DDoS Guard adds a bounded 199,997-parameter defensive classifier for TCP SYN pressure, UDP/Bedrock floods, connection fanout, bandwidth saturation, conntrack pressure, and firewall misconfiguration.
+- DDoS Guard adds a bounded 999,999-parameter defensive classifier for TCP SYN pressure, UDP/Bedrock floods, connection fanout, bandwidth saturation, conntrack pressure, and firewall misconfiguration.
 - DDoS Guard exposes local VPS evidence and owner-reviewed mitigation commands without silently changing firewall rules.
+- Normal edition now includes ngrok token storage, playit.gg setup guidance, no-login quick tunnel command generation, and best-effort installer downloads for ngrok/playit.
+- Console command echoes redraw immediately, network speed testing uses a bounded quick probe, Time Machine points are manual by default with delete support, and scheduled backups pause during crash storms until stable runtime resumes.
+- Repair intelligence now recognizes Bedrock native crashes during world database open and validates learned fixes only after stable runtime.
 
 ### Fixed
 

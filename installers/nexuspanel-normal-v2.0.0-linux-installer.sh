@@ -54,6 +54,30 @@ install_packages() {
   exit 1
 }
 
+install_tunnel_tools() {
+  echo "[1b/7] Installing optional normal-edition tunnel helpers..."
+  local ARCH
+  ARCH="$(uname -m)"
+  local NGROK_ARCH="amd64"
+  local PLAYIT_ARCH="amd64"
+  case "$ARCH" in
+    x86_64|amd64) NGROK_ARCH="amd64"; PLAYIT_ARCH="amd64" ;;
+    aarch64|arm64) NGROK_ARCH="arm64"; PLAYIT_ARCH="aarch64" ;;
+    *) echo "Unknown architecture ${ARCH}; skipping ngrok/playit helper download."; return 0 ;;
+  esac
+
+  if ! command -v ngrok >/dev/null 2>&1; then
+    curl -fsSL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-${NGROK_ARCH}.tgz" \
+      | tar -xz -C /usr/local/bin ngrok || echo "ngrok helper install skipped."
+    [ -x /usr/local/bin/ngrok ] && chmod 755 /usr/local/bin/ngrok || true
+  fi
+
+  if ! command -v playit >/dev/null 2>&1; then
+    curl -fsSL "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-${PLAYIT_ARCH}" \
+      -o /usr/local/bin/playit && chmod 755 /usr/local/bin/playit || echo "playit helper install skipped."
+  fi
+}
+
 install_panel() {
   echo "[2/7] Installing NexusPanel ${RELEASE_TAG} to ${INSTALL_DIR}..."
 
@@ -145,6 +169,9 @@ main() {
   need_root
   require_service_user
   install_packages
+  if [ "$EDITION" = "normal" ]; then
+    install_tunnel_tools
+  fi
   install_panel
   prepare_paths
   install_cli

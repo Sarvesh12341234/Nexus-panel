@@ -161,7 +161,7 @@ function repairFullAccessEnabled() {
 }
 
 function pruneFixedLogs() {
-  db.prepare('DELETE FROM fixed_logs WHERE created_at < ?').run(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  db.prepare('DELETE FROM fixed_logs WHERE created_at < ?').run(Date.now() - 2 * 24 * 60 * 60 * 1000);
 }
 
 function logFixed({ serverId = null, category = 'panel', title = '', detail = '', source = 'panel' }) {
@@ -216,6 +216,13 @@ function panelSettingsPayload(user = null) {
     repairAgentLiveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
     repairAgentFullAccessEnabled: repairFullAccessEnabled(),
     repairAgentFullAccessUntil: repairFullAccessUntil(),
+    normalTunnelsEnabled: edition === 'normal',
+    ngrokConfigured: edition === 'normal' && Boolean(settingValue('ngrok_auth_token', '')),
+    ngrokAuthtokenPreview: edition === 'normal' && settingValue('ngrok_auth_token', '') ? `${settingValue('ngrok_auth_token', '').slice(0, 6)}....${settingValue('ngrok_auth_token', '').slice(-4)}` : '',
+    playitEnabled: edition === 'normal' && settingValue('playit_enabled', '0') === '1',
+    quickTunnelEnabled: edition === 'normal' && settingValue('quick_tunnel_enabled', '0') === '1',
+    playitSetupUrl: 'https://playit.gg/account/agents',
+    quickTunnelCommand: 'ssh -o ServerAliveInterval=30 -R 0:localhost:25565 nokey@localhost.run',
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
     maxCpuCores: hostCpuCount(),
     platform: process.platform,
@@ -402,12 +409,13 @@ function validateStableTerminalRepairs() {
   `).all(cutoff);
   const validated = [];
   for (const candidate of candidates) {
-    if (runtimeStatus(candidate.server_id) !== 'online') continue;
+    if (!serverStableFor(candidate.server_id, 60 * 1000)) continue;
     db.prepare(`
       UPDATE repair_command_observations
       SET stable_success_count = stable_success_count + 1, validated_at = ?
       WHERE id = ?
     `).run(Date.now(), candidate.id);
+    clearServerBackupPause(candidate.server_id);
     appendLog(candidate.server_id, `[NexusPanel] Repair learner validated terminal fix after stable runtime: ${candidate.command_preview}`);
     validated.push(candidate.id);
   }
@@ -447,12 +455,13 @@ function validateStableRepairPlaybooks() {
   `).all(cutoff);
   const validated = [];
   for (const candidate of candidates) {
-    if (runtimeStatus(candidate.learned_from_server_id) !== 'online') continue;
+    if (!serverStableFor(candidate.learned_from_server_id, 60 * 1000)) continue;
     db.prepare(`
       UPDATE repair_playbooks
       SET success_count = success_count + 1, pending_validation = 0, validated_at = ?
       WHERE signature = ? AND pending_validation = 1
     `).run(Date.now(), candidate.signature);
+    clearServerBackupPause(candidate.learned_from_server_id);
     appendLog(candidate.learned_from_server_id, `[NexusPanel] Repair learner validated playbook ${candidate.signature.slice(0, 12)} after 60 seconds of stable runtime.`);
     validated.push(candidate.signature);
   }
@@ -469,7 +478,7 @@ function validateStableAgentEpisodes() {
   `).all(Date.now() - 60 * 1000);
   const validated = [];
   for (const candidate of candidates) {
-    if (runtimeStatus(candidate.server_id) !== 'online') continue;
+    if (!serverStableFor(candidate.server_id, 60 * 1000)) continue;
     const diagnoses = parseJsonObject(candidate.diagnoses_json);
     let labels = Array.isArray(diagnoses)
       ? diagnoses
@@ -479,6 +488,7 @@ function validateStableAgentEpisodes() {
       : [];
     if (!labels.length && Array.isArray(diagnoses) && diagnoses[0]?.id) labels = [diagnoses[0].id];
     const learned = repairAgent.reinforce(candidate.id, labels);
+    clearServerBackupPause(candidate.server_id);
     appendLog(candidate.server_id, `[NexusPanel] Repair agent validated episode ${candidate.id} after stable runtime and updated ${learned.updated} neural weight(s).`);
     validated.push(candidate.id);
   }
@@ -1576,6 +1586,7 @@ async function createTimelineEvent(server, { type = 'snapshot', title = 'Snapsho
 }
 
 async function safeTimelinePoint(server, req, title, detail = '') {
+  if (process.env.NEXUSPANEL_AUTO_TIMELINE !== '1') return;
   try {
     await createTimelineEvent(server, {
       type: 'auto',
@@ -1612,6 +1623,34 @@ function timelineRows(serverId) {
       server: manifest.server || {},
     };
   });
+}
+
+function backupPauseKey(serverId) {
+  return `server_backup_pause_until_${Number(serverId)}`;
+}
+
+function backupPausedUntil(serverId) {
+  return Number(settingValue(backupPauseKey(serverId), '0')) || 0;
+}
+
+function pauseServerBackups(serverId, ms, reason = '') {
+  const key = backupPauseKey(serverId);
+  const until = Date.now() + Math.max(60 * 1000, Number(ms) || 0);
+  const current = backupPausedUntil(serverId);
+  if (until <= current) return;
+  setSettingValue(key, String(until));
+  if (reason) appendLog(Number(serverId), `[NexusPanel] Auto backups paused until stable runtime because ${reason}.`);
+}
+
+function clearServerBackupPause(serverId) {
+  if (!backupPausedUntil(serverId)) return;
+  db.prepare('DELETE FROM panel_settings WHERE key = ?').run(backupPauseKey(serverId));
+  appendLog(Number(serverId), '[NexusPanel] Stable runtime detected. Scheduled backups resumed.');
+}
+
+function serverStableFor(serverId, ms = 60 * 1000) {
+  const details = runtimeDetails(Number(serverId));
+  return details.status === 'online' && Number(details.startedAt || 0) > 0 && Date.now() - Number(details.startedAt) >= ms;
 }
 
 function inspectProperties(content, server) {
@@ -2924,7 +2963,7 @@ app.get('/api/fixed/logs', requirePermission(capabilities.SECURITY_VIEW, permiss
     createdAt: row.created_at,
   }));
   res.json({
-    retentionDays: 7,
+    retentionDays: 2,
     logs,
     consoleLogPolicy: {
       memoryLinesPerServer: 600,
@@ -3280,6 +3319,33 @@ app.get('/api/settings/update-status', requirePermission(capabilities.SETTINGS_M
   res.json({ update: updateStatus });
 });
 
+app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  if (isHostEdition()) return res.status(404).json({ error: 'Normal-edition tunnel setup is not available in host edition.' });
+  const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
+  const port = Number(server?.port || 25565);
+  const isBedrock = String(server?.type || '').toLowerCase() === 'bedrock';
+  res.json({
+    server: server ? { id: server.id, name: server.name, type: server.type, port } : null,
+    ngrok: {
+      configured: Boolean(settingValue('ngrok_auth_token', '')),
+      protocol: isBedrock ? 'udp-required' : 'tcp',
+      command: isBedrock ? '' : `ngrok tcp ${port}`,
+      note: isBedrock ? 'Bedrock uses UDP. Use playit.gg or a UDP-capable tunnel for best results.' : 'Run this on the VPS after saving your ngrok token.',
+    },
+    playit: {
+      enabled: settingValue('playit_enabled', '0') === '1',
+      setupUrl: 'https://playit.gg/account/agents',
+      command: 'playit',
+      note: 'Open the link, create an agent, then run playit on the VPS to claim the tunnel.',
+    },
+    quick: {
+      enabled: settingValue('quick_tunnel_enabled', '0') === '1',
+      command: `ssh -o ServerAliveInterval=30 -R 0:localhost:${port} nokey@localhost.run`,
+      note: 'No-login temporary TCP tunnel. Best for Java testing, not permanent hosting.',
+    },
+  });
+});
+
 app.get('/api/servers/:id/nexus-mark', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id);
   const nexu = parseJsonObject(server.nexu_payload);
@@ -3300,6 +3366,12 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
     }
   }
   setSettingValue('public_base_url', publicBaseUrl);
+  if (!isHostEdition()) {
+    const token = String(req.body.ngrokAuthToken || '').trim();
+    if (token) setSettingValue('ngrok_auth_token', token);
+    setSettingValue('playit_enabled', toBool(req.body.playitEnabled) ? '1' : '0');
+    setSettingValue('quick_tunnel_enabled', toBool(req.body.quickTunnelEnabled) ? '1' : '0');
+  }
   if (isHostEdition()) {
     setSettingValue('host_maintenance_mode', toBool(req.body.hostMaintenanceMode) ? '1' : '0');
     setSettingValue('host_server_quota', clampNumber(req.body.hostServerQuota, 1, 500, 10));
@@ -4219,6 +4291,15 @@ app.post('/api/servers/:id/timeline/:eventId/restore-properties', requirePermiss
   res.json({ ok: true, events: timelineRows(server.id) });
 }));
 
+app.delete('/api/servers/:id/timeline/:eventId', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const result = db.prepare('DELETE FROM server_timeline_events WHERE id = ? AND server_id = ?')
+    .run(Number(req.params.eventId), server.id);
+  if (!result.changes) return res.status(404).json({ error: 'Timeline point not found.' });
+  logFixed({ serverId: server.id, category: 'timeline', title: 'Timeline point deleted', detail: `Event ${req.params.eventId}`, source: 'time-machine' });
+  res.json({ ok: true, events: timelineRows(server.id) });
+});
+
 app.post('/api/presence', requireAuth, (req, res) => {
   const view = String(req.body.view || '').slice(0, 40);
   const serverId = req.body.serverId ? Number(req.body.serverId) : null;
@@ -4303,8 +4384,8 @@ app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, p
   await safeTimelinePoint(server, req, 'Before Repair & Diagnose', 'Captured configuration before repair workflow.');
   const report = await runServerRepair(server, software, { applyOptimizations: true });
   const learned = learnRepairPlaybook(server, report);
-  appendLog(server.id, `[NexusPanel] Repair & Diagnose completed: ${report.summary}`);
-  if (learned) appendLog(server.id, `[NexusPanel] Repair playbook ${learned.signature} recorded as a candidate; it will be trusted only after 60 seconds of stable runtime.`);
+  appendLog(server.id, `[NexusPanel] Repair & Diagnose checks completed: ${report.summary}. Start the server and keep it online for 60 seconds before the repair is trusted.`);
+  if (learned) appendLog(server.id, `[NexusPanel] Repair playbook ${learned.signature} recorded as an untrusted candidate; it will not be replayed until stable runtime validates it.`);
   if (learned) logFixed({ serverId: server.id, category: 'learning', title: 'Repair playbook candidate recorded', detail: `Signature ${learned.signature}; ${learned.actions} action(s).`, source: 'repair-agent' });
   res.json({ ok: true, ...report, learned, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
 }));
@@ -4344,8 +4425,8 @@ app.post('/api/servers/:id/kill', requirePermission(capabilities.SERVER_KILL, pe
 });
 
 app.post('/api/servers/:id/command', requirePermission(capabilities.CONSOLE_COMMAND, permissions.SEND_COMMANDS), (req, res) => {
-  sendCommand(Number(req.params.id), req.body.command);
-  res.json({ ok: true });
+  const result = sendCommand(Number(req.params.id), req.body.command);
+  res.json(result);
 });
 
 app.get('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
@@ -5004,6 +5085,11 @@ async function runAutoBackups() {
   const now = Date.now();
   const rows = db.prepare('SELECT * FROM servers WHERE scheduled_backups = 1').all();
   for (const server of rows) {
+    const pauseUntil = backupPausedUntil(server.id);
+    if (pauseUntil) {
+      if (serverStableFor(server.id, 60 * 1000)) clearServerBackupPause(server.id);
+      else continue;
+    }
     const intervalMs = backupIntervalMinutesFrom(server) * 60 * 1000;
     if (now - Number(server.last_backup_at || 0) < intervalMs || autoBackupInFlight.has(server.id)) continue;
     autoBackupInFlight.add(server.id);
@@ -5196,6 +5282,7 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
   recent.push(now);
   crashHistory.set(server.id, recent);
   const launchFailure = uptimeMs < 10 * 1000;
+  pauseServerBackups(current.id, launchFailure ? 30 * 60 * 1000 : 10 * 60 * 1000, launchFailure ? 'the last launch never became stable' : 'the game crashed');
   const penalty = repairAgent.penalizeLatest(current.id, launchFailure ? 'launch-failed' : 'repeat-crash');
   if (penalty.updated) {
     appendLog(current.id, `[NexusPanel] Repair agent applied negative reward to the last failed recovery (${penalty.updated} neural weight updates).`);
@@ -5228,6 +5315,7 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
   if (!targetedPropertyHealSucceeded) return;
   if (!current.auto_restart && !targetedPropertyHeal) return;
   if (recent.length >= 3) {
+    pauseServerBackups(current.id, 60 * 60 * 1000, 'a restart storm was detected');
     appendLog(current.id, '[NexusPanel] Restart storm stopped after 3 failures in 2 minutes. Run Repair & Diagnose, then start manually.');
     return;
   }

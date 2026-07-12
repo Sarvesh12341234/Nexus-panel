@@ -1809,7 +1809,7 @@ async function renderConsole() {
   }
   const serverId = server.id;
   const now = Date.now();
-  if (now - Number(state.consolePollAt[serverId] || 0) < 900) return;
+  if (now - Number(state.consolePollAt[serverId] || 0) < 250) return;
   state.consolePollAt[serverId] = now;
   const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 1500;
   if (needsMetrics) state.consoleMetricsAt[serverId] = now;
@@ -1851,6 +1851,13 @@ async function renderConsole() {
   renderTimeline(server).catch(() => {});
 }
 
+function appendConsoleImmediate(line) {
+  if (!elements.consoleBox || !line) return;
+  elements.consoleBox.dataset.rendered = '';
+  elements.consoleBox.insertAdjacentHTML('beforeend', `<div>${escapeHtml(formatConsoleLine(line))}</div>`);
+  if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
+}
+
 async function renderPresence(server) {
   if (!elements.presencePanel || !server) return;
   const now = Date.now();
@@ -1885,7 +1892,10 @@ async function renderTimeline(server, force = false) {
     ${events.map((event) => `
       <div class="plugin-row">
         <div><strong>${escapeHtml(event.title || 'Timeline point')}</strong><div class="muted">${escapeHtml(formatPanelDate(event.createdAt))} - ${(event.changedFiles || []).length} tracked file(s) - ${(event.plugins || []).length} plugin(s)</div></div>
-        ${(event.changedFiles || []).some((file) => file.path === 'server.properties' && file.content) ? `<button class="secondary" type="button" data-action="timeline-restore-properties" data-event-id="${event.id}">Restore properties</button>` : '<span class="badge">Tracked</span>'}
+        <div class="row-actions">
+          ${(event.changedFiles || []).some((file) => file.path === 'server.properties' && file.content) ? `<button class="secondary" type="button" data-action="timeline-restore-properties" data-event-id="${event.id}">Restore properties</button>` : '<span class="badge">Tracked</span>'}
+          <button class="danger" type="button" data-action="timeline-delete" data-event-id="${event.id}">Delete</button>
+        </div>
       </div>
     `).join('')}
   `;
@@ -2057,7 +2067,14 @@ function renderSettings() {
       <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
       <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
       ${isHost ? `<label class="switch"><input name="hostMaintenanceMode" type="checkbox" ${settings.hostMaintenanceMode ? 'checked' : ''}><span></span>Host maintenance mode</label>
-      <label>Servers per hosted account <input name="hostServerQuota" type="number" min="1" max="500" value="${Number(settings.hostServerQuota || 10)}"></label>` : ''}` : ''}
+      <label>Servers per hosted account <input name="hostServerQuota" type="number" min="1" max="500" value="${Number(settings.hostServerQuota || 10)}"></label>` : `
+      <div class="settings-group tunnel-settings">
+        <strong>Normal public tunnel setup</strong>
+        <label>ngrok auth token <input name="ngrokAuthToken" type="password" placeholder="${settings.ngrokConfigured ? `Saved (${escapeHtml(settings.ngrokAuthtokenPreview || 'configured')})` : 'Paste ngrok token'}"></label>
+        <label class="switch"><input name="playitEnabled" type="checkbox" ${settings.playitEnabled ? 'checked' : ''}><span></span>Enable playit.gg helper</label>
+        <label class="switch"><input name="quickTunnelEnabled" type="checkbox" ${settings.quickTunnelEnabled ? 'checked' : ''}><span></span>Enable no-login quick tunnel helper</label>
+        <div class="row-actions"><button class="secondary" type="button" data-action="show-normal-tunnel-plan">Show tunnel commands</button><a class="button-like secondary" href="${escapeHtml(settings.playitSetupUrl || 'https://playit.gg/account/agents')}" target="_blank" rel="noreferrer">playit setup</a></div>
+      </div>`}` : ''}
 
       <!-- Timezone with Save Button -->
       <div class="settings-group">
@@ -2443,7 +2460,7 @@ async function renderFixed() {
   const data = await api('/api/fixed/logs').catch((error) => ({
     error: error.message,
     logs: [],
-    retentionDays: 7,
+    retentionDays: 2,
     consoleLogPolicy: {},
   }));
   const agentData = await api('/api/repair/agent/status').catch(() => ({ agent: state.repairBrain?.agent || {} }));
@@ -2453,7 +2470,7 @@ async function renderFixed() {
   elements.fixedPanel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Fixed</p><h2>Repair and action history</h2></div><button class="secondary" type="button" data-action="refresh-fixed">Refresh</button></div>
     <div class="quick-stats">
-      <article><span>Retention</span><strong>${Number(data.retentionDays || 7)} days</strong></article>
+      <article><span>Retention</span><strong>${Number(data.retentionDays || 2)} days</strong></article>
       <article><span>Console memory cap</span><strong>${Number(policy.memoryLinesPerServer || 600)} lines</strong></article>
       <article><span>Disk log rotation</span><strong>${formatBytes(Number(policy.diskRotateBytes || 4 * 1024 * 1024))}</strong></article>
       <article><span>Lag risk</span><strong>${escapeHtml(policy.lagRisk || 'low')}</strong></article>
@@ -3036,8 +3053,11 @@ elements.commandForm.addEventListener('submit', async (event) => {
   if (!server) return showToast('Create a server first.');
   const payload = formData(elements.commandForm);
   try {
-    await api(`/api/servers/${server.id}/command`, { method: 'POST', body: JSON.stringify(payload) });
+    const command = String(payload.command || '').trim().replace(/^\//, '');
+    if (command) appendConsoleImmediate(`[${new Date().toISOString()}] > ${command}`);
+    const result = await api(`/api/servers/${server.id}/command`, { method: 'POST', body: JSON.stringify(payload) });
     elements.commandForm.reset();
+    if (result.line) state.consolePollAt[server.id] = 0;
     await renderConsole();
   } catch (error) {
     showToast(error.message);
@@ -3616,6 +3636,22 @@ document.addEventListener('click', async (event) => {
       await refresh();
       return;
     }
+    if (action && action.startsWith('admin-perms-')) {
+      const boxes = [...elements.adminForm.querySelectorAll('[name="permissionKey"]')];
+      const setChecked = (keys) => {
+        const selected = new Set(keys);
+        boxes.forEach((box) => { box.checked = selected.has(box.value); });
+      };
+      if (action === 'admin-perms-all') boxes.forEach((box) => { box.checked = true; });
+      if (action === 'admin-perms-clear') boxes.forEach((box) => { box.checked = false; });
+      if (action === 'admin-perms-power') setChecked([CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART]);
+      if (action === 'admin-perms-ops') setChecked([
+        CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART,
+        CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.CONSOLE_COMMAND,
+        CAPABILITIES.PROPERTIES_MANAGE, CAPABILITIES.WHITELIST_MANAGE,
+      ]);
+      return;
+    }
     if (action === 'timeline-snapshot') {
       const server = activeServer();
       if (!server) return;
@@ -3636,6 +3672,16 @@ document.addEventListener('click', async (event) => {
       state.timelineAt[server.id] = 0;
       await renderTimeline(server, true);
       showToast('server.properties restored from timeline.');
+      return;
+    }
+    if (action === 'timeline-delete') {
+      const server = activeServer();
+      if (!server) return;
+      if (!confirm('Delete this timeline point?')) return;
+      await api(`/api/servers/${server.id}/timeline/${actionTarget.dataset.eventId}`, { method: 'DELETE' });
+      state.timelineAt[server.id] = 0;
+      await renderTimeline(server, true);
+      showToast('Timeline point deleted.');
       return;
     }
     if (action === 'ddos-scan') {
@@ -3950,22 +3996,26 @@ document.addEventListener('click', async (event) => {
     if (action === 'network-speed-test') {
       actionTarget.disabled = true;
       try {
-        showToast('Testing panel transfer speed...');
-        const downloadSize = 8 * 1024 * 1024;
+        showToast('Running quick panel speed test...');
+        const downloadSize = 2 * 1024 * 1024;
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 9000);
         const downloadStart = performance.now();
-        const downloadBuffer = await fetch(`/api/network/download-test?size=${downloadSize}`, { credentials: 'same-origin' }).then((res) => {
+        const downloadBuffer = await fetch(`/api/network/download-test?size=${downloadSize}&t=${Date.now()}`, { credentials: 'same-origin', signal: controller.signal }).then((res) => {
           if (!res.ok) throw new Error('Download speed test failed.');
           return res.arrayBuffer();
         });
         const downloadSeconds = Math.max(0.001, (performance.now() - downloadStart) / 1000);
-        const uploadBuffer = new Uint8Array(4 * 1024 * 1024).fill(90);
+        const uploadBuffer = new Uint8Array(1024 * 1024).fill(90);
         const uploadStart = performance.now();
         const uploadResult = await fetch('/api/network/upload-test', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/octet-stream' },
           body: uploadBuffer,
+          signal: controller.signal,
         });
+        window.clearTimeout(timeout);
         if (!uploadResult.ok) throw new Error('Upload speed test failed.');
         const uploadSeconds = Math.max(0.001, (performance.now() - uploadStart) / 1000);
         await renderNetwork({
@@ -3976,6 +4026,18 @@ document.addEventListener('click', async (event) => {
       } finally {
         actionTarget.disabled = false;
       }
+      return;
+    }
+    if (action === 'show-normal-tunnel-plan') {
+      const server = activeServer();
+      const plan = await api(`/api/tunnels/normal-plan${server ? `?serverId=${encodeURIComponent(server.id)}` : ''}`);
+      const lines = [
+        `ngrok: ${plan.ngrok?.command || plan.ngrok?.note || 'not available for this server type'}`,
+        `playit.gg: ${plan.playit?.setupUrl || 'https://playit.gg/account/agents'} then run: ${plan.playit?.command || 'playit'}`,
+        `quick tunnel: ${plan.quick?.command || ''}`,
+      ].join('\n');
+      await navigator.clipboard?.writeText(lines).catch(() => {});
+      prompt('Tunnel commands copied if browser allowed it:', lines);
       return;
     }
     if (action === 'show-nginx-config') {

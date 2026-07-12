@@ -684,8 +684,8 @@ code {
 
 .permission-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
 }
 
 .permission-grid label {
@@ -693,6 +693,29 @@ code {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.permission-group {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+
+.permission-group h4 {
+  margin: 0 0 2px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.admin-permission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 .user-row {

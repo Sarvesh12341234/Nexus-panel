@@ -2,8 +2,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
-const DDOS_PARAMETER_BUDGET = 200000;
-const DDOS_FEATURE_DIMENSIONS = 28570;
+const DDOS_PARAMETER_BUDGET = 1000000;
+const DDOS_FEATURE_DIMENSIONS = 142856;
 const DDOS_LABELS = Object.freeze([
   'normal',
   'tcp-syn-flood',

@@ -65,6 +65,7 @@ function appendLog(serverId, line) {
   const pending = pendingLogWrites.get(serverId) || [];
   pending.push(rendered);
   pendingLogWrites.set(serverId, pending);
+  return rendered;
 }
 
 function splitLines(serverId, chunk) {
@@ -268,7 +269,8 @@ function sendCommand(serverId, command) {
   const clean = String(command || '').trim().replace(/^\//, '');
   if (!clean) throw new Error('Command is empty.');
   child.stdin.write(`${clean}\n`);
-  appendLog(serverId, `> ${clean}`);
+  const line = appendLog(serverId, `> ${clean}`);
+  return { ok: true, line };
 }
 
 function stopServer(serverId) {

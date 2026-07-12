@@ -5,7 +5,7 @@ const v8 = require('node:v8');
 const { diagnoseRuntime, knowledgeRules } = require('./repair_knowledge');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 
-const MAX_MODEL_PARAMETERS = 350000;
+const MAX_MODEL_PARAMETERS = 1000000;
 const MAX_AGENT_MEMORY_BYTES = 1024 * 1024 * 1024;
 const MAX_LEARNED_WEIGHTS = 32768;
 const MAX_EPISODES = 2000;
