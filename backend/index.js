@@ -684,33 +684,10 @@ function startSpectateSession(server, req = null) {
   if (existing?.child && !existing.child.killed) {
     return spectateSessionPayload(server, req);
   }
-  const botName = spectateBotName(server);
-  const latestEvent = latestSpectateLogEvent(server, botName);
-  if (latestEvent?.connected) {
-    const payload = {
-      status: 'connected',
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
-      botName,
-      authMode: spectateAuthMode(server),
-      rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-packet-renderer',
-      rendererStatus: server.type === 'java' ? 'waiting' : 'packet-renderer',
-      rendererPort: server.type === 'java' ? spectateRendererPort(server) : 0,
-      rendererMessage: server.type === 'bedrock'
-        ? 'The Bedrock spectate account is already joined. Headless packet renderer is active; real frame-push video will replace it if available.'
-        : 'The spectate account is already joined.',
-      target: botName,
-      players: [botName],
-      entities: [],
-      world: sanitizeSpectateWorld({}),
-      message: server.type === 'bedrock'
-        ? `${botName} is already in the server. No duplicate bot was started; headless packet renderer is active.`
-        : `${botName} is already in the server. No duplicate bot was started.`,
-    };
-    spectateSessions.set(Number(server.id), payload);
-    sendSpectateModeCommand(server, botName);
-    startLocalFramePush(server, payload);
-    return spectateSessionPayload(server, req);
+  if (existing) {
+    if (existing.timeout) clearTimeout(existing.timeout);
+    stopLocalFramePush(existing);
+    spectateSessions.delete(Number(server.id));
   }
   try {
     require.resolve(bot.name);
@@ -840,7 +817,7 @@ function startSpectateSession(server, req = null) {
     session.updatedAt = Date.now();
     session.message = `Spectate bot exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
   });
-  appendLog(server.id, `[NexusPanel] Live Spectate launched ${bot.engine} as ${config.username} (${config.auth} auth).`);
+  appendLog(server.id, `[NexusPanel] Live Spectate launched ${bot.engine} as ${config.username} (${config.auth} auth), pid=${child.pid || 'pending'}.`);
   return spectateSessionPayload(server, req);
 }
 
