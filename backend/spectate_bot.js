@@ -77,6 +77,7 @@ function startJavaBot(config) {
     auth: config.auth || 'offline',
     hideErrors: false,
   });
+  let viewerStarted = false;
 
   const publishPlayers = () => {
     send('players', { players: Object.keys(bot.players || {}).map(cleanPlayerName).filter(Boolean) });
@@ -115,6 +116,30 @@ function startJavaBot(config) {
   bot.once('spawn', () => {
     send('status', { status: 'connected', target: config.username, message: `Java spectate bot joined ${config.host}:${config.port}.` });
     publishPlayers();
+    if (config.rendererPort) {
+      try {
+        const mineflayerViewer = require('prismarine-viewer').mineflayer;
+        mineflayerViewer(bot, {
+          port: config.rendererPort,
+          firstPerson: true,
+          viewDistance: 8,
+        });
+        viewerStarted = true;
+        send('renderer', {
+          status: 'ready',
+          mode: 'java-prismarine-firstperson',
+          port: config.rendererPort,
+          message: `Java first-person renderer is live on port ${config.rendererPort}.`,
+        });
+      } catch (error) {
+        send('renderer', {
+          status: 'missing',
+          mode: 'java-prismarine-firstperson',
+          port: config.rendererPort,
+          message: `Install prismarine-viewer for Java screenshare rendering: cd /opt/nexuspanel && npm install prismarine-viewer. ${error.message}`,
+        });
+      }
+    }
     setTimeout(() => {
       bot.chat(`/gamemode spectator ${config.username}`);
     }, 1200);
@@ -131,13 +156,28 @@ function startJavaBot(config) {
   bot.on('error', (error) => send('error', { message: `Java bot error: ${error.message}` }));
   bot.on('end', (reason) => {
     clearInterval(entityTimer);
+    if (viewerStarted) {
+      try { bot.viewer?.close?.(); } catch {}
+    }
     send('status', { status: 'stopped', message: `Java spectate bot disconnected${reason ? `: ${reason}` : ''}.` });
     process.exit(0);
   });
 
   process.on('message', (message) => {
-    if (message?.type === 'target') send('status', { status: 'connected', target: cleanPlayerName(message.target), message: `Following ${cleanPlayerName(message.target) || 'overview'}.` });
-    if (message?.type === 'stop') bot.quit('NexusPanel spectate stopped');
+    if (message?.type === 'target') {
+      const target = cleanPlayerName(message.target);
+      const entity = target ? bot.players?.[target]?.entity : null;
+      if (entity?.position) {
+        bot.lookAt(entity.position.offset(0, 1.4, 0), true).catch(() => {});
+      }
+      send('status', { status: 'connected', target, message: `Following ${target || 'overview'}.` });
+    }
+    if (message?.type === 'stop') {
+      if (viewerStarted) {
+        try { bot.viewer?.close?.(); } catch {}
+      }
+      bot.quit('NexusPanel spectate stopped');
+    }
   });
 }
 

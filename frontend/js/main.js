@@ -1919,8 +1919,8 @@ async function renderSpectate() {
       <div><strong data-spectate-target>${escapeHtml(data.target || 'Overview')}</strong><span>Target</span></div>
       <div><strong data-spectate-pid>${data.pid ? Number(data.pid) : '-'}</strong><span>Bot PID</span></div>
     </div>
-    <div class="spectate-frame-wrap">
-      <canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>
+    <div class="spectate-frame-wrap" data-spectate-surface>
+      ${renderSpectateSurface(data)}
     </div>
     <div class="plugin-row">
       <div><strong data-spectate-message>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted" data-spectate-detail>${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)} - ${escapeHtml(data.botName || 'live-update')} - ${escapeHtml(authHint)}` : `Install inside /opt/nexuspanel: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
@@ -1932,6 +1932,34 @@ async function renderSpectate() {
     </div>
   `;
   startSpectateVideo(server.id);
+}
+
+function renderSpectateSurface(data) {
+  if (data.rendererUrl) {
+    return `
+      <iframe class="spectate-frame" src="${escapeHtml(data.rendererUrl)}" title="Live Minecraft renderer" loading="eager" allow="fullscreen"></iframe>
+    `;
+  }
+  return '<canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>';
+}
+
+function syncSpectateSurface(data) {
+  const surface = elements.spectatePanel?.querySelector('[data-spectate-surface]');
+  if (!surface) return;
+  const iframe = surface.querySelector('iframe');
+  const canvas = surface.querySelector('canvas');
+  if (data.rendererUrl) {
+    if (!iframe || iframe.getAttribute('src') !== data.rendererUrl) {
+      stopSpectateVideo();
+      surface.innerHTML = renderSpectateSurface(data);
+    }
+    return;
+  }
+  if (!canvas) {
+    surface.innerHTML = renderSpectateSurface(data);
+    const server = activeServer();
+    if (server) startSpectateVideo(server.id);
+  }
 }
 
 function renderSpectatePlayerButtons(data) {
@@ -1953,7 +1981,7 @@ function updateSpectateLiveDom(data) {
   setText('[data-spectate-bot]', data.botName || 'live-update');
   setText('[data-spectate-target]', data.target || 'Overview');
   setText('[data-spectate-pid]', data.pid ? String(Number(data.pid)) : '-');
-  setText('[data-spectate-message]', data.error || data.message || 'Live spectate ready.');
+  setText('[data-spectate-message]', data.error || data.rendererMessage || data.message || 'Live spectate ready.');
   const detail = panel.querySelector('[data-spectate-detail]');
   if (detail) {
     detail.textContent = data.packageInstalled
@@ -1971,6 +1999,7 @@ function updateSpectateLiveDom(data) {
     const players = panel.querySelector('[data-spectate-players]');
     if (players) players.innerHTML = renderSpectatePlayerButtons(data);
   }
+  syncSpectateSurface(data);
 }
 
 async function pollSpectateData() {

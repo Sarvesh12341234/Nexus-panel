@@ -30,6 +30,7 @@
   "optionalDependencies": {
     "bedrock-protocol": "^3.43.0",
     "mineflayer": "^4.32.0",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "prismarine-viewer": "^1.33.0"
   }
 }

@@ -277,6 +277,17 @@ function spectateAuthMode(server) {
     : settingValue('spectate_bedrock_auth', process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline');
 }
 
+function spectateRendererPort(server) {
+  const base = clampNumber(process.env.NEXUSPANEL_SPECTATE_VIEWER_PORT_BASE, 20000, 60000, 33000);
+  return Math.min(65535, base + (Number(server.id) % 20000));
+}
+
+function spectateRendererUrl(server, session, req = null) {
+  if (server.type !== 'java' || session?.rendererStatus !== 'ready' || !session?.rendererPort) return '';
+  const host = req ? requestPublicHost(req) : '127.0.0.1';
+  return `http://${host}:${Number(session.rendererPort)}`;
+}
+
 function sanitizeSpectateEntities(entities) {
   return (Array.isArray(entities) ? entities : [])
     .map((entity) => {
@@ -374,6 +385,13 @@ function spectateSessionPayload(server, req = null) {
     pid: session?.child?.pid || 0,
     botName: session?.botName || spectateBotName(server),
     authMode: session?.authMode || spectateAuthMode(server),
+    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-custom-canvas'),
+    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'custom-canvas'),
+    rendererPort: session?.rendererPort || (server.type === 'java' ? spectateRendererPort(server) : 0),
+    rendererUrl: spectateRendererUrl(server, session, req),
+    rendererMessage: session?.rendererMessage || (server.type === 'java'
+      ? 'Java screenshare renderer starts after the bot spawns. Install prismarine-viewer if it stays unavailable.'
+      : 'Bedrock uses NexusPanel custom movement rendering while the chunk renderer is being built.'),
     target: session?.target || players[0] || '',
     players,
     entities: sanitizeSpectateEntities(session?.entities || []),
@@ -418,6 +436,7 @@ function startSpectateSession(server, req = null) {
     port: Number(server.port || (server.type === 'bedrock' ? 19132 : 25565)),
     username: spectateBotName(server),
     auth: spectateAuthMode(server),
+    rendererPort: server.type === 'java' ? spectateRendererPort(server) : 0,
     runtimeDir,
   };
   const encoded = Buffer.from(JSON.stringify(config), 'utf8').toString('base64url');
@@ -435,6 +454,12 @@ function startSpectateSession(server, req = null) {
     updatedAt: Date.now(),
     botName: config.username,
     authMode: config.auth,
+    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-custom-canvas',
+    rendererStatus: server.type === 'java' ? 'starting' : 'custom-canvas',
+    rendererPort: config.rendererPort,
+    rendererMessage: server.type === 'java'
+      ? `Starting Java first-person renderer on port ${config.rendererPort}...`
+      : 'Using NexusPanel custom Bedrock movement renderer.',
     target: players[0] || '',
     players,
     entities: [],
@@ -461,6 +486,13 @@ function startSpectateSession(server, req = null) {
       session.entities = sanitizeSpectateEntities(message.entities);
       const entityNames = session.entities.map((entity) => entity.name).filter(Boolean);
       if (entityNames.length) session.players = [...new Set([...(session.players || []), ...entityNames])];
+    }
+    if (message.type === 'renderer') {
+      session.rendererStatus = message.status || session.rendererStatus;
+      session.rendererMode = message.mode || session.rendererMode;
+      session.rendererPort = Number(message.port || session.rendererPort || 0);
+      session.rendererMessage = message.message || session.rendererMessage;
+      if (message.status !== 'ready' && message.message) appendLog(server.id, `[NexusPanel] Live Spectate renderer: ${message.message}`);
     }
     if (message.type === 'status') {
       session.status = message.status || session.status;
