@@ -507,6 +507,8 @@ function sanitizeSpectateWorld(world) {
       return {
         x: Number.isFinite(Number(chunk?.x)) ? Math.trunc(Number(chunk.x)) : 0,
         z: Number.isFinite(Number(chunk?.z)) ? Math.trunc(Number(chunk.z)) : 0,
+        pseudo: Boolean(chunk?.pseudo),
+        source: String(chunk?.source || '').slice(0, 50),
         size: Number.isFinite(Number(chunk?.size)) ? Math.max(0, Math.trunc(Number(chunk.size))) : 0,
         digest: Number.isFinite(Number(chunk?.digest ?? chunk?.geometry?.digest)) ? Math.trunc(Number(chunk.digest ?? chunk.geometry.digest)) : 0,
         geometry: {
@@ -533,12 +535,21 @@ function sanitizeSpectateWorld(world) {
     updateBlock: Number.isFinite(Number(rawStats.updateBlock)) ? Math.trunc(Number(rawStats.updateBlock)) : 0,
     geometryColumns: Number.isFinite(Number(rawStats.geometryColumns)) ? Math.trunc(Number(rawStats.geometryColumns)) : 0,
     bytesTotal: Number.isFinite(Number(rawStats.bytesTotal)) ? Math.trunc(Number(rawStats.bytesTotal)) : 0,
+    renderPackets: Number.isFinite(Number(rawStats.renderPackets)) ? Math.trunc(Number(rawStats.renderPackets)) : 0,
     movePlayer: Number.isFinite(Number(rawStats.movePlayer)) ? Math.trunc(Number(rawStats.movePlayer)) : 0,
     moveEntity: Number.isFinite(Number(rawStats.moveEntity)) ? Math.trunc(Number(rawStats.moveEntity)) : 0,
     addPlayer: Number.isFinite(Number(rawStats.addPlayer)) ? Math.trunc(Number(rawStats.addPlayer)) : 0,
     playerList: Number.isFinite(Number(rawStats.playerList)) ? Math.trunc(Number(rawStats.playerList)) : 0,
     lastPacketAt: Number.isFinite(Number(rawStats.lastPacketAt)) ? Number(rawStats.lastPacketAt) : 0,
     lastPacket: String(rawStats.lastPacket || '').slice(0, 60),
+    samples: (Array.isArray(rawStats.samples) ? rawStats.samples : [])
+      .map((sample) => ({
+        name: String(sample?.name || '').slice(0, 50),
+        keys: (Array.isArray(sample?.keys) ? sample.keys : []).map((key) => String(key).slice(0, 30)).slice(0, 8),
+        bytes: Number.isFinite(Number(sample?.bytes)) ? Math.trunc(Number(sample.bytes)) : 0,
+        hasChunkKey: Boolean(sample?.hasChunkKey),
+      }))
+      .slice(0, 8),
   };
   return {
     mode: String(world?.mode || 'nexusvision-packet-wireframe').slice(0, 60),

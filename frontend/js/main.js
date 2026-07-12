@@ -2245,15 +2245,9 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     ctx.restore();
   };
 
-  const packetChunks = chunks.length
-    ? chunks
-    : Array.from({ length: 49 }, (_, index) => ({
-      x: focusChunkX + (index % 7) - 3,
-      z: focusChunkZ + Math.floor(index / 7) - 3,
-      synthetic: true,
-    }));
+  const packetChunks = chunks;
   for (const chunk of packetChunks.slice(-192)) {
-    drawPacketDiamond(chunk.x, chunk.z, chunk.synthetic ? 0.22 : 0.72);
+    drawPacketDiamond(chunk.x, chunk.z, chunk.pseudo ? 0.42 : 0.72);
   }
 
   const geometryColumns = chunks
@@ -2280,7 +2274,7 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
       if (point.x < -100 || point.x > width + 100 || point.y < height * 0.08 || point.y > height + 120) continue;
       drawWireColumn(column);
     }
-  } else {
+  } else if (chunks.length) {
     visible.sort((a, b) => a.sort - b.sort);
     for (const block of visible.slice(-360)) {
       const point = project(block.x, block.y, block.z);
@@ -2324,16 +2318,27 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   ctx.fillStyle = '#cbd5e1';
   ctx.font = '13px Inter, Segoe UI, Arial';
   ctx.fillText(`chunks ${chunks.length}  columns ${geometryColumns.length}  packets ${Number(packetStats.total || 0)}`, width - 398, 80);
-  ctx.fillText(`bytes ${Number(packetStats.bytesTotal || 0)}  level_chunk ${Number(packetStats.levelChunk || 0)}`, width - 398, 102);
+  ctx.fillText(`bytes ${Number(packetStats.bytesTotal || 0)}  render ${Number(packetStats.renderPackets || 0)}  level_chunk ${Number(packetStats.levelChunk || 0)}`, width - 398, 102);
   ctx.fillText(`last ${packetStats.lastPacket || 'waiting'}  yaw ${Math.round(Number(focus.yaw || 0))}`, width - 398, 124);
-  if (Number(packetStats.total || 0) > 0 && !chunks.length) {
+  if (!chunks.length) {
+    const samples = Array.isArray(packetStats.samples) ? packetStats.samples : [];
     ctx.fillStyle = 'rgba(4, 10, 18, 0.72)';
-    roundRect(ctx, width / 2 - 240, height * 0.28, 480, 48, 10);
+    roundRect(ctx, width / 2 - 300, height * 0.25, 600, samples.length ? 112 : 58, 10);
     ctx.fill();
     ctx.fillStyle = '#f8fafc';
     ctx.font = '700 14px Inter, Segoe UI, Arial';
     ctx.textAlign = 'center';
-    ctx.fillText(`Receiving ${packetStats.lastPacket || 'packets'}, waiting for level_chunk bytes`, width / 2, height * 0.28 + 30);
+    ctx.fillText(Number(packetStats.total || 0) > 0
+      ? `Receiving ${packetStats.lastPacket || 'packets'}, waiting for renderable chunk bytes`
+      : 'Connected, waiting for Bedrock world packets', width / 2, height * 0.25 + 30);
+    if (samples.length) {
+      ctx.font = '12px Inter, Segoe UI, Arial';
+      ctx.fillStyle = '#cbd5e1';
+      samples.slice(-3).forEach((sample, index) => {
+        const keys = (sample.keys || []).slice(0, 4).join(',');
+        ctx.fillText(`${sample.name || 'packet'} bytes=${sample.bytes || 0} keys=${keys}`, width / 2, height * 0.25 + 58 + index * 18);
+      });
+    }
   }
   return { project, tile };
 }

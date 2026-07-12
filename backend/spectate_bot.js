@@ -69,10 +69,34 @@ function sendEntities(values) {
 }
 
 function packetChunkKey(packet) {
-  const x = finiteNumber(packet?.x ?? packet?.chunk_x ?? packet?.chunkX ?? packet?.chunk_position?.x, NaN);
-  const z = finiteNumber(packet?.z ?? packet?.chunk_z ?? packet?.chunkZ ?? packet?.chunk_position?.z, NaN);
+  const x = finiteNumber(
+    packet?.x
+      ?? packet?.chunk_x
+      ?? packet?.chunkX
+      ?? packet?.chunk_position?.x
+      ?? packet?.chunkPosition?.x
+      ?? packet?.position?.x
+      ?? packet?.pos?.x,
+    NaN,
+  );
+  const z = finiteNumber(
+    packet?.z
+      ?? packet?.chunk_z
+      ?? packet?.chunkZ
+      ?? packet?.chunk_position?.z
+      ?? packet?.chunkPosition?.z
+      ?? packet?.position?.z
+      ?? packet?.pos?.z,
+    NaN,
+  );
   if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
   return { key: `${Math.trunc(x)},${Math.trunc(z)}`, x: Math.trunc(x), z: Math.trunc(z) };
+}
+
+function objectKeys(value) {
+  return value && typeof value === 'object' && !Buffer.isBuffer(value)
+    ? Object.keys(value).slice(0, 12)
+    : [];
 }
 
 function findPacketBytes(value, depth = 0, seen = new Set()) {
@@ -131,6 +155,27 @@ function chunkGeometryFromBytes(packet, chunk) {
     }
   }
   return { columns, bytesRead: bytes.length, digest: digest >>> 0, energy: energy >>> 0 };
+}
+
+function pseudoChunkFromBytes(name, packet, index) {
+  const bytes = findPacketBytes(packet);
+  if (!bytes || bytes.length < 96) return null;
+  let digest = 2166136261;
+  const limit = Math.min(bytes.length, 4096);
+  for (let offset = 0; offset < limit; offset += 1) {
+    digest ^= bytes[offset];
+    digest = Math.imul(digest, 16777619) >>> 0;
+  }
+  const radius = 3;
+  const slot = Math.abs((digest + index * 17) % 49);
+  const x = (slot % 7) - radius;
+  const z = Math.floor(slot / 7) - radius;
+  return {
+    key: `packet:${name}:${digest}:${index}`,
+    x,
+    z,
+    pseudo: true,
+  };
 }
 
 function startJavaBot(config) {
@@ -267,14 +312,17 @@ function startBedrockBot(config) {
     updateBlock: 0,
     geometryColumns: 0,
     bytesTotal: 0,
+    renderPackets: 0,
     movePlayer: 0,
     moveEntity: 0,
     addPlayer: 0,
     playerList: 0,
     lastPacketAt: 0,
     lastPacket: '',
+    samples: [],
   };
   let connected = false;
+  let observedPacketIndex = 0;
 
   const normalizePacketName = (name) => String(name || '')
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
@@ -293,6 +341,17 @@ function startBedrockBot(config) {
     else if (normalized === 'add_player' || normalized === 'addplayer') packetStats.addPlayer += 1;
     else if (normalized === 'player_list' || normalized === 'playerlist') packetStats.playerList += 1;
     return normalized;
+  };
+  const samplePacket = (name, packet) => {
+    if (packetStats.samples.some((sample) => sample.name === name)) return;
+    const bytes = findPacketBytes(packet);
+    packetStats.samples.push({
+      name,
+      keys: objectKeys(packet),
+      bytes: bytes?.length || 0,
+      hasChunkKey: Boolean(packetChunkKey(packet)),
+    });
+    if (packetStats.samples.length > 8) packetStats.samples.shift();
   };
 
   const publishPlayers = () => send('players', { players: [...players].map(cleanPlayerName).filter(Boolean) });
@@ -331,15 +390,20 @@ function startBedrockBot(config) {
       packetStats: { ...packetStats },
     });
   };
-  const rememberChunkPacket = (packet) => {
-    const chunk = packetChunkKey(packet);
+  const rememberChunkPacket = (packet, packetName = 'level_chunk') => {
+    const explicitChunk = packetChunkKey(packet);
+    const chunk = explicitChunk || pseudoChunkFromBytes(packetName, packet, observedPacketIndex);
     if (!chunk) return;
     const geometry = chunkGeometryFromBytes(packet, chunk);
+    if (!geometry.bytesRead) return;
+    packetStats.renderPackets += 1;
     packetStats.geometryColumns += geometry.columns.length;
     packetStats.bytesTotal += geometry.bytesRead;
     chunks.set(chunk.key, {
       x: chunk.x,
       z: chunk.z,
+      pseudo: Boolean(chunk.pseudo),
+      source: packetName,
       updatedAt: Date.now(),
       size: geometry.bytesRead || finiteNumber(packet?.payload?.length ?? packet?.data?.length ?? packet?.blob?.length),
       digest: geometry.digest,
@@ -358,8 +422,14 @@ function startBedrockBot(config) {
     if (blockUpdates.length > 512) blockUpdates.splice(0, blockUpdates.length - 512);
   };
   const observePacket = (name, packet) => {
+    observedPacketIndex += 1;
     const normalized = countPacket(name);
-    if ((normalized === 'level_chunk' || normalized === 'levelchunk') && packet) rememberChunkPacket(packet);
+    if (packet) samplePacket(normalized, packet);
+    const bytes = packet ? findPacketBytes(packet) : null;
+    const chunkLike = /chunk|subchunk|sub_chunk|level|blob|block/i.test(normalized);
+    if (packet && ((normalized === 'level_chunk' || normalized === 'levelchunk') || chunkLike || (bytes && bytes.length >= 512))) {
+      rememberChunkPacket(packet, normalized);
+    }
     if ((normalized === 'update_block' || normalized === 'updateblock') && packet) rememberBlockUpdatePacket(packet);
   };
   const originalEmit = client.emit.bind(client);
