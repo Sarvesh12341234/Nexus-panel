@@ -13,6 +13,9 @@
 - Normal edition now includes ngrok token storage, playit.gg setup guidance, no-login quick tunnel command generation, and best-effort installer downloads for ngrok/playit.
 - Console command echoes redraw immediately, network speed testing uses a bounded quick probe, Time Machine points are manual by default with delete support, and scheduled backups pause during crash storms until stable runtime resumes.
 - Repair intelligence now recognizes Bedrock native crashes during world database open and validates learned fixes only after stable runtime.
+- Repair AI now resets stale learned weights, episodes, playbooks, terminal observations, and web cache when the model signature changes, then starts fresh with the upgraded brain.
+- Repair web research now uses broader natural-language intent detection, DuckDuckGo instant answers, a Minecraft-focused GitHub issue search, and more cached results.
+- Repair terminal diagnostics now expose more audited read-only tools for filesystem, archive, DNS, package, process, and network debugging.
 
 ### Fixed
 

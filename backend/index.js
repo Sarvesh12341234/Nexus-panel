@@ -13,7 +13,7 @@ const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
 const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
 const { AdaptiveEngine } = require('./adaptive_engine');
-const { RepairAgent } = require('./repair_agent');
+const { MODEL_VERSION: REPAIR_AGENT_MODEL_VERSION, PARAMETER_COUNT: REPAIR_AGENT_PARAMETER_COUNT, RepairAgent } = require('./repair_agent');
 const { RepairWebResearch } = require('./repair_web');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
@@ -194,6 +194,26 @@ function setSettingValue(key, value) {
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
   `).run(key, String(value ?? ''));
 }
+
+function ensureRepairAgentModelFresh() {
+  const signature = `v${REPAIR_AGENT_MODEL_VERSION}:${REPAIR_AGENT_PARAMETER_COUNT}:${knowledgeStatus().rules}:${knowledgeStatus().diagnosticSignals}`;
+  const previous = settingValue('repair_agent_model_signature', '');
+  if (previous === signature) return { reset: false, signature };
+  db.transaction(() => {
+    db.prepare('DELETE FROM repair_agent_weights').run();
+    db.prepare('DELETE FROM repair_agent_episodes').run();
+    db.prepare('DELETE FROM repair_agent_plans').run();
+    db.prepare('DELETE FROM repair_playbooks').run();
+    db.prepare('DELETE FROM repair_command_observations').run();
+    db.prepare('DELETE FROM repair_web_cache').run();
+    setSettingValue('repair_agent_model_signature', signature);
+    setSettingValue('repair_agent_model_reset_at', String(Date.now()));
+  })();
+  repairAgent.resetModel();
+  return { reset: true, signature, previous };
+}
+
+const repairAgentModelFreshness = ensureRepairAgentModelFresh();
 
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
@@ -1978,6 +1998,7 @@ function repairBrainPayload() {
     recent,
     agent: {
       ...repairAgent.status(),
+      freshness: repairAgentModelFreshness,
       web: repairWeb.status(),
       recentEpisodes: agentEpisodes,
       recentPlans: plans,

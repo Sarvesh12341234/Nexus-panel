@@ -3,15 +3,16 @@ const dns = require('node:dns').promises;
 const net = require('node:net');
 
 const ALLOWED_HOSTS = new Set([
+  'api.duckduckgo.com',
   'api.github.com',
   'api.stackexchange.com',
   'en.wikipedia.org',
   'learn.microsoft.com',
 ]);
 const MAX_RESPONSE_BYTES = 512 * 1024;
-const MAX_RESULTS = 16;
+const MAX_RESULTS = 24;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const REQUEST_TIMEOUT_MS = 8000;
+const REQUEST_TIMEOUT_MS = 10000;
 const CIRCUIT_FAILURE_LIMIT = 3;
 const CIRCUIT_COOLDOWN_MS = 10 * 60 * 1000;
 const STACK_SITES = Object.freeze([
@@ -43,9 +44,9 @@ const ENGLISH_INTENTS = Object.freeze([
   },
   {
     id: 'bedrock-leveldb-corruption',
-    patterns: [/bedrock.*(?:world|leveldb|db).*corrupt/i, /missing.*\.ldb/i],
-    query: 'Minecraft Bedrock LevelDB corruption backup save hold save query',
-    concepts: ['bedrock', 'leveldb', 'backup'],
+    patterns: [/bedrock.*(?:world|leveldb|db).*corrupt/i, /missing.*\.ldb/i, /opening level.*worlds.*db/i, /__libc_start_main/i],
+    query: 'Minecraft Bedrock dedicated server crash Opening level worlds db LevelDB restore backup',
+    concepts: ['bedrock', 'leveldb', 'backup', 'native-crash'],
   },
   {
     id: 'server-properties-missing',
@@ -58,6 +59,24 @@ const ENGLISH_INTENTS = Object.freeze([
     patterns: [/sqlite|database.*(?:corrupt|malformed|locked)/i],
     query: 'SQLite WAL database disk image malformed recovery backup integrity check',
     concepts: ['sqlite', 'wal', 'recovery'],
+  },
+  {
+    id: 'systemd-transient-unit',
+    patterns: [/failed to start transient service unit/i, /unit .*already loaded/i, /systemd-run|nexusmark/i],
+    query: 'systemd transient service unit already loaded reset failed unique unit name CPUQuota',
+    concepts: ['systemd', 'cgroup', 'nexusmark'],
+  },
+  {
+    id: 'ddos-mitigation',
+    patterns: [/ddos|syn flood|udp flood|conntrack|nftables|iptables/i],
+    query: 'Linux game server DDoS mitigation nftables conntrack SYN flood UDP rate limit',
+    concepts: ['ddos', 'firewall', 'network'],
+  },
+  {
+    id: 'upload-progress',
+    patterns: [/upload.*(?:stuck|slow|progress|range|chunk)/i, /ranges\.map is not a function/i],
+    query: 'resumable chunk upload progress ranges map not a function javascript',
+    concepts: ['upload', 'ranges', 'progress'],
   },
 ]);
 
@@ -156,6 +175,37 @@ async function fetchJson(rawUrl, headers = {}) {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   return readBoundedJson(response);
+}
+
+function duckDuckGoResults(payload) {
+  const rows = [];
+  if (payload.AbstractText) {
+    rows.push({
+      source: 'duckduckgo',
+      title: stripHtml(payload.Heading || 'DuckDuckGo instant answer').slice(0, 180),
+      excerpt: stripHtml(payload.AbstractText).slice(0, 700),
+      codeSnippets: [],
+      url: String(payload.AbstractURL || 'https://duckduckgo.com/'),
+      score: 1,
+      answered: true,
+      authoritative: false,
+    });
+  }
+  const related = Array.isArray(payload.RelatedTopics) ? payload.RelatedTopics : [];
+  for (const item of related.flatMap((entry) => Array.isArray(entry.Topics) ? entry.Topics : [entry]).slice(0, 8)) {
+    if (!item?.Text || !item?.FirstURL) continue;
+    rows.push({
+      source: 'duckduckgo',
+      title: stripHtml(item.Text).split(' - ')[0].slice(0, 180),
+      excerpt: stripHtml(item.Text).slice(0, 700),
+      codeSnippets: [],
+      url: String(item.FirstURL),
+      score: 0.4,
+      answered: true,
+      authoritative: false,
+    });
+  }
+  return rows;
 }
 
 function stackExchangeResults(payload, site) {
@@ -283,6 +333,9 @@ function focusedResearchQuery(query) {
     /unable to access jarfile/i,
     /invalid or corrupt jarfile/i,
     /failed to start transient (?:service )?unit/i,
+    /opening level .*worlds.*db/i,
+    /__libc_start_main/i,
+    /ranges\.map is not a function/i,
   ].map((pattern) => text.match(pattern)?.[0]).filter(Boolean);
   if (exceptions.length || phrases.length) {
     return [...new Set([...exceptions.slice(-2), ...phrases.slice(0, 2), intent.query, ...math])].filter(Boolean).join(' ').slice(0, 220);
@@ -339,7 +392,7 @@ class RepairWebResearch {
   async research(query) {
     const safeQuery = redactResearchText(query);
     if (safeQuery.length < 8) return { query: safeQuery, results: [], cached: false, errors: ['Error text was too short to research.'] };
-    const queryHash = crypto.createHash('sha256').update(`v5|${safeQuery}`).digest('hex');
+    const queryHash = crypto.createHash('sha256').update(`v6|${safeQuery}`).digest('hex');
     const cached = this.db.prepare('SELECT * FROM repair_web_cache WHERE query_hash = ? AND expires_at > ?').get(queryHash, Date.now());
     if (cached) {
       return { query: cached.query_text, results: JSON.parse(cached.results_json || '[]'), cached: true, errors: [] };
@@ -360,6 +413,11 @@ class RepairWebResearch {
       q: `"${compact.slice(0, 120)}" in:title,body is:issue`,
       per_page: '5',
     }).toString();
+    const githubMinecraftUrl = new URL('https://api.github.com/search/issues');
+    githubMinecraftUrl.search = new URLSearchParams({
+      q: `${compact.slice(0, 120)} minecraft bedrock paper in:title,body is:issue`,
+      per_page: '5',
+    }).toString();
     const learnUrl = new URL('https://learn.microsoft.com/api/search/');
     learnUrl.search = new URLSearchParams({
       search: compact,
@@ -374,6 +432,14 @@ class RepairWebResearch {
       format: 'json',
       utf8: '1',
       srlimit: '4',
+    }).toString();
+    const duckUrl = new URL('https://api.duckduckgo.com/');
+    duckUrl.search = new URLSearchParams({
+      q: compact,
+      format: 'json',
+      no_html: '1',
+      no_redirect: '1',
+      skip_disambig: '1',
     }).toString();
     const sourceRequests = STACK_SITES.map(([site, label]) => {
       const url = new URL('https://api.stackexchange.com/2.3/search/advanced');
@@ -398,6 +464,11 @@ class RepairWebResearch {
         request: () => fetchJson(githubUrl, { 'X-GitHub-Api-Version': '2022-11-28' }).then(githubResults),
       },
       {
+        name: 'github-minecraft-issues',
+        label: 'GitHub Minecraft Issues',
+        request: () => fetchJson(githubMinecraftUrl, { 'X-GitHub-Api-Version': '2022-11-28' }).then(githubResults),
+      },
+      {
         name: 'microsoft-learn',
         label: 'Microsoft Learn',
         request: () => fetchJson(learnUrl).then(microsoftLearnResults),
@@ -406,6 +477,11 @@ class RepairWebResearch {
         name: 'wikipedia',
         label: 'Wikipedia',
         request: () => fetchJson(wikipediaUrl).then(wikipediaResults),
+      },
+      {
+        name: 'duckduckgo',
+        label: 'DuckDuckGo',
+        request: () => fetchJson(duckUrl).then(duckDuckGoResults),
       },
     );
     const requests = sourceRequests.map((source) => this.runSource(source.name, source.request));
@@ -446,7 +522,7 @@ class RepairWebResearch {
   status() {
     const cache = this.db.prepare('SELECT COUNT(*) AS count, COALESCE(MAX(fetched_at), 0) AS last_fetch FROM repair_web_cache').get();
     return {
-      enabledSources: [...STACK_SITES.map(([site]) => site), 'github-issues', 'microsoft-learn', 'wikipedia'],
+      enabledSources: [...STACK_SITES.map(([site]) => site), 'github-issues', 'github-minecraft-issues', 'microsoft-learn', 'wikipedia', 'duckduckgo'],
       allowlistedHosts: [...ALLOWED_HOSTS],
       sourceHealth: Object.fromEntries([...this.sourceHealth.entries()].map(([name, value]) => [name, {
         healthy: Number(value.disabledUntil || 0) <= Date.now(),

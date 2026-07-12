@@ -5,6 +5,7 @@ const v8 = require('node:v8');
 const { diagnoseRuntime, knowledgeRules } = require('./repair_knowledge');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 
+const MODEL_VERSION = 2;
 const MAX_MODEL_PARAMETERS = 1000000;
 const MAX_AGENT_MEMORY_BYTES = 1024 * 1024 * 1024;
 const MAX_LEARNED_WEIGHTS = 32768;
@@ -306,6 +307,12 @@ class RepairAgent {
       if (label == null || feature < 0 || feature >= FEATURE_DIMENSIONS) continue;
       this.weights[label * FEATURE_DIMENSIONS + feature] += Number(row.weight || 0);
     }
+  }
+
+  resetModel() {
+    this.weights.fill(0);
+    this.bias.fill(0);
+    this.bootstrap();
   }
 
   score(features) {
@@ -623,7 +630,7 @@ class RepairAgent {
       + 16 * 1024 * 1024;
     return {
       architecture: 'hashed-linear-neural-ranker+knowledge-graph',
-      version: 1,
+      version: MODEL_VERSION,
       parameterCount: PARAMETER_COUNT,
       featureDimensions: FEATURE_DIMENSIONS,
       labels: rules.length,
@@ -652,6 +659,7 @@ module.exports = {
   ACTION_LIBRARY,
   FEATURE_DIMENSIONS,
   MAX_AGENT_MEMORY_BYTES,
+  MODEL_VERSION,
   PARAMETER_COUNT,
   RepairAgent,
 };
