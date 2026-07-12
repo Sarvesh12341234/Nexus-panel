@@ -203,7 +203,30 @@ function startBedrockBot(config) {
   const entities = new Map();
   const chunks = new Map();
   const blockUpdates = [];
+  const packetStats = {
+    total: 0,
+    levelChunk: 0,
+    updateBlock: 0,
+    movePlayer: 0,
+    moveEntity: 0,
+    addPlayer: 0,
+    playerList: 0,
+    lastPacketAt: 0,
+    lastPacket: '',
+  };
   let connected = false;
+
+  const countPacket = (name) => {
+    packetStats.total += 1;
+    packetStats.lastPacketAt = Date.now();
+    packetStats.lastPacket = name;
+    if (name === 'level_chunk') packetStats.levelChunk += 1;
+    else if (name === 'update_block') packetStats.updateBlock += 1;
+    else if (name === 'move_player') packetStats.movePlayer += 1;
+    else if (name === 'move_entity') packetStats.moveEntity += 1;
+    else if (name === 'add_player') packetStats.addPlayer += 1;
+    else if (name === 'player_list') packetStats.playerList += 1;
+  };
 
   const publishPlayers = () => send('players', { players: [...players].map(cleanPlayerName).filter(Boolean) });
   const rememberEntity = (id, patch) => {
@@ -224,6 +247,9 @@ function startBedrockBot(config) {
     for (const [id, entity] of [...entities.entries()]) {
       if (!entity.self && now - Number(entity.updatedAt || 0) > 30 * 1000) entities.delete(id);
     }
+    if (![...entities.values()].some((entity) => entity.self)) {
+      rememberEntity(config.username, { name: config.username, x: 0, y: 64, z: 0, yaw: 0, pitch: 0, self: true });
+    }
     sendEntities([...entities.values()]);
   };
   const publishWorld = () => {
@@ -232,9 +258,10 @@ function startBedrockBot(config) {
       if (now - Number(chunk.updatedAt || 0) > 5 * 60 * 1000) chunks.delete(key);
     }
     send('world', {
-      mode: 'bedrock-custom-voxel',
+      mode: 'nexusvision-packet-wireframe',
       chunks: [...chunks.values()].slice(-192),
       blockUpdates: blockUpdates.splice(0, blockUpdates.length).slice(-128),
+      packetStats: { ...packetStats },
     });
   };
   const markConnected = (packet = null) => {
@@ -255,6 +282,7 @@ function startBedrockBot(config) {
   client.once('start_game', markConnected);
   client.once('spawn', markConnected);
   client.on('add_player', (packet) => {
+    countPacket('add_player');
     const id = packetEntityId(packet) || packet?.username;
     const name = packet?.username || packet?.name || packet?.display_name || id || '';
     if (name) players.add(String(name));
@@ -268,6 +296,7 @@ function startBedrockBot(config) {
     publishPlayers();
   });
   client.on('move_player', (packet) => {
+    countPacket('move_player');
     const id = packetEntityId(packet);
     if (!id) return;
     const previous = entities.get(id) || {};
@@ -280,6 +309,7 @@ function startBedrockBot(config) {
     });
   });
   client.on('move_entity', (packet) => {
+    countPacket('move_entity');
     const id = packetEntityId(packet);
     if (!id) return;
     const previous = entities.get(id) || {};
@@ -299,6 +329,7 @@ function startBedrockBot(config) {
     if (id) entities.delete(id);
   });
   client.on('level_chunk', (packet) => {
+    countPacket('level_chunk');
     const chunk = packetChunkKey(packet);
     if (!chunk) return;
     chunks.set(chunk.key, {
@@ -309,6 +340,7 @@ function startBedrockBot(config) {
     });
   });
   client.on('update_block', (packet) => {
+    countPacket('update_block');
     const position = packetPosition(packet);
     blockUpdates.push({
       x: Math.trunc(position.x),
@@ -320,6 +352,7 @@ function startBedrockBot(config) {
     if (blockUpdates.length > 512) blockUpdates.splice(0, blockUpdates.length - 512);
   });
   client.on('player_list', (packet) => {
+    countPacket('player_list');
     for (const record of packet?.records?.records || packet?.records || []) {
       if (record?.username) {
         players.add(String(record.username));

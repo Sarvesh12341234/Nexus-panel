@@ -508,10 +508,23 @@ function sanitizeSpectateWorld(world) {
       updatedAt: Number.isFinite(Number(block?.updatedAt)) ? Number(block.updatedAt) : Date.now(),
     }))
     .slice(-256);
+  const rawStats = world?.packetStats && typeof world.packetStats === 'object' ? world.packetStats : {};
+  const packetStats = {
+    total: Number.isFinite(Number(rawStats.total)) ? Math.trunc(Number(rawStats.total)) : 0,
+    levelChunk: Number.isFinite(Number(rawStats.levelChunk)) ? Math.trunc(Number(rawStats.levelChunk)) : 0,
+    updateBlock: Number.isFinite(Number(rawStats.updateBlock)) ? Math.trunc(Number(rawStats.updateBlock)) : 0,
+    movePlayer: Number.isFinite(Number(rawStats.movePlayer)) ? Math.trunc(Number(rawStats.movePlayer)) : 0,
+    moveEntity: Number.isFinite(Number(rawStats.moveEntity)) ? Math.trunc(Number(rawStats.moveEntity)) : 0,
+    addPlayer: Number.isFinite(Number(rawStats.addPlayer)) ? Math.trunc(Number(rawStats.addPlayer)) : 0,
+    playerList: Number.isFinite(Number(rawStats.playerList)) ? Math.trunc(Number(rawStats.playerList)) : 0,
+    lastPacketAt: Number.isFinite(Number(rawStats.lastPacketAt)) ? Number(rawStats.lastPacketAt) : 0,
+    lastPacket: String(rawStats.lastPacket || '').slice(0, 60),
+  };
   return {
-    mode: String(world?.mode || 'bedrock-custom-voxel').slice(0, 60),
+    mode: String(world?.mode || 'nexusvision-packet-wireframe').slice(0, 60),
     chunks,
     blockUpdates,
+    packetStats,
     updatedAt: Number.isFinite(Number(world?.updatedAt)) ? Number(world.updatedAt) : Date.now(),
   };
 }
@@ -766,9 +779,10 @@ function startSpectateSession(server, req = null) {
     if (message.type === 'world') {
       const previous = session.world || {};
       session.world = sanitizeSpectateWorld({
-        mode: message.mode || previous.mode || 'bedrock-custom-voxel',
+        mode: message.mode || previous.mode || 'nexusvision-packet-wireframe',
         chunks: message.chunks || previous.chunks || [],
         blockUpdates: [...(previous.blockUpdates || []), ...(message.blockUpdates || [])].slice(-256),
+        packetStats: message.packetStats || previous.packetStats || {},
         updatedAt: Date.now(),
       });
     }

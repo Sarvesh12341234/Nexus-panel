@@ -2144,6 +2144,7 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   const world = data.world || {};
   const chunks = Array.isArray(world.chunks) ? world.chunks : [];
   const blockUpdates = Array.isArray(world.blockUpdates) ? world.blockUpdates : [];
+  const packetStats = world.packetStats || {};
   const chunkSet = new Set(chunks.map((chunk) => `${chunk.x},${chunk.z}`));
   const focusChunkX = Math.floor(Number(focus.x || 0) / 16);
   const focusChunkZ = Math.floor(Number(focus.z || 0) / 16);
@@ -2165,23 +2166,52 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   };
 
   ctx.save();
-  ctx.globalAlpha = 0.4;
-  const horizon = ctx.createLinearGradient(0, height * 0.16, 0, height * 0.72);
-  horizon.addColorStop(0, 'rgba(94, 216, 255, 0.32)');
-  horizon.addColorStop(0.48, 'rgba(65, 230, 155, 0.14)');
-  horizon.addColorStop(1, 'rgba(10, 20, 18, 0)');
-  ctx.fillStyle = horizon;
-  ctx.fillRect(0, height * 0.16, width, height * 0.58);
-  ctx.strokeStyle = 'rgba(191, 219, 254, 0.18)';
+  ctx.globalAlpha = 0.85;
+  ctx.strokeStyle = 'rgba(226, 232, 240, 0.18)';
   ctx.lineWidth = 1;
-  for (let i = 0; i < 7; i += 1) {
-    const y = height * (0.34 + i * 0.055);
+  for (let i = 0; i < 11; i += 1) {
+    const y = height * (0.22 + i * 0.055);
     ctx.beginPath();
     ctx.moveTo(0, y);
-    ctx.lineTo(width, y + Math.sin(elapsed / 900 + i) * 4);
+    ctx.lineTo(width, y + Math.sin(elapsed / 900 + i) * 2);
     ctx.stroke();
   }
   ctx.restore();
+
+  const drawPacketDiamond = (cx, cz, alpha = 0.82) => {
+    const corners = [
+      project(cx * 16, 64, cz * 16),
+      project(cx * 16 + 16, 64, cz * 16),
+      project(cx * 16 + 16, 64, cz * 16 + 16),
+      project(cx * 16, 64, cz * 16 + 16),
+    ];
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = 'rgba(236, 254, 255, 0.72)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    corners.forEach((point, index) => {
+      if (index) ctx.lineTo(point.x, point.y);
+      else ctx.moveTo(point.x, point.y);
+    });
+    ctx.closePath();
+    ctx.stroke();
+    ctx.globalAlpha = alpha * 0.28;
+    ctx.fillStyle = '#e5e7eb';
+    ctx.fill();
+    ctx.restore();
+  };
+
+  const packetChunks = chunks.length
+    ? chunks
+    : Array.from({ length: 49 }, (_, index) => ({
+      x: focusChunkX + (index % 7) - 3,
+      z: focusChunkZ + Math.floor(index / 7) - 3,
+      synthetic: true,
+    }));
+  for (const chunk of packetChunks.slice(-192)) {
+    drawPacketDiamond(chunk.x, chunk.z, chunk.synthetic ? 0.22 : 0.72);
+  }
 
   const visible = [];
   for (let cx = focusChunkX - 3; cx <= focusChunkX + 3; cx += 1) {
@@ -2198,20 +2228,15 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     }
   }
   visible.sort((a, b) => a.sort - b.sort);
-  const palettes = [
-    { top: '#65d46e', left: '#1d6b42', right: '#2b8a56' },
-    { top: '#79b866', left: '#315f36', right: '#477a43' },
-    { top: '#7dd3fc', left: '#155e75', right: '#0e7490' },
-    { top: '#c4b5fd', left: '#5b21b6', right: '#6d28d9' },
-  ];
   for (const block of visible.slice(-360)) {
     const point = project(block.x, block.y, block.z);
     if (point.x < -80 || point.x > width + 80 || point.y < height * 0.18 || point.y > height + 80) continue;
-    const palette = palettes[spectateHash(`${block.x}:${block.z}:${seed}`) % palettes.length];
     const distance = Math.hypot(block.x - Number(focus.x || 0), block.z - Number(focus.z || 0));
     ctx.save();
-    ctx.globalAlpha = Math.max(0.36, Math.min(1, 1 - distance / 120));
-    drawVoxelCube(ctx, point.x, point.y, tile * 1.8, tile * 0.7, palette);
+    ctx.globalAlpha = Math.max(0.12, Math.min(0.62, 1 - distance / 120));
+    ctx.strokeStyle = '#f8fafc';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(point.x - 2, point.y - 2, 4, 4);
     ctx.restore();
   }
 
@@ -2219,26 +2244,33 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     const point = project(update.x, update.y || terrainHeightAt(update.x, update.z, seed) + 1, update.z);
     const age = Math.max(0, Math.min(1, 1 - ((Date.now() - Number(update.updatedAt || 0)) / 5000)));
     ctx.save();
-    ctx.globalAlpha = 0.25 + age * 0.55;
-    drawVoxelCube(ctx, point.x, point.y - 8, tile * 1.5, tile * 1.2, {
-      top: '#fbbf24',
-      left: '#b45309',
-      right: '#d97706',
-    });
+    ctx.globalAlpha = 0.28 + age * 0.72;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y - 8, 5 + age * 9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(point.x - 12, point.y - 8);
+    ctx.lineTo(point.x + 12, point.y - 8);
+    ctx.moveTo(point.x, point.y - 20);
+    ctx.lineTo(point.x, point.y + 4);
+    ctx.stroke();
     ctx.restore();
   }
 
   ctx.fillStyle = 'rgba(4, 10, 18, 0.58)';
-  roundRect(ctx, width - 390, 28, 334, 86, 14);
+  roundRect(ctx, width - 420, 28, 364, 112, 14);
   ctx.fill();
-  ctx.fillStyle = '#41e69b';
+  ctx.fillStyle = '#f8fafc';
   ctx.font = '700 13px Inter, Segoe UI, Arial';
   ctx.textAlign = 'left';
-  ctx.fillText('NexusVision packet renderer', width - 368, 56);
+  ctx.fillText('NexusVision packet constructor', width - 398, 56);
   ctx.fillStyle = '#cbd5e1';
   ctx.font = '13px Inter, Segoe UI, Arial';
-  ctx.fillText(`${chunks.length || 'synthetic'} chunk(s)  ${blockUpdates.length} block hint(s)`, width - 368, 80);
-  ctx.fillText(`camera yaw ${Math.round(Number(focus.yaw || 0))}  headless render`, width - 368, 102);
+  ctx.fillText(`chunks ${chunks.length}  updates ${blockUpdates.length}  packets ${Number(packetStats.total || 0)}`, width - 398, 80);
+  ctx.fillText(`level_chunk ${Number(packetStats.levelChunk || 0)}  move ${Number(packetStats.movePlayer || 0) + Number(packetStats.moveEntity || 0)}`, width - 398, 102);
+  ctx.fillText(`last ${packetStats.lastPacket || 'waiting'}  yaw ${Math.round(Number(focus.yaw || 0))}`, width - 398, 124);
   return { project, tile };
 }
 
