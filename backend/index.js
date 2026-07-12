@@ -410,24 +410,36 @@ function sendSpectateModeCommand(server, botName) {
   }
 }
 
+function latestSpectateLogEvent(server, botName) {
+  const recentLines = consoleLogs(server.id)
+    .filter((line) => String(line).includes(botName))
+    .slice(-30);
+  if (!recentLines.length) return null;
+  const line = [...recentLines].reverse().find((entry) => /Player (?:connected|Spawned|disconnected):\s*/i.test(String(entry)));
+  if (!line) return null;
+  return {
+    line,
+    connected: /Player (?:connected|Spawned):\s*/i.test(line),
+    disconnected: /Player disconnected:\s*/i.test(line),
+  };
+}
+
 function inferSpectateFromServerLogs(server, session) {
   if (!session) return session;
-  const childAlive = Boolean(session.child && !session.child.killed && session.status !== 'stopped');
-  if (!childAlive || Date.now() - Number(session.startedAt || 0) > 10 * 60 * 1000) return session;
+  const childAlive = Boolean(session.child && !session.child.killed);
+  if (!childAlive && Date.now() - Number(session.updatedAt || session.startedAt || 0) > 2 * 60 * 1000) return session;
+  if (Date.now() - Number(session.startedAt || 0) > 10 * 60 * 1000) return session;
   const botName = session.botName || spectateBotName(server);
-  const recent = consoleLogs(server.id)
-    .filter((line) => String(line).includes(botName))
-    .slice(-20)
-    .join('\n');
-  if (!recent) return session;
-  if (/Player (?:connected|Spawned):\s*/i.test(recent) || /Player Spawned:/i.test(recent)) {
+  const latestEvent = latestSpectateLogEvent(server, botName);
+  if (!latestEvent) return session;
+  if (latestEvent.connected) {
     const players = new Set([...(session.players || []), botName]);
     session.players = [...players];
     session.target = session.target || botName;
-    if (['connecting', 'ready', 'stopped', 'error'].includes(session.status)) {
-      session.status = 'connected';
-      session.message = `${botName} is connected and spawned. Live feed is following the bot perspective.`;
-    }
+    session.status = 'connected';
+    session.message = server.type === 'bedrock'
+      ? `${botName} is connected. Bedrock video needs the real frame-push client stream to show pixels.`
+      : `${botName} is connected and spawned. Live feed is following the bot perspective.`;
     session.updatedAt = Date.now();
     if (session.timeout) {
       clearTimeout(session.timeout);
@@ -435,7 +447,7 @@ function inferSpectateFromServerLogs(server, session) {
     }
     sendSpectateModeCommand(server, botName);
   }
-  if (/Player disconnected:\s*/i.test(recent)) {
+  if (latestEvent.disconnected) {
     session.status = 'stopped';
     session.updatedAt = Date.now();
     session.message = `${botName} disconnected from the server.`;
@@ -476,13 +488,13 @@ function spectateSessionPayload(server, req = null) {
     pid: session?.child?.pid || 0,
     botName: session?.botName || spectateBotName(server),
     authMode: session?.authMode || spectateAuthMode(server),
-    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-custom-canvas'),
-    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'custom-canvas'),
+    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-frame-push'),
+    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'waiting-for-frame-push'),
     rendererPort: session?.rendererPort || (server.type === 'java' ? spectateRendererPort(server) : 0),
     rendererUrl: spectateRendererUrl(server, session, req),
     rendererMessage: session?.rendererMessage || (server.type === 'java'
       ? 'Java screenshare renderer starts after the bot spawns. Install prismarine-viewer if it stays unavailable.'
-      : 'Bedrock custom voxel renderer uses live chunk, block update, and entity packets.'),
+      : 'Bedrock protocol bots can join but cannot render video. Start the real frame-push client stream to show gameplay pixels.'),
     clientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
     framePushActive,
     framePushUpdatedAt: frameFeed?.updatedAt || 0,
@@ -505,7 +517,34 @@ function startSpectateSession(server, req = null) {
   if (runtimeStatus(server.id) !== 'online') throw new Error('Start the server before opening a live spectate session.');
   const bot = spectateBotPackage(server);
   const existing = spectateSessions.get(Number(server.id));
-  if (existing?.child && !existing.child.killed && !['stopped', 'error'].includes(existing.status)) {
+  if (existing?.child && !existing.child.killed) {
+    return spectateSessionPayload(server, req);
+  }
+  const botName = spectateBotName(server);
+  const latestEvent = latestSpectateLogEvent(server, botName);
+  if (latestEvent?.connected) {
+    const payload = {
+      status: 'connected',
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      botName,
+      authMode: spectateAuthMode(server),
+      rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-frame-push',
+      rendererStatus: server.type === 'java' ? 'waiting' : 'waiting-for-frame-push',
+      rendererPort: server.type === 'java' ? spectateRendererPort(server) : 0,
+      rendererMessage: server.type === 'bedrock'
+        ? 'The Bedrock spectate account is already joined. Start the real frame-push client stream to show video.'
+        : 'The spectate account is already joined.',
+      target: botName,
+      players: [botName],
+      entities: [],
+      world: sanitizeSpectateWorld({}),
+      message: server.type === 'bedrock'
+        ? `${botName} is already in the server. No duplicate bot was started; waiting for real frame-push video.`
+        : `${botName} is already in the server. No duplicate bot was started.`,
+    };
+    spectateSessions.set(Number(server.id), payload);
+    sendSpectateModeCommand(server, botName);
     return spectateSessionPayload(server, req);
   }
   try {
@@ -550,12 +589,12 @@ function startSpectateSession(server, req = null) {
     updatedAt: Date.now(),
     botName: config.username,
     authMode: config.auth,
-    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-custom-canvas',
-    rendererStatus: server.type === 'java' ? 'starting' : 'custom-canvas',
+    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-frame-push',
+    rendererStatus: server.type === 'java' ? 'starting' : 'waiting-for-frame-push',
     rendererPort: config.rendererPort,
     rendererMessage: server.type === 'java'
       ? `Starting Java first-person renderer on port ${config.rendererPort}...`
-      : 'Using NexusPanel custom Bedrock voxel renderer.',
+      : 'Bedrock bot is only the spectator account. Start frame push from a real Bedrock client to show video.',
     target: players[0] || '',
     players,
     entities: [],
