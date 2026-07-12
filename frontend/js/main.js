@@ -1920,7 +1920,7 @@ async function renderSpectate() {
     <div class="metric-grid">
       <div><strong data-spectate-status>${escapeHtml(data.status || 'stopped')}</strong><span>Session</span></div>
       <div><strong data-spectate-server>${escapeHtml(data.serverStatus || server.status)}</strong><span>Server</span></div>
-      <div><strong data-spectate-engine>${escapeHtml(data.engine || 'Bot engine')}</strong><span>${data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
+      <div><strong data-spectate-engine>${escapeHtml(data.serverType === 'bedrock' ? 'NexusVision' : data.engine || 'Bot engine')}</strong><span>${data.serverType === 'bedrock' ? 'Packet renderer' : data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
       <div><strong data-spectate-bot>${escapeHtml(data.botName || 'live-update')}</strong><span>${escapeHtml(data.authMode || 'offline')} auth</span></div>
       <div><strong data-spectate-target>${escapeHtml(data.target || 'Overview')}</strong><span>Target</span></div>
       <div><strong data-spectate-pid>${data.pid ? Number(data.pid) : '-'}</strong><span>Bot PID</span></div>
@@ -2028,7 +2028,7 @@ function updateSpectateLiveDom(data) {
   };
   setText('[data-spectate-status]', data.status || 'stopped');
   setText('[data-spectate-server]', data.serverStatus || '');
-  setText('[data-spectate-engine]', data.engine || 'Bot engine');
+  setText('[data-spectate-engine]', data.serverType === 'bedrock' ? 'NexusVision' : data.engine || 'Bot engine');
   setText('[data-spectate-bot]', data.botName || 'live-update');
   setText('[data-spectate-target]', data.target || 'Overview');
   setText('[data-spectate-pid]', data.pid ? String(Number(data.pid)) : '-');
@@ -2045,7 +2045,7 @@ function updateSpectateLiveDom(data) {
   }
   const badge = panel.querySelector('[data-spectate-badge]');
   if (badge) {
-    badge.textContent = data.packageInstalled ? 'Engine ready' : 'Needs engine';
+    badge.textContent = data.serverType === 'bedrock' ? 'NexusVision ready' : data.packageInstalled ? 'Engine ready' : 'Needs engine';
     badge.classList.toggle('is-on', Boolean(data.packageInstalled && data.status !== 'missing-engine'));
   }
   const signature = (data.players || []).join('|');
@@ -2146,15 +2146,38 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   const tile = Math.max(10, Math.min(18, width / 90));
   const originX = width * 0.5;
   const originY = height * 0.58;
+  const yaw = (Number(focus.yaw || 0) * Math.PI) / 180;
+  const cameraSway = Math.sin(elapsed / 1100) * 5;
   const project = (x, y, z) => {
-    const dx = Number(x || 0) - Number(focus.x || 0);
-    const dz = Number(z || 0) - Number(focus.z || 0);
+    const rawDx = Number(x || 0) - Number(focus.x || 0);
+    const rawDz = Number(z || 0) - Number(focus.z || 0);
+    const dx = rawDx * Math.cos(yaw) - rawDz * Math.sin(yaw);
+    const dz = rawDx * Math.sin(yaw) + rawDz * Math.cos(yaw);
     const dy = Number(y || 0) - Number(focus.y || 64);
     return {
-      x: originX + (dx - dz) * tile * 0.58,
+      x: originX + (dx - dz) * tile * 0.58 + cameraSway,
       y: originY + (dx + dz) * tile * 0.31 - dy * tile * 0.38,
     };
   };
+
+  ctx.save();
+  ctx.globalAlpha = 0.4;
+  const horizon = ctx.createLinearGradient(0, height * 0.16, 0, height * 0.72);
+  horizon.addColorStop(0, 'rgba(94, 216, 255, 0.32)');
+  horizon.addColorStop(0.48, 'rgba(65, 230, 155, 0.14)');
+  horizon.addColorStop(1, 'rgba(10, 20, 18, 0)');
+  ctx.fillStyle = horizon;
+  ctx.fillRect(0, height * 0.16, width, height * 0.58);
+  ctx.strokeStyle = 'rgba(191, 219, 254, 0.18)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 7; i += 1) {
+    const y = height * (0.34 + i * 0.055);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y + Math.sin(elapsed / 900 + i) * 4);
+    ctx.stroke();
+  }
+  ctx.restore();
 
   const visible = [];
   for (let cx = focusChunkX - 3; cx <= focusChunkX + 3; cx += 1) {
@@ -2171,15 +2194,21 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     }
   }
   visible.sort((a, b) => a.sort - b.sort);
-  const palette = {
-    top: '#4ade80',
-    left: '#176b4a',
-    right: '#228b60',
-  };
+  const palettes = [
+    { top: '#65d46e', left: '#1d6b42', right: '#2b8a56' },
+    { top: '#79b866', left: '#315f36', right: '#477a43' },
+    { top: '#7dd3fc', left: '#155e75', right: '#0e7490' },
+    { top: '#c4b5fd', left: '#5b21b6', right: '#6d28d9' },
+  ];
   for (const block of visible.slice(-360)) {
     const point = project(block.x, block.y, block.z);
     if (point.x < -80 || point.x > width + 80 || point.y < height * 0.18 || point.y > height + 80) continue;
+    const palette = palettes[spectateHash(`${block.x}:${block.z}:${seed}`) % palettes.length];
+    const distance = Math.hypot(block.x - Number(focus.x || 0), block.z - Number(focus.z || 0));
+    ctx.save();
+    ctx.globalAlpha = Math.max(0.36, Math.min(1, 1 - distance / 120));
     drawVoxelCube(ctx, point.x, point.y, tile * 1.8, tile * 0.7, palette);
+    ctx.restore();
   }
 
   for (const update of blockUpdates.slice(-40)) {
@@ -2196,15 +2225,16 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   }
 
   ctx.fillStyle = 'rgba(4, 10, 18, 0.58)';
-  roundRect(ctx, width - 350, 28, 294, 68, 14);
+  roundRect(ctx, width - 390, 28, 334, 86, 14);
   ctx.fill();
-  ctx.fillStyle = '#bfdbfe';
+  ctx.fillStyle = '#41e69b';
   ctx.font = '700 13px Inter, Segoe UI, Arial';
   ctx.textAlign = 'left';
-  ctx.fillText('Bedrock custom renderer', width - 328, 56);
+  ctx.fillText('NexusVision packet renderer', width - 368, 56);
   ctx.fillStyle = '#cbd5e1';
   ctx.font = '13px Inter, Segoe UI, Arial';
-  ctx.fillText(`${chunks.length || 'synthetic'} chunk(s) loaded  ${blockUpdates.length} block hint(s)`, width - 328, 80);
+  ctx.fillText(`${chunks.length || 'synthetic'} chunk(s)  ${blockUpdates.length} block hint(s)`, width - 368, 80);
+  ctx.fillText(`camera yaw ${Math.round(Number(focus.yaw || 0))}  headless render`, width - 368, 102);
   return { project, tile };
 }
 
@@ -2400,6 +2430,30 @@ function drawSpectateVideo(canvas, data, elapsed) {
   ctx.beginPath();
   ctx.arc(width - 54, 52, 8 + pulse * 3, 0, Math.PI * 2);
   ctx.fill();
+
+  if (bedrockVoxel) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(236, 254, 255, 0.7)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(width / 2 - 16, height / 2);
+    ctx.lineTo(width / 2 - 5, height / 2);
+    ctx.moveTo(width / 2 + 5, height / 2);
+    ctx.lineTo(width / 2 + 16, height / 2);
+    ctx.moveTo(width / 2, height / 2 - 16);
+    ctx.lineTo(width / 2, height / 2 - 5);
+    ctx.moveTo(width / 2, height / 2 + 5);
+    ctx.lineTo(width / 2, height / 2 + 16);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(4, 10, 18, 0.52)';
+    roundRect(ctx, width / 2 - 145, height - 38, 290, 24, 8);
+    ctx.fill();
+    ctx.fillStyle = '#bfdbfe';
+    ctx.font = '700 12px Inter, Segoe UI, Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('NexusVision reconstructs this view from Bedrock packets', width / 2, height - 22);
+    ctx.restore();
+  }
 }
 
 function roundRect(ctx, x, y, width, height, radius) {

@@ -516,16 +516,25 @@ function sanitizeSpectateWorld(world) {
   };
 }
 
+function minecraftCommandTarget(name) {
+  const clean = String(name || '').replace(/[\r\n"]/g, '').slice(0, 64);
+  return clean ? `"${clean}"` : '';
+}
+
 function sendSpectateModeCommand(server, botName) {
   const session = spectateSessions.get(Number(server.id));
   if (!session || session.gamemodeSent || runtimeStatus(server.id) !== 'online') return;
+  const target = minecraftCommandTarget(botName);
+  if (!target) return;
   session.gamemodeSent = true;
-  try {
-    sendCommand(server.id, `gamemode spectator ${botName}`);
-    appendLog(server.id, `[NexusPanel] Live Spectate set ${botName} to spectator mode.`);
-  } catch (error) {
-    appendLog(server.id, `[NexusPanel] Live Spectate spectator command failed: ${error.message}`);
-  }
+  setTimeout(() => {
+    try {
+      sendCommand(server.id, `gamemode spectator ${target}`);
+      appendLog(server.id, `[NexusPanel] Live Spectate set ${botName} to spectator mode.`);
+    } catch (error) {
+      appendLog(server.id, `[NexusPanel] Live Spectate spectator command failed: ${error.message}`);
+    }
+  }, server.type === 'bedrock' ? 1800 : 500).unref();
 }
 
 function latestSpectateLogEvent(server, botName) {
@@ -535,8 +544,10 @@ function latestSpectateLogEvent(server, botName) {
   if (!recentLines.length) return null;
   const line = [...recentLines].reverse().find((entry) => /Player (?:connected|Spawned|disconnected):\s*/i.test(String(entry)));
   if (!line) return null;
+  const nameMatch = String(line).match(/Player (?:connected|Spawned):\s*([^,\s]+(?:\(\d+\))?)/i);
   return {
     line,
+    playerName: nameMatch ? nameMatch[1] : botName,
     connected: /Player (?:connected|Spawned):\s*/i.test(line),
     disconnected: /Player disconnected:\s*/i.test(line),
   };
@@ -551,19 +562,21 @@ function inferSpectateFromServerLogs(server, session) {
   const latestEvent = latestSpectateLogEvent(server, botName);
   if (!latestEvent) return session;
   if (latestEvent.connected) {
-    const players = new Set([...(session.players || []), botName]);
+    const liveName = latestEvent.playerName || botName;
+    const players = new Set([...(session.players || []), liveName]);
     session.players = [...players];
-    session.target = session.target || botName;
+    session.target = session.target || liveName;
+    session.botName = liveName;
     session.status = 'connected';
     session.message = server.type === 'bedrock'
-      ? `${botName} is connected. Bedrock video needs the real frame-push client stream to show pixels.`
-      : `${botName} is connected and spawned. Live feed is following the bot perspective.`;
+      ? `${liveName} is connected. NexusVision packet renderer is building a headless live view.`
+      : `${liveName} is connected and spawned. Live feed is following the bot perspective.`;
     session.updatedAt = Date.now();
     if (session.timeout) {
       clearTimeout(session.timeout);
       session.timeout = null;
     }
-    sendSpectateModeCommand(server, botName);
+    sendSpectateModeCommand(server, liveName);
   }
   if (latestEvent.disconnected) {
     session.status = 'stopped';
