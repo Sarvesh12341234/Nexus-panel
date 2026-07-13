@@ -2059,7 +2059,7 @@ function renderSettings() {
           <button class="danger" type="button" data-action="stop-playit-agent">Stop Playit</button>
           <a id="playitSetupLink" class="button-like secondary" href="${escapeHtml(settings.playitSetupUrl || 'https://playit.gg/account/agents')}" target="_blank" rel="noreferrer">Playit setup</a>
         </div>
-        <pre class="tunnel-output" id="normalTunnelOutput">Select a server, choose TCP or UDP, then click Show tunnel status.</pre>
+        <div class="tunnel-output" id="normalTunnelOutput">Select a server, choose TCP or UDP, then click Show tunnel status.</div>
       </div>`}` : ''}
 
       <!-- Timezone with Save Button -->
@@ -2180,11 +2180,20 @@ function tunnelStatusText(plan) {
   ].join('\n');
 }
 
+function linkifyTunnelOutput(message) {
+  const escaped = escapeHtml(message);
+  return escaped.replace(/https?:\/\/[^\s<]+/g, (url) => {
+    const clean = url.replace(/[),.;]+$/, '');
+    const suffix = url.slice(clean.length);
+    return `<a href="${clean}" target="_blank" rel="noreferrer">${clean}</a>${suffix}`;
+  });
+}
+
 function setTunnelOutput(message, mode = 'info') {
   const output = document.querySelector('#normalTunnelOutput');
   if (!output) return;
   output.dataset.mode = mode;
-  output.textContent = message;
+  output.innerHTML = linkifyTunnelOutput(message);
 }
 
 async function fetchTunnelPlan() {

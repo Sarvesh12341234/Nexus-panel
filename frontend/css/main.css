@@ -615,6 +615,13 @@ code {
   line-height: 1.55;
 }
 
+.tunnel-output a {
+  color: var(--cyan);
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .tunnel-output[data-mode="error"] {
   color: #fecdd3;
   border-color: rgba(255, 91, 116, 0.45);
