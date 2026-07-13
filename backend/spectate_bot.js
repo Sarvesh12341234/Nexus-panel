@@ -321,10 +321,16 @@ canvas{display:block;touch-action:none}
   scene.add(world);
   const entityGroup = new THREE.Group();
   scene.add(entityGroup);
-  const blockMeshes = new Map();
+  const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
+  const instancedGroups = new Map();
   const entityMeshes = new Map();
   const materialCache = new Map();
   const textureCache = new Map();
+  const matrix = new THREE.Matrix4();
+  const scale = new THREE.Vector3(1, 1, 1);
+  const rotation = new THREE.Quaternion();
+  let blockCount = 0;
+  let worldSignature = '';
   let state = window.__NEXUS_INITIAL__ || {};
   let lookYawOffset = 0;
   let lookPitchOffset = 0;
@@ -389,34 +395,57 @@ canvas{display:block;touch-action:none}
     }
     return materialCache.get(key);
   };
+  const materialKeyFor = (block) => colorFor(block) + ':' + String(block.name || '').slice(0, 32);
+  const blockRowsFromChunks = (chunks) => {
+    const rows = [];
+    for (const chunk of chunks) {
+      const blocks = Array.isArray(chunk.geometry?.blocks) ? chunk.geometry.blocks : [];
+      const columns = Array.isArray(chunk.geometry?.columns) ? chunk.geometry.columns : [];
+      for (const block of blocks.length ? blocks : columns) rows.push(block);
+    }
+    return rows.slice(-52000);
+  };
+  const rebuildWorld = (rows, signature) => {
+    if (signature === worldSignature) return;
+    worldSignature = signature;
+    for (const mesh of instancedGroups.values()) {
+      world.remove(mesh);
+      mesh.dispose?.();
+    }
+    instancedGroups.clear();
+    const buckets = new Map();
+    for (const block of rows) {
+      const key = materialKeyFor(block);
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(block);
+    }
+    blockCount = rows.length;
+    for (const blocks of buckets.values()) {
+      const mesh = new THREE.InstancedMesh(cubeGeometry, materialFor(blocks[0]), blocks.length);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      for (let index = 0; index < blocks.length; index += 1) {
+        const block = blocks[index];
+        const h = Math.max(1, Math.min(24, Number(block.h || 1)));
+        scale.set(1, h, 1);
+        matrix.compose(
+          new THREE.Vector3(Number(block.x || 0) + 0.5, Number(block.y || 64) + h / 2, Number(block.z || 0) + 0.5),
+          rotation,
+          scale,
+        );
+        mesh.setMatrixAt(index, matrix);
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      instancedGroups.set(materialKeyFor(blocks[0]), mesh);
+      world.add(mesh);
+    }
+  };
   const setState = (next) => {
     state = next || state || {};
     const chunks = Array.isArray(state.world?.chunks) ? state.world.chunks : [];
-    const columns = chunks.flatMap((chunk) => Array.isArray(chunk.geometry?.columns) ? chunk.geometry.columns : []).slice(-12000);
-    const liveKeys = new Set();
-    for (const column of columns) {
-      const x = Number(column.x || 0);
-      const y = Number(column.y || 64);
-      const z = Number(column.z || 0);
-      const h = Math.max(1, Math.min(32, Number(column.h || 1)));
-      const key = x + ':' + y + ':' + z + ':' + h + ':' + (column.name || column.stateId || '');
-      liveKeys.add(key);
-      if (!blockMeshes.has(key)) {
-        const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, h, 1), materialFor(column));
-        mesh.position.set(x + 0.5, y + h / 2, z + 0.5);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        blockMeshes.set(key, mesh);
-        world.add(mesh);
-      }
-    }
-    for (const [key, mesh] of blockMeshes) {
-      if (!liveKeys.has(key)) {
-        world.remove(mesh);
-        mesh.geometry.dispose();
-        blockMeshes.delete(key);
-      }
-    }
+    const rows = blockRowsFromChunks(chunks);
+    const signature = chunks.map((chunk) => [chunk.x, chunk.z, chunk.updatedAt, chunk.geometry?.blocks?.length || 0, chunk.geometry?.columns?.length || 0].join(':')).join('|');
+    rebuildWorld(rows, signature);
     const entities = Array.isArray(state.entities) ? state.entities : [];
     const entityKeys = new Set();
     for (const entity of entities) {
@@ -447,9 +476,9 @@ canvas{display:block;touch-action:none}
     }
     const stats = state.world?.packetStats || {};
     const adapter = stats.adapter || {};
-    meta.textContent = (state.serverName || 'Server') + ' - ' + (state.botName || 'live-update') + ' - ' + (state.status || 'waiting') + ' - blocks ' + blockMeshes.size + ' - entities ' + entityMeshes.size;
-    debug.textContent = 'chunks ' + chunks.length + ' decoded ' + (stats.renderPackets || 0) + ' level_chunk ' + (stats.levelChunk || 0) + ' last ' + (stats.lastPacket || 'waiting') + (stats.adapterError || adapter.error ? ' - ' + (stats.adapterError || adapter.error) : '');
-    empty.style.display = blockMeshes.size ? 'none' : 'block';
+    meta.textContent = (state.serverName || 'Server') + ' - ' + (state.botName || 'live-update') + ' - ' + (state.status || 'waiting') + ' - blocks ' + blockCount + ' - entities ' + entityMeshes.size;
+    debug.textContent = 'chunks ' + chunks.length + ' decoded ' + (stats.renderPackets || 0) + ' real blocks ' + blockCount + ' level_chunk ' + (stats.levelChunk || 0) + ' last ' + (stats.lastPacket || 'waiting') + (stats.adapterError || adapter.error ? ' - ' + (stats.adapterError || adapter.error) : '');
+    empty.style.display = blockCount ? 'none' : 'block';
   };
   const focusEntity = () => {
     const entities = Array.isArray(state.entities) ? state.entities : [];
@@ -579,6 +608,8 @@ function startBedrockBot(config) {
     username: config.username,
     offline: (config.auth || 'offline') === 'offline',
     auth: config.auth || 'offline',
+    enableChunkCaching: false,
+    viewDistance: Math.max(3, Math.min(8, Number(config.viewDistance || 6))),
     profilesFolder,
   });
   const players = new Set();
@@ -590,6 +621,7 @@ function startBedrockBot(config) {
     levelChunk: 0,
     updateBlock: 0,
     geometryColumns: 0,
+    geometryBlocks: 0,
     bytesTotal: 0,
     renderPackets: 0,
     movePlayer: 0,
@@ -705,6 +737,7 @@ function startBedrockBot(config) {
     }
     packetStats.renderPackets += 1;
     packetStats.geometryColumns += result.chunk.geometry.columns.length;
+    packetStats.geometryBlocks += result.chunk.geometry.blocks?.length || 0;
     packetStats.adapterError = '';
   };
   const rememberBlockUpdatePacket = (packet) => {
@@ -756,6 +789,10 @@ function startBedrockBot(config) {
       entities.delete(config.username);
       rememberEntity(selfRuntimeId, { name: config.username, ...packetPosition(packet), self: true });
     }
+    try { client.queue('client_cache_status', { enabled: false }); } catch {}
+    setTimeout(() => {
+      try { client.queue('request_chunk_radius', { chunk_radius: Math.max(3, Math.min(8, Number(config.viewDistance || 6))) }); } catch {}
+    }, 250).unref();
     send('status', { status: 'connected', target: config.username, message: `Bedrock spectate bot joined ${config.host}:${config.port}.` });
     publishPlayers();
   };

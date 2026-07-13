@@ -493,24 +493,30 @@ function sanitizeSpectateEntities(entities) {
 }
 
 function sanitizeSpectateWorld(world) {
+  const sanitizeBlock = (block) => ({
+    x: Number.isFinite(Number(block?.x)) ? Math.trunc(Number(block.x)) : 0,
+    y: Number.isFinite(Number(block?.y)) ? Math.trunc(Number(block.y)) : 64,
+    z: Number.isFinite(Number(block?.z)) ? Math.trunc(Number(block.z)) : 0,
+    h: Number.isFinite(Number(block?.h)) ? Math.max(1, Math.min(24, Math.trunc(Number(block.h)))) : 1,
+    d: Number.isFinite(Number(block?.d)) ? Math.max(0, Math.min(1, Number(block.d))) : 1,
+    real: Boolean(block?.real),
+    name: String(block?.name || '').slice(0, 80),
+    stateId: Number.isFinite(Number(block?.stateId)) ? Math.trunc(Number(block.stateId)) : 0,
+    color: /^#[0-9a-f]{6}$/i.test(String(block?.color || '')) || /^hsl\(/i.test(String(block?.color || ''))
+      ? String(block.color).slice(0, 40)
+      : '',
+  });
   const chunks = (Array.isArray(world?.chunks) ? world.chunks : [])
     .map((chunk) => {
       const columns = Array.isArray(chunk?.geometry?.columns)
         ? chunk.geometry.columns
-          .map((column) => ({
-            x: Number.isFinite(Number(column?.x)) ? Math.trunc(Number(column.x)) : 0,
-            y: Number.isFinite(Number(column?.y)) ? Math.trunc(Number(column.y)) : 64,
-            z: Number.isFinite(Number(column?.z)) ? Math.trunc(Number(column.z)) : 0,
-            h: Number.isFinite(Number(column?.h)) ? Math.max(1, Math.min(24, Math.trunc(Number(column.h)))) : 4,
-            d: Number.isFinite(Number(column?.d)) ? Math.max(0, Math.min(1, Number(column.d))) : 0,
-            real: Boolean(column?.real),
-            name: String(column?.name || '').slice(0, 80),
-            stateId: Number.isFinite(Number(column?.stateId)) ? Math.trunc(Number(column.stateId)) : 0,
-            color: /^#[0-9a-f]{6}$/i.test(String(column?.color || '')) || /^hsl\(/i.test(String(column?.color || ''))
-              ? String(column.color).slice(0, 40)
-              : '',
-          }))
-          .slice(0, 256)
+          .map(sanitizeBlock)
+          .slice(0, 512)
+        : [];
+      const blocks = Array.isArray(chunk?.geometry?.blocks)
+        ? chunk.geometry.blocks
+          .map(sanitizeBlock)
+          .slice(0, 4096)
         : [];
       return {
         x: Number.isFinite(Number(chunk?.x)) ? Math.trunc(Number(chunk.x)) : 0,
@@ -528,6 +534,7 @@ function sanitizeSpectateWorld(world) {
         geometry: {
           bytesRead: Number.isFinite(Number(chunk?.geometry?.bytesRead)) ? Math.max(0, Math.trunc(Number(chunk.geometry.bytesRead))) : 0,
           columns,
+          blocks,
         },
         updatedAt: Number.isFinite(Number(chunk?.updatedAt)) ? Number(chunk.updatedAt) : Date.now(),
       };
@@ -548,6 +555,7 @@ function sanitizeSpectateWorld(world) {
     levelChunk: Number.isFinite(Number(rawStats.levelChunk)) ? Math.trunc(Number(rawStats.levelChunk)) : 0,
     updateBlock: Number.isFinite(Number(rawStats.updateBlock)) ? Math.trunc(Number(rawStats.updateBlock)) : 0,
     geometryColumns: Number.isFinite(Number(rawStats.geometryColumns)) ? Math.trunc(Number(rawStats.geometryColumns)) : 0,
+    geometryBlocks: Number.isFinite(Number(rawStats.geometryBlocks)) ? Math.trunc(Number(rawStats.geometryBlocks)) : 0,
     bytesTotal: Number.isFinite(Number(rawStats.bytesTotal)) ? Math.trunc(Number(rawStats.bytesTotal)) : 0,
     renderPackets: Number.isFinite(Number(rawStats.renderPackets)) ? Math.trunc(Number(rawStats.renderPackets)) : 0,
     cacheBlobs: Number.isFinite(Number(rawStats.cacheBlobs)) ? Math.trunc(Number(rawStats.cacheBlobs)) : 0,

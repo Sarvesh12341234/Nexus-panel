@@ -73,13 +73,19 @@ function adapterVersionCandidates(version) {
 function blockColor(name, stateId = 0) {
   const key = String(name || '').toLowerCase();
   if (!key || key.includes('air')) return null;
+  if (key.includes('grass_block')) return '#5ca044';
+  if (key === 'grass' || key.endsWith('_grass')) return '#65b34f';
   if (key.includes('water')) return '#3b82f6';
   if (key.includes('lava')) return '#fb5d22';
-  if (key.includes('grass') || key.includes('leaves') || key.includes('vine') || key.includes('moss')) return '#58a84b';
+  if (key.includes('leaves')) return '#4f9c42';
+  if (key.includes('vine') || key.includes('moss')) return '#58a84b';
   if (key.includes('dirt') || key.includes('mud')) return '#7a5236';
+  if (key.includes('podzol')) return '#73513a';
   if (key.includes('sand')) return '#d7c278';
+  if (key.includes('gravel')) return '#8f8f87';
   if (key.includes('snow') || key.includes('ice')) return '#dceff7';
   if (key.includes('wood') || key.includes('log') || key.includes('planks')) return '#9a6a3a';
+  if (key.includes('netherrack')) return '#7b2c2f';
   if (key.includes('stone') || key.includes('ore') || key.includes('deepslate') || key.includes('cobble')) return '#7f858b';
   if (key.includes('glass')) return '#a7d8e8';
   const hue = Math.abs(Number(stateId || 0) * 37) % 360;
@@ -94,6 +100,14 @@ function normalizeBlock(block) {
     stateId,
     color: blockColor(name, stateId),
   };
+}
+
+function getBlockSafe(chunk, x, y, z) {
+  try {
+    return normalizeBlock(chunk.getBlock({ x, y, z, l: 0 }, true));
+  } catch {
+    return null;
+  }
 }
 
 class BedrockWorldAdapter {
@@ -146,7 +160,7 @@ class BedrockWorldAdapter {
       } else {
         return { ok: false, error: 'Installed prismarine-chunk does not expose Bedrock network decode.', decoded: false };
       }
-      const decoded = this.extractSurface(coords, chunk, payload.length);
+      const decoded = this.extractGeometry(coords, chunk, payload.length);
       this.chunks.set(coords.key, decoded);
       if (this.chunks.size > 48) this.chunks.delete(this.chunks.keys().next().value);
       return { ok: true, decoded: true, chunk: decoded };
@@ -172,25 +186,44 @@ class BedrockWorldAdapter {
     return stored;
   }
 
-  extractSurface(coords, chunk, size) {
+  extractGeometry(coords, chunk, size) {
     const columns = [];
+    const blocks = [];
+    const blockKeys = new Set();
     const names = new Map();
     const minY = Number.isFinite(Number(chunk.minCY)) ? Math.trunc(Number(chunk.minCY)) * 16 : -64;
     const maxY = Number.isFinite(Number(chunk.maxCY)) ? Math.trunc(Number(chunk.maxCY)) * 16 + 15 : 319;
+    const heights = Array.from({ length: 16 }, () => Array(16).fill(minY - 1));
+
+    const addBlock = (x, y, z, normalized) => {
+      if (!normalized?.color) return;
+      const worldX = coords.x * 16 + x;
+      const worldZ = coords.z * 16 + z;
+      const key = `${worldX}:${y}:${worldZ}:${normalized.stateId}`;
+      if (blockKeys.has(key)) return;
+      blockKeys.add(key);
+      names.set(normalized.name, (names.get(normalized.name) || 0) + 1);
+      blocks.push({
+        key,
+        x: worldX,
+        y,
+        z: worldZ,
+        real: true,
+        name: normalized.name,
+        stateId: normalized.stateId,
+        color: normalized.color,
+      });
+    };
+
     for (let x = 0; x < 16; x += 1) {
       for (let z = 0; z < 16; z += 1) {
-        let column = null;
+        let top = null;
         for (let y = maxY; y >= minY; y -= 1) {
-          let block;
-          try {
-            block = chunk.getBlock({ x, y, z, l: 0 }, true);
-          } catch {
-            continue;
-          }
-          const normalized = normalizeBlock(block);
+          const normalized = getBlockSafe(chunk, x, y, z);
           if (!normalized.color) continue;
-          names.set(normalized.name, (names.get(normalized.name) || 0) + 1);
-          column = {
+          top = { y, block: normalized };
+          heights[x][z] = y;
+          columns.push({
             x: coords.x * 16 + x,
             y,
             z: coords.z * 16 + z,
@@ -200,12 +233,41 @@ class BedrockWorldAdapter {
             name: normalized.name,
             stateId: normalized.stateId,
             color: normalized.color,
-          };
+          });
           break;
         }
-        if (column) columns.push(column);
+        if (!top) continue;
+
+        let addedDepth = 0;
+        for (let y = top.y; y >= minY && addedDepth < 7; y -= 1) {
+          const normalized = getBlockSafe(chunk, x, y, z);
+          if (!normalized?.color) {
+            if (addedDepth > 0) break;
+            continue;
+          }
+          addBlock(x, y, z, normalized);
+          addedDepth += 1;
+        }
       }
     }
+
+    for (let x = 0; x < 16; x += 1) {
+      for (let z = 0; z < 16; z += 1) {
+        const topY = heights[x][z];
+        if (topY < minY) continue;
+        for (const [nx, nz] of [[x - 1, z], [x + 1, z], [x, z - 1], [x, z + 1]]) {
+          const neighborHeight = nx >= 0 && nx < 16 && nz >= 0 && nz < 16 ? heights[nx][nz] : minY - 1;
+          if (topY - neighborHeight < 2) continue;
+          const lowest = Math.max(neighborHeight + 1, topY - 12, minY);
+          for (let y = topY; y >= lowest; y -= 1) {
+            const normalized = getBlockSafe(chunk, x, y, z);
+            if (normalized?.color) addBlock(x, y, z, normalized);
+          }
+        }
+      }
+    }
+
+    blocks.sort((a, b) => (a.y - b.y) || (a.x - b.x) || (a.z - b.z));
     return {
       x: coords.x,
       z: coords.z,
@@ -215,6 +277,7 @@ class BedrockWorldAdapter {
       geometry: {
         bytesRead: size,
         columns,
+        blocks: blocks.slice(-4096),
       },
       palette: [...names.entries()]
         .sort((a, b) => b[1] - a[1])
