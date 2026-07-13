@@ -1169,21 +1169,33 @@ function applyTheme(key) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    cache: 'no-store',
-    credentials: 'include', // Important: include cookies in requests
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options,
-  });
-  const raw = await response.text();
-  let data = {};
-  try {
-    data = raw ? JSON.parse(raw) : {};
-  } catch {
-    data = {};
+  const { timeoutMs = 0, ...fetchOptions } = options;
+  let timeout = 0;
+  let controller = null;
+  if (timeoutMs && !fetchOptions.signal) {
+    controller = new AbortController();
+    timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   }
-  if (!response.ok) throw new Error(data.error || raw.slice(0, 500) || 'Request failed.');
-  return data;
+  try {
+    const response = await fetch(path, {
+      cache: 'no-store',
+      credentials: 'include',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(fetchOptions.headers || {}) },
+      ...fetchOptions,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const raw = await response.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = {};
+    }
+    if (!response.ok) throw new Error(data.error || raw.slice(0, 500) || 'Request failed.');
+    return data;
+  } finally {
+    if (timeout) window.clearTimeout(timeout);
+  }
 }
 
 function formData(form) {
@@ -1760,7 +1772,10 @@ async function renderActiveView({ shellScroll = null } = {}) {
     if (view === 'properties') await renderProperties();
     if (view === 'whitelist') await renderWhitelist();
     if (view === 'plugins') renderPlugins();
-    if (view === 'console') await renderConsole({ force: true });
+    if (view === 'console') {
+      prepareConsoleShell(activeServer());
+      renderConsole({ force: true, timeoutMs: 900 }).catch(() => {});
+    }
     if (view === 'files') {
       await renderFiles();
       await renderUploadSessions();
@@ -1836,23 +1851,39 @@ function renderPlugins() {
   }).join('');
 }
 
-async function renderConsole({ force = false } = {}) {
-  const server = activeServer();
-  const renderToken = ++consoleRenderToken;
+function prepareConsoleShell(server) {
   if (!server) {
     elements.consoleBox.innerHTML = '<div>[NexusPanel] Create a server to use console.</div>';
     if (elements.consoleMetrics) elements.consoleMetrics.innerHTML = '';
     return;
   }
+  fillServerConfigForm(server);
+  elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
+  elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
+  syncConsoleActionButtons(server, server.status);
+  if (!elements.consoleBox.dataset.rendered && !elements.consoleBox.textContent.trim()) {
+    elements.consoleBox.innerHTML = `<div>[NexusPanel] Opening live console for ${escapeHtml(server.name)}...</div>`;
+  }
+}
+
+async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
+  const server = activeServer();
+  if (!server) {
+    elements.consoleBox.innerHTML = '<div>[NexusPanel] Create a server to use console.</div>';
+    if (elements.consoleMetrics) elements.consoleMetrics.innerHTML = '';
+    return;
+  }
+  prepareConsoleShell(server);
   const serverId = server.id;
   const now = Date.now();
   if (!force && now - Number(state.consolePollAt[serverId] || 0) < 45) return;
   state.consolePollAt[serverId] = now;
   if (state.consoleInFlight[serverId]) return;
+  const renderToken = ++consoleRenderToken;
   state.consoleInFlight[serverId] = true;
   try {
-    const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 2000;
-    const data = await api(`/api/servers/${server.id}/console`).catch((error) => ({ lines: [], error: error.message }));
+    const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 5000;
+    const data = await api(`/api/servers/${server.id}/console`, { timeoutMs }).catch((error) => ({ lines: [], error: error.message }));
     if (renderToken !== consoleRenderToken || state.activeServerId !== serverId) return;
     fillServerConfigForm(server);
     elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
@@ -1887,8 +1918,8 @@ async function renderConsole({ force = false } = {}) {
 async function renderConsoleMetricsSoon(server, serverId, renderToken) {
   state.consoleMetricsAt[serverId] = Date.now();
   const metricsBundle = await Promise.all([
-    api('/api/system/metrics').catch(() => null),
-    api(`/api/servers/${server.id}/metrics`).catch(() => null),
+    api('/api/system/metrics', { timeoutMs: 1200 }).catch(() => null),
+    api(`/api/servers/${server.id}/metrics`, { timeoutMs: 1200 }).catch(() => null),
   ]);
   if (renderToken !== consoleRenderToken || state.activeView !== 'console' || state.activeServerId !== serverId) return;
   renderConsoleMetrics(server, metricsBundle[0], metricsBundle[1]);
@@ -3111,7 +3142,7 @@ function startRefreshLoop() {
   state.refreshTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
-    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy || state.activeView === 'console' ? 200 : 1200);
+    const dueStatus = Date.now() - state.statusRefreshAt > (state.activeView === 'console' ? 900 : liveBusy ? 350 : 1200);
     if (dueStatus || liveBusy) {
       state.statusRefreshAt = Date.now();
       refreshServerStatusOnly().catch(() => {});
