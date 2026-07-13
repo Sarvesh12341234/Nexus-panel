@@ -23,6 +23,7 @@ const state = {
   consoleMetricsAt: {},
   presenceAt: 0,
   serverStatusSignature: '',
+  playitTerminalTimer: null,
 };
 
 const elements = {
@@ -2055,6 +2056,7 @@ function renderSettings() {
           <button class="secondary" type="button" data-action="start-ngrok-tunnel">Start ngrok</button>
           <button class="danger" type="button" data-action="stop-ngrok-tunnel">Stop ngrok</button>
           <button class="secondary" type="button" data-action="install-playit-agent">Install Playit</button>
+          <button class="secondary" type="button" data-action="run-playit-terminal">Run Playit terminal</button>
           <button class="secondary" type="button" data-action="start-playit-agent">Start Playit</button>
           <button class="danger" type="button" data-action="stop-playit-agent">Stop Playit</button>
           <a id="playitSetupLink" class="button-like secondary" href="${escapeHtml(settings.playitSetupUrl || 'https://playit.gg/account/agents')}" target="_blank" rel="noreferrer">Playit setup</a>
@@ -2211,6 +2213,35 @@ async function refreshTunnelOutput(prefix = '') {
   }
   setTunnelOutput(`${prefix ? `${prefix}\n\n` : ''}${tunnelStatusText(plan)}`);
   return plan;
+}
+
+function stopPlayitTerminalPolling() {
+  if (state.playitTerminalTimer) clearInterval(state.playitTerminalTimer);
+  state.playitTerminalTimer = null;
+}
+
+async function refreshPlayitTerminalOutput() {
+  const data = await api('/api/tunnels/playit/claim-terminal/status');
+  const terminal = data.terminal || {};
+  const output = terminal.output || terminal.message || 'Playit terminal has not produced output yet.';
+  setTunnelOutput(output);
+  const playitLink = document.querySelector('#playitSetupLink');
+  if (playitLink && terminal.setupUrl) {
+    playitLink.href = terminal.setupUrl;
+    playitLink.textContent = 'Open Playit claim';
+  }
+  if (!terminal.running) stopPlayitTerminalPolling();
+  return terminal;
+}
+
+function startPlayitTerminalPolling() {
+  stopPlayitTerminalPolling();
+  state.playitTerminalTimer = setInterval(() => {
+    refreshPlayitTerminalOutput().catch((error) => {
+      stopPlayitTerminalPolling();
+      setTunnelOutput(error.message, 'error');
+    });
+  }, 2000);
 }
 
 
@@ -4068,6 +4099,22 @@ document.addEventListener('click', async (event) => {
       }
       return;
     }
+    if (action === 'run-playit-terminal') {
+      actionTarget.disabled = true;
+      setTunnelOutput('Starting Playit foreground terminal...');
+      try {
+        const data = await api('/api/tunnels/playit/claim-terminal/start', { method: 'POST' });
+        const terminal = data.terminal || {};
+        setTunnelOutput(terminal.output || terminal.message || 'Playit terminal started.');
+        if (terminal.running) startPlayitTerminalPolling();
+        showToast('Playit terminal is running. Keep it open until the claim page connects.');
+      } catch (error) {
+        setTunnelOutput(error.message, 'error');
+      } finally {
+        actionTarget.disabled = false;
+      }
+      return;
+    }
     if (action === 'install-playit-agent' || action === 'start-playit-agent' || action === 'stop-playit-agent') {
       const endpoint = action === 'install-playit-agent'
         ? '/api/tunnels/playit/install'
@@ -4078,6 +4125,7 @@ document.addEventListener('click', async (event) => {
       setTunnelOutput(`${actionTarget.textContent.trim()} running...`);
       try {
         const data = await api(endpoint, { method: 'POST' });
+        if (action === 'stop-playit-agent') stopPlayitTerminalPolling();
         await refreshTunnelOutput(data.playit?.message || 'Playit status updated.');
         showToast(data.playit?.message || 'Playit status updated.');
       } catch (error) {

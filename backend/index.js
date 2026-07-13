@@ -3025,6 +3025,8 @@ function readPlayitOutput() {
   let output = '';
   const state = tunnelProcesses.get(tunnelKey('playit', 0));
   if (state?.output) output = `${output}\n${state.output}`;
+  const claimState = tunnelProcesses.get(tunnelKey('playit-claim', 0));
+  if (claimState?.output) output = `${output}\n${claimState.output}`;
   if (process.platform === 'linux' && commandExists('journalctl')) {
     const journalctl = resolveCommand('journalctl');
     const logs = spawnSync(journalctl, ['-u', 'playit', '-n', '120', '--no-pager'], {
@@ -3036,6 +3038,67 @@ function readPlayitOutput() {
     output = `${output}\n${logs.stdout || ''}\n${logs.stderr || ''}`;
   }
   return output.slice(-12000);
+}
+
+function playitClaimTerminalPayload() {
+  const state = tunnelProcesses.get(tunnelKey('playit-claim', 0));
+  const output = state?.output || '';
+  const setupLinks = extractPlayitLinks(output);
+  return {
+    running: processRunning(state),
+    pid: state?.child?.pid || 0,
+    output,
+    setupLinks,
+    setupUrl: setupLinks.find((url) => /claim/i.test(url)) || setupLinks[0] || '',
+    message: state?.message || (state ? 'Playit claim terminal stopped.' : 'Playit claim terminal is not running.'),
+  };
+}
+
+async function startPlayitClaimTerminal() {
+  if (!commandExists('playit')) throw new Error('Playit is not installed on the VPS. Click Install Playit first.');
+  if (process.platform !== 'linux') throw new Error('Playit claim terminal is only supported on Linux VPS hosts.');
+  const key = tunnelKey('playit-claim', 0);
+  const existing = tunnelProcesses.get(key);
+  if (processRunning(existing)) return playitClaimTerminalPayload();
+  await runShellCommand(`${sudoPrefix()}systemctl stop playit 2>/dev/null || true; ${sudoPrefix()}pkill -f playitd 2>/dev/null || true`, path.join(__dirname, '..')).catch(() => {});
+  const playitCommand = resolveCommand('playit');
+  const useScript = commandExists('script');
+  const command = useScript ? resolveCommand('script') : playitCommand;
+  const args = useScript ? ['-q', '-c', playitCommand, '/dev/null'] : [];
+  const child = spawn(command, args, {
+    cwd: path.join(__dirname, '..'),
+    env: commandEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  const state = {
+    child,
+    protocol: 'playit-claim',
+    message: 'Playit foreground terminal is running. Keep it open until the claim page connects.',
+    output: `$ ${useScript ? `script -q -c ${playitCommand} /dev/null` : playitCommand}\n`,
+    exited: false,
+  };
+  tunnelProcesses.set(key, state);
+  const capture = (chunk) => {
+    const text = String(chunk).replace(/\r(?!\n)/g, '\n');
+    state.output = `${state.output}${text}`.slice(-30000);
+    const lastLine = text.trim().split(/\r?\n/).filter(Boolean).at(-1);
+    if (lastLine) state.message = lastLine.slice(-900);
+  };
+  child.stdout.on('data', capture);
+  child.stderr.on('data', capture);
+  child.on('error', (error) => {
+    state.exited = true;
+    state.message = error.message;
+    state.output = `${state.output}\n${error.message}`.slice(-30000);
+  });
+  child.on('exit', (code, signal) => {
+    state.exited = true;
+    state.message = `Playit terminal exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
+    state.output = `${state.output}\n${state.message}`.slice(-30000);
+  });
+  await wait(900);
+  return playitClaimTerminalPayload();
 }
 
 function playitStatus() {
@@ -3104,6 +3167,7 @@ async function startPlayitAgent() {
 
 async function stopPlayitAgent() {
   stopTunnelProcess('playit', 0);
+  stopTunnelProcess('playit-claim', 0);
   if (process.platform === 'linux' && commandExists('systemctl')) {
     const sudo = sudoPrefix();
     await runShellCommand(`${sudo}systemctl stop playit`, path.join(__dirname, '..')).catch(() => {});
@@ -3908,6 +3972,16 @@ app.post('/api/tunnels/playit/install', requirePermission(capabilities.NETWORK_M
 app.post('/api/tunnels/playit/start', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
   res.json({ playit: await startPlayitAgent() });
 }));
+
+app.post('/api/tunnels/playit/claim-terminal/start', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can run the Playit claim terminal.' });
+  res.json({ terminal: await startPlayitClaimTerminal(), playit: playitStatus() });
+}));
+
+app.get('/api/tunnels/playit/claim-terminal/status', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can view the Playit claim terminal.' });
+  res.json({ terminal: playitClaimTerminalPayload(), playit: playitStatus() });
+});
 
 app.post('/api/tunnels/playit/stop', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
   res.json({ playit: await stopPlayitAgent() });
