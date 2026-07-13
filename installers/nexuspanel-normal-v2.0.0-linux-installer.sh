@@ -102,13 +102,6 @@ install_panel() {
   echo "[3/7] Installing Node.js dependencies..."
   npm install --omit=optional --no-audit --no-fund
   npm install --include=optional --no-audit --no-fund || true
-  echo "[3b/7] Installing Live Spectate bot/viewer dependencies..."
-  npm install --no-save --no-audit --no-fund \
-    bedrock-protocol \
-    mineflayer \
-    prismarine-chunk \
-    prismarine-registry \
-    prismarine-viewer
 }
 
 prepare_paths() {
