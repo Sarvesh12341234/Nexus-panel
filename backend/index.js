@@ -5257,6 +5257,7 @@ app.get('/api/servers/:id/console', requirePermission(capabilities.CONSOLE_VIEW,
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
+  res.setHeader('Cache-Control', 'no-store');
   res.json({ status: runtimeStatus(id), lines: consoleLogs(id) });
 });
 

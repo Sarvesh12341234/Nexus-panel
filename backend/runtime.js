@@ -56,7 +56,7 @@ function flushLogWrites() {
   }
 }
 
-setInterval(flushLogWrites, 750).unref();
+setInterval(flushLogWrites, 150).unref();
 
 function appendLog(serverId, line) {
   const rows = logs.has(serverId) ? logs.get(serverId) : persistedLogLines(serverId);

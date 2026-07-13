@@ -367,7 +367,7 @@ function applyUiPreferences(preferences = uiPreferences) {
   applyButtonLayout(preferences);
   applyComponentLayout(preferences);
   restoreLayoutSelection();
-  restoreShellScroll(shellScroll);
+  restoreShellScrollSoon(shellScroll);
 }
 
 function reapplyDynamicLayout() {
@@ -1748,29 +1748,37 @@ function renderSoftware() {
   hydrateSoftwareVersionSelects();
 }
 
-async function renderActiveView() {
+async function renderActiveView({ shellScroll = null } = {}) {
   if (!state.user) return;
-  if (state.activeView === 'dashboard') renderServers();
-  if (state.activeView === 'servers') renderServerRows();
-  if (state.activeView === 'templates') renderTemplates();
-  if (state.activeView === 'software') renderSoftware();
-  if (state.activeView === 'properties') await renderProperties();
-  if (state.activeView === 'whitelist') await renderWhitelist();
-  if (state.activeView === 'plugins') renderPlugins();
-  if (state.activeView === 'console') await renderConsole({ force: true });
-  if (state.activeView === 'files') {
-    await renderFiles();
-    await renderUploadSessions();
+  const view = state.activeView;
+  const preservedShellScroll = shellScroll || currentShellScroll();
+  try {
+    if (view === 'dashboard') renderServers();
+    if (view === 'servers') renderServerRows();
+    if (view === 'templates') renderTemplates();
+    if (view === 'software') renderSoftware();
+    if (view === 'properties') await renderProperties();
+    if (view === 'whitelist') await renderWhitelist();
+    if (view === 'plugins') renderPlugins();
+    if (view === 'console') await renderConsole({ force: true });
+    if (view === 'files') {
+      await renderFiles();
+      await renderUploadSessions();
+    }
+    if (view === 'backups') renderBackups();
+    if (view === 'optimizer') await renderOptimizer();
+    if (view === 'network') await renderNetwork();
+    if (view === 'admins') renderAdmins();
+    if (view === 'security') await renderSecurity();
+    if (view === 'fixed') await renderFixed();
+    if (view === 'settings') renderSettings();
+    if (view === 'terminal') renderTerminal();
+    applyUiPreferences(alphaDraft);
+  } finally {
+    if (state.activeView === view) {
+      restoreShellScrollSoon(preservedShellScroll);
+    }
   }
-  if (state.activeView === 'backups') renderBackups();
-  if (state.activeView === 'optimizer') await renderOptimizer();
-  if (state.activeView === 'network') await renderNetwork();
-  if (state.activeView === 'admins') renderAdmins();
-  if (state.activeView === 'security') await renderSecurity();
-  if (state.activeView === 'fixed') await renderFixed();
-  if (state.activeView === 'settings') renderSettings();
-  if (state.activeView === 'terminal') renderTerminal();
-  applyUiPreferences(alphaDraft);
 }
 
 function animateCommandButton(button) {
@@ -1838,51 +1846,52 @@ async function renderConsole({ force = false } = {}) {
   }
   const serverId = server.id;
   const now = Date.now();
-  if (!force && now - Number(state.consolePollAt[serverId] || 0) < 120) return;
+  if (!force && now - Number(state.consolePollAt[serverId] || 0) < 45) return;
   state.consolePollAt[serverId] = now;
   if (state.consoleInFlight[serverId]) return;
   state.consoleInFlight[serverId] = true;
   try {
-  const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 1500;
-  if (needsMetrics) state.consoleMetricsAt[serverId] = now;
-  const [data, metricsBundle] = await Promise.all([
-    api(`/api/servers/${server.id}/console`).catch((error) => ({ lines: [], error: error.message })),
-    needsMetrics
-      ? Promise.all([
-        api('/api/system/metrics').catch(() => null),
-        api(`/api/servers/${server.id}/metrics`).catch(() => null),
-      ])
-      : Promise.resolve(null),
-  ]);
-  if (renderToken !== consoleRenderToken || state.activeServerId !== serverId) return;
-  fillServerConfigForm(server);
-  elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
-  elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
-  if (data.status && server.status !== data.status) {
-    server.status = data.status;
-    renderStats();
-    updateLiveServerDom();
-  }
-  syncConsoleActionButtons(server, data.status || server.status);
-  const lines = data.lines.length
-    ? data.lines
-    : data.error
-      ? [`[NexusPanel] Console unavailable: ${data.error}`]
-      : server.installStatus !== 'installed'
-        ? [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] Install server software before starting.']
-        : [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] No panel logs have been recorded yet. Press Start to begin.'];
-  const consoleSignature = `${lines.length}:${lines.at(-1) || ''}`;
-  if (elements.consoleBox.dataset.rendered !== consoleSignature) {
-    const consoleHtml = lines.map((line) => `<div>${escapeHtml(formatConsoleLine(line))}</div>`).join('');
-    elements.consoleBox.innerHTML = consoleHtml;
-    elements.consoleBox.dataset.rendered = consoleSignature;
-  }
-  if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
-  if (metricsBundle) renderConsoleMetrics(server, metricsBundle[0], metricsBundle[1]);
-  renderPresence(server).catch(() => {});
+    const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 2000;
+    const data = await api(`/api/servers/${server.id}/console`).catch((error) => ({ lines: [], error: error.message }));
+    if (renderToken !== consoleRenderToken || state.activeServerId !== serverId) return;
+    fillServerConfigForm(server);
+    elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
+    elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
+    if (data.status && server.status !== data.status) {
+      server.status = data.status;
+      renderStats();
+      updateLiveServerDom();
+    }
+    syncConsoleActionButtons(server, data.status || server.status);
+    const lines = data.lines.length
+      ? data.lines
+      : data.error
+        ? [`[NexusPanel] Console unavailable: ${data.error}`]
+        : server.installStatus !== 'installed'
+          ? [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] Install server software before starting.']
+          : [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] No panel logs have been recorded yet. Press Start to begin.'];
+    const consoleSignature = `${lines.length}:${lines.at(-1) || ''}`;
+    if (elements.consoleBox.dataset.rendered !== consoleSignature) {
+      const consoleHtml = lines.map((line) => `<div>${escapeHtml(formatConsoleLine(line))}</div>`).join('');
+      elements.consoleBox.innerHTML = consoleHtml;
+      elements.consoleBox.dataset.rendered = consoleSignature;
+    }
+    if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
+    if (needsMetrics) renderConsoleMetricsSoon(server, serverId, renderToken);
+    renderPresence(server).catch(() => {});
   } finally {
     state.consoleInFlight[serverId] = false;
   }
+}
+
+async function renderConsoleMetricsSoon(server, serverId, renderToken) {
+  state.consoleMetricsAt[serverId] = Date.now();
+  const metricsBundle = await Promise.all([
+    api('/api/system/metrics').catch(() => null),
+    api(`/api/servers/${server.id}/metrics`).catch(() => null),
+  ]);
+  if (renderToken !== consoleRenderToken || state.activeView !== 'console' || state.activeServerId !== serverId) return;
+  renderConsoleMetrics(server, metricsBundle[0], metricsBundle[1]);
 }
 
 async function loadPluginMarketplace({ featured = false } = {}) {
@@ -2920,7 +2929,8 @@ function setView(view) {
     return;
   }
   saveActiveViewScroll();
-  saveShellScroll();
+  const shellScroll = currentShellScroll();
+  state.shellScroll = shellScroll;
   state.activeView = view;
   if (view === 'console') {
     consoleStickToBottom = true;
@@ -2928,10 +2938,10 @@ function setView(view) {
     if (server) state.consolePollAt[server.id] = 0;
   }
   renderView();
-  renderActiveView().catch((error) => showToast(error.message));
+  renderActiveView({ shellScroll }).catch((error) => showToast(error.message));
   window.requestAnimationFrame(() => {
     restoreActiveViewScroll();
-    restoreShellScroll();
+    restoreShellScrollSoon(shellScroll);
   });
 }
 
@@ -2977,6 +2987,12 @@ function restoreShellScroll(position = state.shellScroll) {
   const { sidebar, nav } = shellScrollTargets();
   if (sidebar) sidebar.scrollTop = position?.sidebarTop || 0;
   if (nav) nav.scrollTop = position?.navTop || 0;
+}
+
+function restoreShellScrollSoon(position = state.shellScroll) {
+  restoreShellScroll(position);
+  window.requestAnimationFrame(() => restoreShellScroll(position));
+  window.setTimeout(() => restoreShellScroll(position), 90);
 }
 
 function accessName(level) {
@@ -3091,17 +3107,17 @@ function startRefreshLoop() {
   state.consoleFastTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh || state.activeView !== 'console') return;
     renderConsole({ force: true }).catch(() => {});
-  }, 200);
+  }, 50);
   state.refreshTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
-    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy || state.activeView === 'console' ? 350 : 1600);
+    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy || state.activeView === 'console' ? 200 : 1200);
     if (dueStatus || liveBusy) {
       state.statusRefreshAt = Date.now();
       refreshServerStatusOnly().catch(() => {});
     }
     if (state.activeView === 'files') renderUploadSessions().catch(() => {});
-  }, 350);
+  }, 150);
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -3246,7 +3262,10 @@ elements.commandForm.addEventListener('submit', async (event) => {
     if (command) appendConsoleImmediate(`[${new Date().toISOString()}] > ${command}`);
     const result = await api(`/api/servers/${server.id}/command`, { method: 'POST', body: JSON.stringify(payload) });
     elements.commandForm.reset();
-    if (result.line) state.consolePollAt[server.id] = 0;
+    if (result.line) {
+      appendConsoleImmediate(result.line);
+      state.consolePollAt[server.id] = 0;
+    }
     await renderConsole({ force: true });
   } catch (error) {
     showToast(error.message);
