@@ -5513,8 +5513,50 @@ async function runAdaptiveMaintenance() {
   return { ok: true, ...adaptiveMaintenanceStatus };
 }
 
+function liveAgentDiagnosisKey(diagnostics) {
+  return (Array.isArray(diagnostics) ? diagnostics : [])
+    .map((item) => item.id)
+    .filter(Boolean)
+    .slice(0, 4)
+    .join('|');
+}
+
+function recentLiveAgentEpisode(serverId, signature, diagnosisKey, cooldownMs = 6 * 60 * 60 * 1000) {
+  const rows = db.prepare(`
+    SELECT id, diagnoses_json, created_at
+    FROM repair_agent_episodes
+    WHERE server_id = ? AND signature = ? AND status = 'live-observed' AND created_at >= ?
+    ORDER BY created_at DESC
+    LIMIT 12
+  `).all(Number(serverId), String(signature || ''), Date.now() - cooldownMs);
+  return rows.find((row) => liveAgentDiagnosisKey(parseJsonObject(row.diagnoses_json) || []) === diagnosisKey) || null;
+}
+
+function pruneDuplicateLiveAgentEpisodes() {
+  const rows = db.prepare(`
+    SELECT id, server_id, signature, diagnoses_json
+    FROM repair_agent_episodes
+    WHERE status = 'live-observed'
+    ORDER BY created_at DESC
+  `).all();
+  const seen = new Set();
+  const duplicates = [];
+  for (const row of rows) {
+    const key = `${row.server_id}:${row.signature}:${liveAgentDiagnosisKey(parseJsonObject(row.diagnoses_json) || [])}`;
+    if (seen.has(key)) duplicates.push(row.id);
+    else seen.add(key);
+  }
+  if (!duplicates.length) return 0;
+  const placeholders = duplicates.map(() => '?').join(',');
+  db.prepare(`DELETE FROM repair_agent_plans WHERE episode_id IN (${placeholders})`).run(...duplicates);
+  db.prepare(`DELETE FROM repair_agent_episodes WHERE id IN (${placeholders})`).run(...duplicates);
+  return duplicates.length;
+}
+
 async function runLiveAgentSweep() {
   const actions = [];
+  const pruned = pruneDuplicateLiveAgentEpisodes();
+  if (pruned) actions.push(`Pruned ${pruned} duplicate live agent episode(s)`);
   const servers = db.prepare('SELECT * FROM servers').all();
   for (const server of servers.slice(0, 50)) {
     const software = softwareForServer(server);
@@ -5526,10 +5568,44 @@ async function runLiveAgentSweep() {
       .map((name) => path.join(root, name))
       .filter((filePath) => fs.existsSync(filePath));
     if (diagnostics.length) {
+      const signature = crashSignature(server, software, null, null).signature;
+      const diagnosisKey = liveAgentDiagnosisKey(diagnostics);
+      if (runtimeStatus(server.id) === 'offline' && server.type === 'bedrock' && diagnostics.some((item) => item.id === 'bedrock-pack-version')) {
+        const repairKey = `live_agent_pack_repair_${server.id}_${diagnosisKey}`;
+        const lastRepair = Number(settingValue(repairKey, '0')) || 0;
+        if (Date.now() - lastRepair > 30 * 60 * 1000) {
+          setSettingValue(repairKey, String(Date.now()));
+          const packRepair = await quarantineIncompatibleBedrockPacks(server, root, logs);
+          if (packRepair.actions.length) {
+            actions.push(`Live agent quarantined incompatible Bedrock pack for ${server.name}`);
+            logFixed({
+              serverId: server.id,
+              category: 'live-agent',
+              title: 'Live agent quarantined incompatible Bedrock pack',
+              detail: packRepair.actions.join('\n'),
+              source: 'live-agent',
+            });
+          }
+          if (packRepair.warnings.length) {
+            appendLog(server.id, `[NexusPanel] Live agent pack repair note: ${packRepair.warnings.join(' ')}`);
+          }
+        }
+      }
+      const recent = recentLiveAgentEpisode(server.id, signature, diagnosisKey);
+      if (recent) {
+        if (diagnostics.some((item) => item.id === 'bedrock-pack-version')) {
+          const lastNotice = Number(settingValue(`live_agent_notice_${server.id}_${diagnosisKey}`, '0')) || 0;
+          if (Date.now() - lastNotice > 60 * 60 * 1000) {
+            setSettingValue(`live_agent_notice_${server.id}_${diagnosisKey}`, String(Date.now()));
+            appendLog(server.id, '[NexusPanel] Live agent suppressed duplicate Bedrock pack warning. Run Repair & Diagnose once after stopping the server to quarantine incompatible packs.');
+          }
+        }
+        continue;
+      }
       const analysis = await analyzeServerWithAgent(server, software, diagnostics, { allowWeb: true });
       const episodeId = repairAgent.recordEpisode({
         serverId: server.id,
-        signature: crashSignature(server, software, null, null).signature,
+        signature,
         analysis,
         status: 'live-observed',
       });
