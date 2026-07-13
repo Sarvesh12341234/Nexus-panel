@@ -2857,7 +2857,13 @@ async function startNgrokTunnel(server, requestedProtocol = '') {
   if (processRunning(existing)) return ngrokStatus(server);
   const env = commandEnv();
   const auth = spawnSync(ngrokCommand, ['config', 'add-authtoken', token], { encoding: 'utf8', windowsHide: true, env });
-  if (auth.error || auth.status !== 0) throw new Error(`ngrok auth setup failed: ${(auth.stderr || auth.stdout || auth.error?.message || '').slice(-400)}`);
+  if (auth.error || auth.status !== 0) {
+    const detail = (auth.stderr || auth.stdout || auth.error?.message || '').slice(-800);
+    const hint = /ERR_NGROK_107|authentication failed|invalid/i.test(detail)
+      ? ' ngrok rejected the saved authtoken. Copy a fresh authtoken from https://dashboard.ngrok.com/get-started/your-authtoken and save it in Settings.'
+      : '';
+    throw new Error(`ngrok auth setup failed: ${detail}${hint}`);
+  }
   const child = spawn(ngrokCommand, [protocol, String(server.port)], {
     cwd: path.join(__dirname, '..'),
     env,
@@ -2907,14 +2913,23 @@ async function installPlayitAgent() {
   const command = [
     `${sudo}apt-get update`,
     `${sudo}apt-get install -y ca-certificates curl gnupg`,
-    `${sudo}rm -f /etc/apt/trusted.gpg.d/playit.gpg`,
-    `curl -SsL https://playit-cloud.github.io/ppa/key.gpg | ${sudo}gpg --batch --yes --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg`,
-    `echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | ${sudo}tee /etc/apt/sources.list.d/playit-cloud.list >/dev/null`,
-    `${sudo}apt-get update`,
+    `${sudo}mkdir -p /usr/share/keyrings`,
+    `curl -SsL https://packages.playit.gg/keys/playit.gpg | ${sudo}gpg --batch --yes --dearmor -o /usr/share/keyrings/playit.gpg`,
+    `${sudo}chmod 0644 /usr/share/keyrings/playit.gpg`,
+    `printf '%s\\n' 'deb [signed-by=/usr/share/keyrings/playit.gpg] https://packages.playit.gg/data/debian ./' | ${sudo}tee /etc/apt/sources.list.d/playit.list >/dev/null`,
+    `${sudo}rm -f /etc/apt/sources.list.d/playit-cloud.list /etc/apt/trusted.gpg.d/playit.gpg`,
+    `${sudo}apt-get -o Acquire::GzipIndexes=false -o Acquire::CompressionTypes::Order::=gz -o Acquire::CompressionTypes::gz=false update`,
     `${sudo}apt-get install -y playit`,
   ].join(' && ');
   await runShellCommand(command, path.join(__dirname, '..'));
-  return playitStatus();
+  const claim = await capturePlayitClaimLink();
+  const status = playitStatus();
+  return {
+    ...status,
+    setupUrl: claim.setupUrl || status.setupUrl,
+    setupLinks: claim.setupLinks.length ? claim.setupLinks : status.setupLinks,
+    message: claim.message || status.message,
+  };
 }
 
 async function installNgrokAgent() {
@@ -2938,6 +2953,72 @@ function extractPlayitLinks(text) {
     .map((match) => match[0].replace(/[),.;]+$/, ''))
     .filter((url) => /playit\.gg/i.test(url));
   return [...new Set(links)].slice(0, 6);
+}
+
+function playitSecretConfigured() {
+  for (const candidate of [
+    '/etc/playit/playit.toml',
+    path.join(commandEnv().HOME || '', '.config', 'playit_gg', 'playit.toml'),
+  ]) {
+    try {
+      const content = fs.readFileSync(candidate, 'utf8');
+      if (/secret(?:_key)?\s*=\s*["'][^"']+["']/i.test(content)) return true;
+    } catch {}
+  }
+  return false;
+}
+
+async function capturePlayitClaimLink() {
+  if (!commandExists('playit') || playitSecretConfigured()) {
+    return { setupUrl: '', setupLinks: [], message: '' };
+  }
+  if (process.platform === 'linux' && commandExists('systemctl')) {
+    await runShellCommand(`${sudoPrefix()}systemctl stop playit`, path.join(__dirname, '..')).catch(() => {});
+  }
+  const playitCommand = resolveCommand('playit');
+  const output = await new Promise((resolve) => {
+    const child = spawn(playitCommand, [], {
+      cwd: path.join(__dirname, '..'),
+      env: commandEnv(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let text = '';
+    const done = () => {
+      try {
+        if (!child.killed) child.kill();
+      } catch {}
+      resolve(text.slice(-12000));
+    };
+    const timer = setTimeout(done, 9000);
+    const capture = (chunk) => {
+      text = `${text}${chunk}`.slice(-12000);
+      if (extractPlayitLinks(text).some((url) => /claim/i.test(url))) {
+        clearTimeout(timer);
+        setTimeout(done, 250);
+      }
+    };
+    child.stdout.on('data', capture);
+    child.stderr.on('data', capture);
+    child.on('error', (error) => {
+      text = `${text}\n${error.message}`;
+      clearTimeout(timer);
+      done();
+    });
+    child.on('exit', () => {
+      clearTimeout(timer);
+      resolve(text.slice(-12000));
+    });
+  });
+  const setupLinks = extractPlayitLinks(output);
+  const setupUrl = setupLinks.find((url) => /claim/i.test(url)) || setupLinks[0] || '';
+  return {
+    setupUrl,
+    setupLinks,
+    message: setupUrl
+      ? `Open this Playit claim link to finish setup: ${setupUrl}`
+      : `Playit installed. Start it from terminal to claim if needed. ${output.trim().slice(-900)}`,
+  };
 }
 
 function readPlayitOutput() {
