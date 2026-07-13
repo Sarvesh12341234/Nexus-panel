@@ -1158,8 +1158,14 @@ async function api(path, options = {}) {
     headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || 'Request failed.');
+  const raw = await response.text();
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    data = {};
+  }
+  if (!response.ok) throw new Error(data.error || raw.slice(0, 500) || 'Request failed.');
   return data;
 }
 
@@ -2046,6 +2052,7 @@ function renderSettings() {
         <label class="switch"><input name="quickTunnelEnabled" type="checkbox" ${settings.quickTunnelEnabled ? 'checked' : ''}><span></span>Enable no-login quick tunnel helper</label>
         <div class="row-actions">
           <button class="secondary" type="button" data-action="show-normal-tunnel-plan">Show tunnel status</button>
+          <button class="secondary" type="button" data-action="install-ngrok-agent">Install ngrok on VPS</button>
           <button class="secondary" type="button" data-action="start-ngrok-tunnel">Start ngrok</button>
           <button class="secondary" type="button" data-action="stop-ngrok-tunnel">Stop ngrok</button>
           <button class="secondary" type="button" data-action="install-playit-agent">Install Playit on VPS</button>
@@ -2053,6 +2060,7 @@ function renderSettings() {
           <button class="secondary" type="button" data-action="stop-playit-agent">Stop Playit</button>
           <a class="button-like secondary" href="${escapeHtml(settings.playitSetupUrl || 'https://playit.gg/account/agents')}" target="_blank" rel="noreferrer">Playit dashboard</a>
         </div>
+        <pre class="tunnel-output" id="normalTunnelOutput">Select a server, choose TCP or UDP, then click Show tunnel status.</pre>
       </div>`}` : ''}
 
       <!-- Timezone with Save Button -->
@@ -2156,6 +2164,38 @@ function updateSettingsLiveStatus() {
   if (detail) detail.textContent = update.running
     ? `Update is running: ${Number(update.progress || 0)}%`
     : `Last exit: ${update.exitCode ?? 'none'}`;
+}
+
+function tunnelStatusText(plan) {
+  return [
+    `Server: ${plan.server ? `${plan.server.name} (${plan.server.type}:${plan.server.port})` : 'No server selected'}`,
+    `ngrok: ${plan.ngrok?.running ? 'running' : 'stopped'} | ${plan.ngrok?.installed ? 'installed' : 'not installed'} | ${plan.ngrok?.protocol || 'auto'}`,
+    `ngrok address: ${plan.ngrok?.remoteHost || plan.ngrok?.publicUrl || 'not assigned yet'}`,
+    `ngrok command: ${plan.ngrok?.command || ''}`,
+    `ngrok note: ${plan.ngrok?.note || ''}`,
+    `Playit: ${plan.playit?.running ? 'running' : 'stopped'} | ${plan.playit?.installed ? 'installed' : 'not installed'}`,
+    `Playit note: ${plan.playit?.note || ''}`,
+    `Quick tunnel: ${plan.quick?.command || ''}`,
+  ].join('\n');
+}
+
+function setTunnelOutput(message, mode = 'info') {
+  const output = document.querySelector('#normalTunnelOutput');
+  if (!output) return;
+  output.dataset.mode = mode;
+  output.textContent = message;
+}
+
+async function fetchTunnelPlan() {
+  const server = activeServer();
+  const protocol = document.querySelector('#normalTunnelProtocol')?.value || 'auto';
+  return api(`/api/tunnels/normal-plan${server ? `?serverId=${encodeURIComponent(server.id)}&protocol=${encodeURIComponent(protocol)}` : ''}`);
+}
+
+async function refreshTunnelOutput(prefix = '') {
+  const plan = await fetchTunnelPlan();
+  setTunnelOutput(`${prefix ? `${prefix}\n\n` : ''}${tunnelStatusText(plan)}`);
+  return plan;
 }
 
 
@@ -3976,32 +4016,41 @@ document.addEventListener('click', async (event) => {
       return;
     }
     if (action === 'show-normal-tunnel-plan') {
-      const server = activeServer();
-      const protocol = document.querySelector('#normalTunnelProtocol')?.value || 'auto';
-      const plan = await api(`/api/tunnels/normal-plan${server ? `?serverId=${encodeURIComponent(server.id)}&protocol=${encodeURIComponent(protocol)}` : ''}`);
-      const lines = [
-        `ngrok: ${plan.ngrok?.remoteHost || plan.ngrok?.command || plan.ngrok?.note || 'not available'}`,
-        `ngrok note: ${plan.ngrok?.note || ''}`,
-        `playit.gg: ${plan.playit?.note || ''}`,
-        `playit dashboard: ${plan.playit?.setupUrl || 'https://playit.gg/account/agents'}`,
-        `quick tunnel: ${plan.quick?.command || ''}`,
-      ].join('\n');
-      await navigator.clipboard?.writeText(lines).catch(() => {});
-      prompt('Tunnel status copied if browser allowed it:', lines);
+      try {
+        const plan = await refreshTunnelOutput();
+        const copyText = plan.ngrok?.remoteHost || tunnelStatusText(plan);
+        await navigator.clipboard?.writeText(copyText).catch(() => {});
+        showToast('Tunnel status refreshed.');
+      } catch (error) {
+        setTunnelOutput(error.message, 'error');
+      }
       return;
     }
-    if (action === 'start-ngrok-tunnel' || action === 'stop-ngrok-tunnel') {
+    if (action === 'install-ngrok-agent' || action === 'start-ngrok-tunnel' || action === 'stop-ngrok-tunnel') {
       const server = activeServer();
-      if (!server) return showToast('Create or select a server first.');
+      if (!server && action !== 'install-ngrok-agent') return showToast('Create or select a server first.');
       const protocol = document.querySelector('#normalTunnelProtocol')?.value || 'auto';
-      const endpoint = action === 'start-ngrok-tunnel' ? '/api/tunnels/ngrok/start' : '/api/tunnels/ngrok/stop';
-      const data = await api(endpoint, {
-        method: 'POST',
-        body: JSON.stringify({ serverId: server.id, protocol }),
-      });
-      const remote = data.ngrok?.remoteHost || data.ngrok?.message || 'ngrok status updated.';
-      await navigator.clipboard?.writeText(data.ngrok?.remoteHost || '').catch(() => {});
-      showToast(action === 'start-ngrok-tunnel' ? `ngrok: ${remote}` : 'ngrok stopped.');
+      const endpoint = action === 'install-ngrok-agent'
+        ? '/api/tunnels/ngrok/install'
+        : action === 'start-ngrok-tunnel'
+          ? '/api/tunnels/ngrok/start'
+          : '/api/tunnels/ngrok/stop';
+      actionTarget.disabled = true;
+      setTunnelOutput(`${actionTarget.textContent.trim()} running...`);
+      try {
+        const data = await api(endpoint, {
+          method: 'POST',
+          body: JSON.stringify({ serverId: server?.id || 0, protocol }),
+        });
+        const remote = data.ngrok?.remoteHost || data.ngrok?.message || 'ngrok status updated.';
+        if (data.ngrok?.remoteHost) await navigator.clipboard?.writeText(data.ngrok.remoteHost).catch(() => {});
+        await refreshTunnelOutput(remote);
+        showToast(action === 'start-ngrok-tunnel' ? `ngrok: ${remote}` : remote);
+      } catch (error) {
+        setTunnelOutput(error.message, 'error');
+      } finally {
+        actionTarget.disabled = false;
+      }
       return;
     }
     if (action === 'install-playit-agent' || action === 'start-playit-agent' || action === 'stop-playit-agent') {
@@ -4011,9 +4060,13 @@ document.addEventListener('click', async (event) => {
           ? '/api/tunnels/playit/start'
           : '/api/tunnels/playit/stop';
       actionTarget.disabled = true;
+      setTunnelOutput(`${actionTarget.textContent.trim()} running...`);
       try {
         const data = await api(endpoint, { method: 'POST' });
+        await refreshTunnelOutput(data.playit?.message || 'Playit status updated.');
         showToast(data.playit?.message || 'Playit status updated.');
+      } catch (error) {
+        setTunnelOutput(error.message, 'error');
       } finally {
         actionTarget.disabled = false;
       }

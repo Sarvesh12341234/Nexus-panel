@@ -2851,13 +2851,30 @@ async function installPlayitAgent() {
   const command = [
     `${sudo}apt-get update`,
     `${sudo}apt-get install -y ca-certificates curl gnupg`,
-    `curl -SsL https://playit-cloud.github.io/ppa/key.gpg | ${sudo}gpg --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg`,
+    `${sudo}rm -f /etc/apt/trusted.gpg.d/playit.gpg`,
+    `curl -SsL https://playit-cloud.github.io/ppa/key.gpg | ${sudo}gpg --batch --yes --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg`,
     `echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | ${sudo}tee /etc/apt/sources.list.d/playit-cloud.list >/dev/null`,
     `${sudo}apt-get update`,
     `${sudo}apt-get install -y playit`,
   ].join(' && ');
   await runShellCommand(command, path.join(__dirname, '..'));
   return playitStatus();
+}
+
+async function installNgrokAgent() {
+  if (process.platform !== 'linux') throw new Error('ngrok one-click install is only supported on Linux VPS hosts.');
+  if (!commandWorks('apt-get', ['--version'])) throw new Error('ngrok one-click install currently supports Ubuntu/Debian apt hosts.');
+  const sudo = sudoPrefix();
+  const command = [
+    `${sudo}apt-get update`,
+    `${sudo}apt-get install -y ca-certificates curl`,
+    `curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | ${sudo}tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null`,
+    `echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" | ${sudo}tee /etc/apt/sources.list.d/ngrok.list >/dev/null`,
+    `${sudo}apt-get update`,
+    `${sudo}apt-get install -y ngrok`,
+  ].join(' && ');
+  await runShellCommand(command, path.join(__dirname, '..'));
+  return { installed: commandWorks('ngrok', ['version']), message: 'ngrok agent installed on the VPS.' };
 }
 
 function playitStatus() {
@@ -3694,6 +3711,11 @@ app.post('/api/tunnels/ngrok/stop', requirePermission(capabilities.NETWORK_MANAG
 app.get('/api/tunnels/ngrok/status', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
   res.json({ ngrok: await ngrokStatus(server) });
+}));
+
+app.post('/api/tunnels/ngrok/install', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can install VPS tunnel software.' });
+  res.json({ ngrok: await installNgrokAgent() });
 }));
 
 app.post('/api/tunnels/playit/install', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {

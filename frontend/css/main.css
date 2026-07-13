@@ -575,6 +575,50 @@ code {
   transition: width 160ms ease;
 }
 
+.tunnel-settings {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.tunnel-settings > strong,
+.tunnel-settings > .row-actions,
+.tunnel-settings > .tunnel-output {
+  grid-column: 1 / -1;
+}
+
+.tunnel-settings > .row-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  align-items: stretch;
+}
+
+.tunnel-settings > .row-actions > * {
+  width: 100%;
+  min-height: 42px;
+}
+
+.tunnel-output {
+  min-height: 132px;
+  margin: 0;
+  padding: 0.9rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.tunnel-output[data-mode="error"] {
+  color: #fecdd3;
+  border-color: rgba(255, 91, 116, 0.45);
+  background: rgba(255, 91, 116, 0.1);
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(120px, 1fr));
@@ -1345,6 +1389,11 @@ code {
 
   .server-row-card,
   .file-row {
+    grid-template-columns: 1fr;
+  }
+
+  .tunnel-settings,
+  .tunnel-settings > .row-actions {
     grid-template-columns: 1fr;
   }
 
