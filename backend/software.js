@@ -34,6 +34,26 @@ const SOFTWARE = [
     versionMode: 'papermc',
   },
   {
+    key: 'fabric',
+    name: 'Fabric',
+    edition: 'java',
+    pluginKinds: ['jar-plugin'],
+    executable: 'fabric-server-launch.jar',
+    folder: 'fabric',
+    notes: 'Fabric mod loader for Java servers. Install server-side Fabric mods into the mods folder.',
+    versionMode: 'fabric',
+  },
+  {
+    key: 'forge',
+    name: 'Forge',
+    edition: 'java',
+    pluginKinds: ['jar-plugin'],
+    executable: process.platform === 'win32' ? 'start-forge.bat' : 'start-forge.sh',
+    folder: 'forge',
+    notes: 'Forge mod loader for Java servers. Installs the official Forge server layout.',
+    versionMode: 'forge',
+  },
+  {
     key: 'purpur',
     name: 'Purpur',
     edition: 'java',
@@ -73,6 +93,8 @@ function clearSoftwareVersionCache() {
       key.startsWith('papermc-')
       || key.startsWith('purpur-')
       || key.startsWith('mojang-')
+      || key.startsWith('fabric-')
+      || key.startsWith('forge-')
       || key.startsWith('github-')
       || key.startsWith('vexyhost-')
     ) {
@@ -115,6 +137,53 @@ async function minecraftVersions() {
     .map((version) => version.id);
 }
 
+async function fabricGameVersions() {
+  const versions = await cached('fabric-game-versions', () => fetchJson('https://meta.fabricmc.net/v2/versions/game'));
+  return versions
+    .filter((version) => version.stable)
+    .map((version) => String(version.version || '').trim())
+    .filter(Boolean);
+}
+
+async function latestFabricLoader() {
+  const loaders = await cached('fabric-loader-versions', () => fetchJson('https://meta.fabricmc.net/v2/versions/loader'));
+  return loaders.find((item) => item.stable)?.version || loaders[0]?.version;
+}
+
+async function latestFabricInstaller() {
+  const installers = await cached('fabric-installer-versions', () => fetchJson('https://meta.fabricmc.net/v2/versions/installer'));
+  return installers.find((item) => item.stable)?.version || installers[0]?.version;
+}
+
+function parseForgeVersions(xml) {
+  return [...xml.matchAll(/<version>([^<]+)<\/version>/g)]
+    .map((match) => match[1])
+    .filter(Boolean);
+}
+
+async function forgeArtifactVersions() {
+  const xml = await cached('forge-maven-metadata', async () => {
+    const response = await fetch('https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml', {
+      headers: { 'User-Agent': 'NexusPanel/2.0 (+https://github.com/Sarvesh12341234/Nexus-panel)' },
+    });
+    if (!response.ok) throw new Error(`Forge metadata failed: ${response.status}`);
+    return response.text();
+  });
+  return parseForgeVersions(xml).reverse();
+}
+
+async function forgeMinecraftVersions() {
+  const versions = await forgeArtifactVersions();
+  return [...new Set(versions.map((version) => version.split('-')[0]).filter(Boolean))];
+}
+
+async function resolveForgeArtifact(requestedVersion) {
+  const versions = await forgeArtifactVersions();
+  const selected = versions.find((version) => version.startsWith(`${requestedVersion}-`));
+  if (!selected) throw new Error(`No Forge build is available for Minecraft ${requestedVersion}.`);
+  return selected;
+}
+
 async function softwareVersions(key) {
   const software = findSoftware(key);
   if (!software) throw new Error('Unknown software.');
@@ -135,6 +204,8 @@ async function softwareVersions(key) {
     return [...project.versions].reverse();
   }
 
+  if (software.versionMode === 'fabric') return fabricGameVersions();
+  if (software.versionMode === 'forge') return forgeMinecraftVersions();
   if (software.versionMode === 'mojang') return minecraftVersions();
   if (software.versionMode === 'bedrock') {
     const urls = await bedrockDownloadUrls();
@@ -242,6 +313,30 @@ async function resolveDownload(software, requestedVersion = 'latest') {
     const url = detail.downloads?.server?.url;
     if (!url) throw new Error('This Java version has no server download.');
     return { version, url, fileName: software.executable };
+  }
+
+  if (software.versionMode === 'fabric') {
+    const loader = await latestFabricLoader();
+    const installer = await latestFabricInstaller();
+    if (!loader || !installer) throw new Error('Fabric loader metadata is unavailable.');
+    return {
+      version,
+      url: `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(version)}/${encodeURIComponent(loader)}/${encodeURIComponent(installer)}/server/jar`,
+      fileName: software.executable,
+      loaderVersion: loader,
+      installerVersion: installer,
+    };
+  }
+
+  if (software.versionMode === 'forge') {
+    const forgeVersion = await resolveForgeArtifact(version);
+    return {
+      version,
+      forgeVersion,
+      installer: true,
+      url: `https://maven.minecraftforge.net/net/minecraftforge/forge/${encodeURIComponent(forgeVersion)}/forge-${encodeURIComponent(forgeVersion)}-installer.jar`,
+      fileName: `forge-${forgeVersion}-installer.jar`,
+    };
   }
 
   if (software.key === 'pocketmine') {

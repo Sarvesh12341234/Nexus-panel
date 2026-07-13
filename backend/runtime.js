@@ -143,7 +143,7 @@ function startServer(server, software) {
   let command;
   let args;
 
-  if (software.key === 'java-vanilla' || software.key === 'paper' || software.key === 'purpur') {
+  if (software.key === 'java-vanilla' || software.key === 'paper' || software.key === 'purpur' || software.key === 'fabric') {
     assertCommandAvailable(
       'java',
       ['-version'],

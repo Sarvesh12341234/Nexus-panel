@@ -2416,6 +2416,36 @@ function renderBackups() {
       }
     }
 
+    const renderBackupGroup = (title, backups, emptyText) => `
+      <h3>${escapeHtml(title)}</h3>
+      <div class="plugin-list">
+        ${(backups || []).map((backup) => {
+          const displayName = formatBackupDisplayName(backup.name);
+          const formattedDate = formatBackupDate(backup.createdAt);
+          return `
+            <div class="plugin-row">
+              <div>
+                <strong>${escapeHtml(displayName)}</strong>
+                <div class="muted">${Math.round(backup.size / 1024)} KB | ${escapeHtml(formattedDate)}</div>
+              </div>
+              <div class="row-actions">
+                <button class="secondary" type="button" data-action="restore-backup" data-backup-path="${escapeHtml(backup.path)}">Restore</button>
+                <a class="button-link" href="/api/servers/${server.id}/backups/download?name=${encodeURIComponent(backup.name)}">Download</a>
+                <button class="danger" type="button" data-action="delete-backup" data-backup-path="${escapeHtml(backup.path)}">Delete</button>
+              </div>
+            </div>
+          `;
+        }).join('') || `<p class="empty-state">${escapeHtml(emptyText)}</p>`}
+      </div>
+    `;
+    const groups = data.backupGroups || {
+      manual: data.backups || [],
+      automatic: [],
+      offline: [],
+      crash: [],
+      other: [],
+    };
+
     elements.backupPanel.innerHTML = `
       <div class="section-head"><div><p class="eyebrow">Backups</p><h2>${escapeHtml(server.name)}</h2></div><button type="button" data-action="manual-backup">Manual backup</button></div>
       <form class="backup-settings" id="backupSettingsForm">
@@ -2444,7 +2474,8 @@ function renderBackups() {
       </form>
       <div class="quick-stats">
         <article><span>Filename timezone</span><strong>${escapeHtml(data.schedule?.fileNameTimeZone || 'UTC')}</strong></article>
-        <article><span>Next automatic backup</span><strong>${data.schedule?.nextBackupAt ? escapeHtml(formatBackupDate(data.schedule.nextBackupAt)) : 'Disabled'}</strong></article>
+        <article><span>Next online automatic backup</span><strong>${data.schedule?.nextBackupAt ? escapeHtml(formatBackupDate(data.schedule.nextBackupAt)) : 'Disabled'}</strong></article>
+        <article><span>Next offline safety backup</span><strong>${data.schedule?.nextOfflineBackupAt ? escapeHtml(formatBackupDate(data.schedule.nextOfflineBackupAt)) : 'Disabled'}</strong></article>
         <article><span>Scheduler accuracy</span><strong>within ${Number(data.schedule?.schedulerResolutionSeconds || 30)} sec</strong></article>
       </div>
       <form class="backup-settings" id="publicBackupImportForm">
@@ -2454,27 +2485,11 @@ function renderBackups() {
       ${data.canManageShare ? `<div class="plugin-list">
         ${requests.map((request) => `<div class="plugin-row"><div><strong>${escapeHtml(request.target_name || 'Server')}</strong><div class="muted">${escapeHtml(request.requester_email || '')} | ${escapeHtml(request.status)}${request.expires_at ? ` | until ${escapeHtml(formatBackupDate(request.expires_at))}` : ''}</div></div><div class="row-actions">${request.status === 'pending' ? '<input type="number" min="1" max="24" value="1" data-share-hours>' : ''}<button class="secondary" type="button" data-action="backup-request-approve" data-request-id="${request.id}" ${request.status === 'pending' ? '' : 'disabled'}>Accept</button><button class="danger" type="button" data-action="backup-request-remove" data-request-id="${request.id}">Remove</button></div></div>`).join('') || '<p class="empty-state">No backup access requests.</p>'}
       </div>` : ''}
-
-      <!-- BACKUP LIST WITH 12-HOUR FORMAT -->
-      <div class="plugin-list">
-        ${data.backups.map((backup) => {
-          const displayName = formatBackupDisplayName(backup.name);
-          const formattedDate = formatBackupDate(backup.createdAt);
-          return `
-            <div class="plugin-row">
-              <div>
-                <strong>${escapeHtml(displayName)}</strong>
-                <div class="muted">${Math.round(backup.size / 1024)} KB | ${escapeHtml(formattedDate)}</div>
-              </div>
-              <div class="row-actions">
-                <button class="secondary" type="button" data-action="restore-backup" data-backup-path="${escapeHtml(backup.path)}">Restore</button>
-                <a class="button-link" href="/api/servers/${server.id}/backups/download?name=${encodeURIComponent(backup.name)}">Download</a>
-                <button class="danger" type="button" data-action="delete-backup" data-backup-path="${escapeHtml(backup.path)}">Delete</button>
-              </div>
-            </div>
-          `;
-        }).join('') || '<p class="empty-state">No backups yet.</p>'}
-      </div>
+      ${renderBackupGroup('Manual backups', groups.manual, 'No manual backups yet.')}
+      ${renderBackupGroup('Automatic backups', groups.automatic, 'No online automatic backups yet.')}
+      ${renderBackupGroup('Offline backups', groups.offline, 'No offline safety backups yet.')}
+      ${renderBackupGroup('Crash backups', groups.crash, 'No crash backups yet.')}
+      ${groups.other?.length ? renderBackupGroup('Other backups', groups.other, 'No other backups.') : ''}
 
       <h3>Shared backups</h3>
       <div class="plugin-list">${shared.map((group) => `

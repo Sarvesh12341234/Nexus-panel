@@ -1741,6 +1741,14 @@ function clearServerBackupPause(serverId) {
   appendLog(Number(serverId), '[NexusPanel] Stable runtime detected. Scheduled backups resumed.');
 }
 
+function offlineBackupKey(serverId) {
+  return `server_offline_backup_at_${Number(serverId)}`;
+}
+
+function lastOfflineBackupAt(serverId) {
+  return Number(settingValue(offlineBackupKey(serverId), '0')) || 0;
+}
+
 function serverStableFor(serverId, ms = 60 * 1000) {
   const details = runtimeDetails(Number(serverId));
   return details.status === 'online' && Number(details.startedAt || 0) > 0 && Date.now() - Number(details.startedAt) >= ms;
@@ -2191,7 +2199,8 @@ async function createServerBackupUnlocked(server, reason = 'manual') {
 
   for (const old of backups.slice(retention)) await fs.promises.rm(old.path, { force: true });
 
-  db.prepare('UPDATE servers SET last_backup_at = ? WHERE id = ?').run(Date.now(), server.id);
+  if (reason === 'offline') setSettingValue(offlineBackupKey(server.id), String(Date.now()));
+  else db.prepare('UPDATE servers SET last_backup_at = ? WHERE id = ?').run(Date.now(), server.id);
   if (archiveResult.skipped) {
     appendLog(server.id, `[NexusPanel] Backup snapshot skipped ${archiveResult.skipped} transient file(s) that disappeared during compaction.`);
   }
@@ -2216,6 +2225,29 @@ async function backupRows(server) {
       };
     })
     .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+function backupCategory(name) {
+  const value = String(name || '').toLowerCase();
+  if (/-backup-manual-/.test(value)) return 'manual';
+  if (/-backup-auto-/.test(value)) return 'automatic';
+  if (/-backup-offline-/.test(value)) return 'offline';
+  if (/-backup-crash-/.test(value)) return 'crash';
+  return 'other';
+}
+
+function groupedBackups(backups) {
+  const groups = {
+    manual: [],
+    automatic: [],
+    offline: [],
+    crash: [],
+    other: [],
+  };
+  for (const backup of backups) {
+    groups[backupCategory(backup.name)].push({ ...backup, category: backupCategory(backup.name) });
+  }
+  return groups;
 }
 
 function executableCandidates(server, software) {
@@ -2977,6 +3009,42 @@ async function installPocketMineRuntime(root, serverId, onProgress) {
   }, null, 2));
   appendLog(serverId, `[NexusPanel] Bundled PHP ready: ${asset.version}`);
   return phpBinary;
+}
+
+async function verifyJarDownload(filePath, softwareName) {
+  const handle = await fs.promises.open(filePath, 'r').catch(() => null);
+  if (!handle) throw new Error(`${softwareName} download did not create a jar file.`);
+  try {
+    const buffer = Buffer.alloc(4);
+    const { bytesRead } = await handle.read(buffer, 0, 4, 0);
+    if (bytesRead < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+      throw new Error(`${softwareName} download is not a valid jar. Recheck the selected version and retry.`);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function installForgeServer(root, serverId, download, executablePath, onProgress) {
+  const installerPath = path.join(root, 'runtime', download.fileName || `forge-${download.forgeVersion}-installer.jar`);
+  await fs.promises.mkdir(path.dirname(installerPath), { recursive: true });
+  onProgress(25, `Downloading Forge installer ${download.forgeVersion}`);
+  await downloadToFile(download.url, installerPath, (progress) => onProgress(Math.max(25, Math.min(55, Math.round(25 + progress * 0.3))), `Downloading Forge installer ${download.forgeVersion}`));
+  await verifyJarDownload(installerPath, 'Forge installer');
+  onProgress(60, `Running Forge server installer ${download.forgeVersion}`);
+  await runShellCommand(`java -jar "${installerPath}" --installServer`, root, (chunk) => {
+    onProgress(72, String(chunk).trim().slice(-180) || `Installing Forge ${download.forgeVersion}`);
+  });
+  const argsPath = path.join(root, 'libraries', 'net', 'minecraftforge', 'forge', download.forgeVersion, process.platform === 'win32' ? 'win_args.txt' : 'unix_args.txt');
+  const legacyJar = findFile(root, `forge-${download.forgeVersion}.jar`);
+  if (!fs.existsSync(argsPath) && !legacyJar) throw new Error('Forge installer finished but no launch args or Forge jar was found.');
+  const script = process.platform === 'win32'
+    ? `@echo off\r\nset MEM=%NEXUS_MARK_MEMORY_MB%\r\nif "%MEM%"=="" set MEM=1024\r\n${fs.existsSync(argsPath) ? `java -Xmx%MEM%M @\"${argsPath}\" nogui` : `java -Xmx%MEM%M -jar \"${legacyJar}\" nogui`}\r\n`
+    : `#!/bin/sh\nMEM="${'${NEXUS_MARK_MEMORY_MB:-1024}'}"\n${fs.existsSync(argsPath) ? `exec java -Xmx"$MEM"M @"${argsPath}" nogui` : `exec java -Xmx"$MEM"M -jar "${legacyJar}" nogui`}\n`;
+  await fs.promises.mkdir(path.dirname(executablePath), { recursive: true });
+  await fs.promises.writeFile(executablePath, script, 'utf8');
+  if (process.platform !== 'win32') await fs.promises.chmod(executablePath, 0o755);
+  appendLog(serverId, `[NexusPanel] Forge server launcher ready: ${download.forgeVersion}.`);
 }
 
 function commandWorks(command, args = ['--version']) {
@@ -4851,7 +4919,9 @@ app.post('/api/servers/:id/software/install', requirePermission(capabilities.SOF
 
   const root = ensureServerDirs({ ...target, server_path: target.server_path || serverPath(target.id, target.name) });
   const executablePath = path.join(root, 'software', selectedSoftware.executable);
-  const downloadPath = selectedSoftware.key === 'bedrock-vanilla'
+  const downloadPath = selectedSoftware.key === 'forge'
+    ? path.join(root, 'runtime', 'forge-installer.jar')
+    : selectedSoftware.key === 'bedrock-vanilla'
     ? path.join(root, 'software', `${selectedSoftware.folder}.zip`)
     : executablePath;
   const version = String(req.body.softwareVersion || target.software_version || 'latest').trim().slice(0, 32) || 'latest';
@@ -4876,10 +4946,19 @@ app.post('/api/servers/:id/software/install', requirePermission(capabilities.SOF
       const baseProgress = selectedSoftware.key === 'pocketmine' ? 55 : 18;
       db.prepare('UPDATE servers SET software_version = ?, install_progress = ?, install_message = ? WHERE id = ?')
         .run(download.version, baseProgress, `Downloading ${selectedSoftware.name} ${download.version}`, id);
-      await downloadToFile(download.url, downloadPath, (progress) => {
-        db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?')
-          .run(selectedSoftware.key === 'pocketmine' ? Math.max(55, Math.min(98, 55 + Math.round(progress * 0.43))) : Math.max(18, progress), `Downloading ${selectedSoftware.name} ${download.version}`, id);
-      });
+      if (selectedSoftware.key === 'forge') {
+        await installForgeServer(root, id, download, executablePath, (progress, message) => {
+          db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);
+        });
+      } else {
+        await downloadToFile(download.url, downloadPath, (progress) => {
+          db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?')
+            .run(selectedSoftware.key === 'pocketmine' ? Math.max(55, Math.min(98, 55 + Math.round(progress * 0.43))) : Math.max(18, progress), `Downloading ${selectedSoftware.name} ${download.version}`, id);
+        });
+      }
+      if (['java-vanilla', 'paper', 'purpur', 'fabric'].includes(selectedSoftware.key)) {
+        await verifyJarDownload(executablePath, selectedSoftware.name);
+      }
       if (selectedSoftware.key === 'bedrock-vanilla' && download.archive) {
         const extractDir = path.join(root, 'software', 'bedrock-extract');
         db.prepare('UPDATE servers SET install_progress = 96, install_message = ? WHERE id = ?').run('Extracting Bedrock server zip', id);
@@ -5383,12 +5462,15 @@ app.get('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAG
       backups: await backupRows(sourceServer),
     });
   }
+  const backups = await backupRows(server);
   const intervalMs = backupIntervalMinutesFrom(server) * 60 * 1000;
   const nextBackupAt = server.scheduled_backups
     ? Number(server.last_backup_at || 0) > 0 ? Number(server.last_backup_at) + intervalMs : Date.now()
     : 0;
+  const offlineBackupAt = lastOfflineBackupAt(server.id);
   res.json({
-    backups: await backupRows(server),
+    backups,
+    backupGroups: groupedBackups(backups),
     canManageShare: canShareOwner,
     shareCode: code || null,
     shareRequests: incoming,
@@ -5398,6 +5480,8 @@ app.get('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAG
       intervalMinutes: backupIntervalMinutesFrom(server),
       lastBackupAt: Number(server.last_backup_at || 0),
       nextBackupAt,
+      lastOfflineBackupAt: offlineBackupAt,
+      nextOfflineBackupAt: server.scheduled_backups ? (offlineBackupAt ? offlineBackupAt + 24 * 60 * 60 * 1000 : Date.now()) : 0,
       schedulerResolutionSeconds: 30,
       fileNameTimeZone: backupTimezone(server),
     },
@@ -5953,6 +6037,16 @@ async function runAutoBackups() {
     if (pauseUntil) {
       if (serverStableFor(server.id, 60 * 1000)) clearServerBackupPause(server.id);
       else continue;
+    }
+    const online = runtimeStatus(server.id) === 'online';
+    if (!online) {
+      const dayMs = 24 * 60 * 60 * 1000;
+      if (now - lastOfflineBackupAt(server.id) < dayMs || autoBackupInFlight.has(server.id)) continue;
+      autoBackupInFlight.add(server.id);
+      createServerBackup(server, 'offline')
+        .catch((error) => appendLog(server.id, `[NexusPanel] Offline backup failed: ${error.message}`))
+        .finally(() => autoBackupInFlight.delete(server.id));
+      continue;
     }
     const intervalMs = backupIntervalMinutesFrom(server) * 60 * 1000;
     if (now - Number(server.last_backup_at || 0) < intervalMs || autoBackupInFlight.has(server.id)) continue;

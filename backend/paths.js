@@ -95,7 +95,9 @@ function pluginTarget(server, kind, fileName) {
     ? path.join(root, 'packs', 'resource_packs')
     : kind === 'behavior-pack'
       ? path.join(root, 'packs', 'behavior_packs')
-      : path.join(root, 'plugins');
+      : kind === 'jar-plugin' && ['fabric', 'forge'].includes(String(server.software_key || '').toLowerCase())
+        ? path.join(root, 'mods')
+        : path.join(root, 'plugins');
 
   fs.mkdirSync(assertInside(root, targetDir), { recursive: true });
 
