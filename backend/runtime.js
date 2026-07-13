@@ -4,6 +4,7 @@ const path = require('node:path');
 const { spawnOptions, wrapCommand } = require('./nexus_mark');
 const { hostCpuCount } = require('./system_info');
 const { ensureServerDirs, externalDataRoot } = require('./paths');
+const { processTreeMetrics } = require('./process_metrics');
 
 const processes = new Map();
 const logs = new Map();
@@ -136,6 +137,9 @@ function startServer(server, software) {
   const root = ensureServerDirs(server);
   appendLog(server.id, `[NexusPanel] Working directory: ${root}`);
   const executable = server.executable_path;
+  const totalCpuCores = hostCpuCount();
+  const dbMemoryMb = Math.max(256, Math.round(Number(server.max_memory_mb) || 1024));
+  const dbCpuCores = Math.max(1, Math.min(totalCpuCores, Math.round(Number(server.cpu_cores) || 1)));
   let command;
   let args;
 
@@ -146,7 +150,7 @@ function startServer(server, software) {
       'Java runtime was not found in PATH. Install Java 21+ (Linux: apt install -y openjdk-21-jre-headless) then restart the server.',
     );
     command = 'java';
-    args = [`-Xmx${server.max_memory_mb}M`, '-jar', executable, 'nogui'];
+    args = [`-Xmx${dbMemoryMb}M`, '-jar', executable, 'nogui'];
   } else if (software.key === 'pocketmine') {
     const header = fs.readFileSync(executable, { encoding: 'utf8', flag: 'r' }).slice(0, 80);
     if (!header.includes('<?php')) {
@@ -176,18 +180,19 @@ function startServer(server, software) {
     mark = null;
   }
   const storedProfile = mark || {};
-  const totalCpuCores = hostCpuCount();
-  const cpuCores = Math.max(1, Math.min(totalCpuCores, Number(server.cpu_cores || storedProfile.cpuCores || 1)));
   const profile = {
     ...storedProfile,
     serverId: server.id,
     serverRoot: root,
-    cpuCores,
-    cpuQuotaPercent: cpuCores * 100,
-    startupCpuQuotaPercent: cpuCores <= 3 ? Math.min(totalCpuCores, cpuCores * 4) * 100 : cpuCores * 100,
-    memoryMaxMb: server.max_memory_mb || 1024,
-    pathScope: storedProfile.pathScope || 'server-root-only',
+    cpuCores: dbCpuCores,
+    cpuQuotaPercent: dbCpuCores * 100,
+    startupCpuQuotaPercent: dbCpuCores <= 3 ? Math.min(totalCpuCores, dbCpuCores * 4) * 100 : dbCpuCores * 100,
+    memoryMaxMb: dbMemoryMb,
+    diskLimitMb: Number(server.disk_limit_mb || 0),
+    pathScope: 'server-root-only',
+    sourceOfTruth: 'sqlite-allocation',
   };
+  appendLog(server.id, `[NexusPanel] Nexus-Mark allocation enforced from database: ${dbMemoryMb} MB RAM, ${dbCpuCores} CPU core(s).`);
   const wrapped = wrapCommand(command, args, profile);
   const child = spawn(wrapped.command, wrapped.args, spawnOptions({
     cwd: root,
@@ -199,6 +204,7 @@ function startServer(server, software) {
   child.startedAt = Date.now();
   child.stopCommand = software.stopCommand || 'stop';
   child.nexusUnit = wrapped.unit;
+  child.nexusGuardTimer = startAllocationGuard(server.id, child, profile);
   if (wrapped.unit) {
     if (profile.startupCpuQuotaPercent > profile.cpuQuotaPercent) {
       appendLog(server.id, `[NexusPanel] Cgroup active: startup ${profile.startupCpuQuotaPercent}% CPU, then ${profile.cpuQuotaPercent}% CPU.`);
@@ -219,10 +225,12 @@ function startServer(server, software) {
   child.stdout.on('data', (chunk) => splitLines(server.id, chunk));
   child.stderr.on('data', (chunk) => splitLines(server.id, chunk));
   child.on('error', (error) => {
+    if (child.nexusGuardTimer) clearInterval(child.nexusGuardTimer);
     appendLog(server.id, `[NexusPanel] Failed to start: ${error.message}`);
     processes.delete(server.id);
   });
   child.on('exit', (code, signal) => {
+    if (child.nexusGuardTimer) clearInterval(child.nexusGuardTimer);
     const intentional = intentionalStops.delete(server.id);
     appendLog(server.id, `[NexusPanel] Process exited code=${code ?? 'none'} signal=${signal ?? 'none'}`);
     processes.delete(server.id);
@@ -242,6 +250,41 @@ function startServer(server, software) {
   });
 
   return { ok: true, message: 'Server start requested.' };
+}
+
+function startAllocationGuard(serverId, child, profile) {
+  if (process.platform === 'linux' && child.nexusUnit) return null;
+  const hardLimitMb = Math.max(profile.memoryMaxMb + 384, Math.ceil(profile.memoryMaxMb * 1.35));
+  let strikes = 0;
+  const timer = setInterval(() => {
+    if (!processes.has(serverId)) return;
+    const metrics = processTreeMetrics({
+      pid: child.pid,
+      unit: child.nexusUnit,
+      cacheKey: `runtime-guard:${serverId}`,
+    });
+    if (metrics.rssMb <= hardLimitMb) {
+      strikes = 0;
+      return;
+    }
+    strikes += 1;
+    appendLog(serverId, `[NexusPanel] Nexus-Mark guard warning: process tree is using ${metrics.rssMb} MB over hard guard ${hardLimitMb} MB (allocation ${profile.memoryMaxMb} MB).`);
+    if (strikes < 3) return;
+    intentionalStops.add(serverId);
+    child.recoveryReason = 'allocation-guard';
+    appendLog(serverId, '[NexusPanel] Nexus-Mark guard stopped the server for exceeding its database RAM allocation. File-edited metadata cannot raise this limit.');
+    terminateProcessTree(child);
+  }, 5000);
+  timer.unref();
+  return timer;
+}
+
+function terminateProcessTree(child) {
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    return;
+  }
+  child.kill('SIGTERM');
 }
 
 function restartServer(server, software) {
@@ -288,6 +331,10 @@ function killServer(serverId) {
   intentionalStops.add(serverId);
   if (child.nexusUnit && process.platform === 'linux') {
     spawnSync('systemctl', ['kill', child.nexusUnit], { stdio: 'ignore' });
+  } else if (process.platform === 'win32') {
+    terminateProcessTree(child);
+    appendLog(serverId, '[NexusPanel] Kill requested.');
+    return { ok: true, message: 'Kill requested.' };
   }
   child.kill('SIGTERM');
   appendLog(serverId, '[NexusPanel] Kill requested.');

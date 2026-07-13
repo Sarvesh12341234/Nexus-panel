@@ -40,6 +40,7 @@ function clearStaleUnits(serverId, spawnSync) {
 function profileForServer(server, nexu = null) {
   const cpuCores = Math.max(1, Math.min(hostCpuCount(), Number(server.cpu_cores || nexu?.resources?.cpuCores || 1)));
   const ramMb = Math.max(256, Number(server.max_memory_mb || nexu?.resources?.ramMb || 1024));
+  const windowsHardGuardMb = Math.max(ramMb + 384, Math.ceil(ramMb * 1.35));
   return {
     engine: 'nexus-mark',
     version: 1,
@@ -54,6 +55,7 @@ function profileForServer(server, nexu = null) {
     pathScope: 'server-root-only',
     networkScope: nexu?.security?.nexusMark?.network || 'game-only',
     writeScope: nexu?.security?.nexusMark?.writeScope || 'server-root',
+    sourceOfTruth: 'sqlite-allocation',
     hardening: [
       'absolute-path-sandbox',
       'per-server-root',
@@ -73,6 +75,16 @@ function profileForServer(server, nexu = null) {
         protectSystem: 'strict-planned',
       }
       : { note: 'Windows/macOS use path sandbox + process guard only.' },
+    windowsPlan: process.platform === 'win32'
+      ? {
+        processTreeGuard: true,
+        hardGuardMb: windowsHardGuardMb,
+        taskKillOnViolation: true,
+        hiddenWindows: true,
+        pathScope: 'server-root-only',
+        sourceOfTruth: 'SQLite server allocation',
+      }
+      : null,
   };
 }
 

@@ -51,7 +51,16 @@ function extractArchiveInto(archivePath, destination, options = {}) {
 
 function zipEntries(archivePath) {
   if (!isZipFile(archivePath)) return [];
-  if (process.platform === 'win32') return [];
+  if (process.platform === 'win32') {
+    const script = [
+      'Add-Type -AssemblyName System.IO.Compression.FileSystem;',
+      `$zip=[System.IO.Compression.ZipFile]::OpenRead(${JSON.stringify(archivePath)});`,
+      'try { $zip.Entries | ForEach-Object { $_.FullName } } finally { $zip.Dispose() }',
+    ].join(' ');
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8', windowsHide: true });
+    if (result.error || result.status !== 0) return [];
+    return result.stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  }
   const result = spawnSync('unzip', ['-Z1', archivePath], { encoding: 'utf8', windowsHide: true });
   if (result.error && result.error.code === 'ENOENT') return [];
   if (result.status !== 0) return [];

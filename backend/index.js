@@ -22,7 +22,7 @@ const { clearSoftwareVersionCache, defaultSoftware, findSoftware, pluginKindForF
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { profileForServer, writeProfile } = require('./nexus_mark');
 const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer } = require('./runtime');
-const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions } = require('./zip_utils');
+const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions, zipEntries } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { processTreeMetrics } = require('./process_metrics');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
@@ -1381,12 +1381,55 @@ function getServerOr404(id) {
 function safeServerFile(server, relative = '') {
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const cleaned = String(relative || '').replaceAll('\\', '/').replace(/^\/+/, '');
-  if (cleaned === 'runtime' || cleaned.startsWith('runtime/')) throw new Error('NexusPanel runtime files are protected.');
+  assertUserEditableServerPath(cleaned);
   return {
     root,
     relative: cleaned,
     absolute: assertInside(root, path.join(root, cleaned)),
   };
+}
+
+function assertUserEditableServerPath(relative = '') {
+  const cleaned = String(relative || '').replaceAll('\\', '/').replace(/^\/+/, '');
+  const lower = cleaned.toLowerCase();
+  const parts = lower.split('/').filter(Boolean);
+  if (!cleaned) return;
+  if (parts[0] === 'runtime') throw new Error('NexusPanel runtime files are protected.');
+  if (parts.some((part) => part === '.nexus-server.json' || part === '.nexus-mark.json' || part === '.nexuspanel' || part === '.nexus-mark')) {
+    throw new Error('NexusPanel metadata files are protected. Resource limits are enforced from the database, not editable server files.');
+  }
+  if (parts.some((part) => part.endsWith('.nexus-server.json') || part.endsWith('.nexus-mark.json'))) {
+    throw new Error('NexusPanel metadata files are protected.');
+  }
+}
+
+function isUserVisibleServerEntry(relative = '') {
+  try {
+    assertUserEditableServerPath(relative);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function firstProtectedServerTreeEntry(root, relative = '') {
+  const cleaned = String(relative || '').replaceAll('\\', '/').replace(/^\/+/, '');
+  if (!isUserVisibleServerEntry(cleaned)) return cleaned;
+  const start = assertInside(root, path.join(root, cleaned));
+  const stats = await fs.promises.lstat(start).catch(() => null);
+  if (!stats?.isDirectory()) return '';
+  const queue = [cleaned];
+  while (queue.length) {
+    const current = queue.shift();
+    const absolute = assertInside(root, path.join(root, current));
+    const entries = await fs.promises.readdir(absolute, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const nested = path.posix.join(current.replaceAll('\\', '/'), entry.name).replace(/^\/+/, '');
+      if (!isUserVisibleServerEntry(nested)) return nested;
+      if (entry.isDirectory()) queue.push(nested);
+    }
+  }
+  return '';
 }
 
 function uploadRows(serverId) {
@@ -5538,7 +5581,7 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
 
   if (stats.isDirectory()) {
     const entries = (await fs.promises.readdir(target.absolute, { withFileTypes: true }))
-      .filter((entry) => !(target.relative === '' && entry.name.toLowerCase() === 'runtime'));
+      .filter((entry) => isUserVisibleServerEntry(path.posix.join(target.relative.replaceAll('\\', '/'), entry.name)));
     const payloadEntries = await Promise.all(entries.map(async (entry) => {
       const entryPath = path.join(target.absolute, entry.name);
       const entryStats = await fs.promises.stat(entryPath).catch(() => null);
@@ -5793,6 +5836,10 @@ app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_
     if (!isZipFile(source.absolute)) {
       return res.status(422).json({ error: `${source.relative} is not a complete valid ZIP. It may be an unfinished upload/download. Re-upload it or use a fresh backup/archive.` });
     }
+    const blockedEntry = zipEntries(source.absolute).find((entry) => !isUserVisibleServerEntry(path.posix.join(destinationDir.relative.replaceAll('\\', '/'), entry)));
+    if (blockedEntry) {
+      return res.status(403).json({ error: `Archive contains protected NexusPanel metadata/runtime path: ${blockedEntry}` });
+    }
     if (mode === 'fail') {
       const collisions = zipCollisions(source.absolute, destinationDir.absolute);
       if (collisions.length) {
@@ -5816,7 +5863,12 @@ app.post('/api/servers/:id/files/archive', requirePermission(capabilities.FILES_
     .map((item) => String(item || '').replaceAll('\\', '/').replace(/^\/+/, ''))
     .filter((item, index, list) => list.indexOf(item) === index);
 
-  for (const relative of relativePaths) safeServerFile(server, relative);
+  for (const relative of relativePaths) {
+    const checked = safeServerFile(server, relative);
+    if (!checked.relative) return res.status(400).json({ error: 'Cannot archive the server root directly. Select files or folders inside it.' });
+    const blockedEntry = await firstProtectedServerTreeEntry(root, checked.relative);
+    if (blockedEntry) return res.status(403).json({ error: `Cannot archive protected NexusPanel metadata/runtime path: ${blockedEntry}` });
+  }
   const archiveName = `${server.name.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'server'}-${Date.now()}.zip`;
   const archivePath = assertInside(root, path.join(root, 'archives', archiveName));
   await createZip(root, relativePaths, archivePath);
