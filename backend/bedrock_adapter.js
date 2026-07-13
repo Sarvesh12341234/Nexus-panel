@@ -159,6 +159,15 @@ function sectionInfo(chunk) {
   return infos.sort((a, b) => b.y - a.y);
 }
 
+const FACE_BITS = {
+  px: 1,
+  nx: 2,
+  py: 4,
+  ny: 8,
+  pz: 16,
+  nz: 32,
+};
+
 class BedrockWorldAdapter {
   constructor({ version = '' } = {}) {
     this.version = version;
@@ -268,6 +277,7 @@ class BedrockWorldAdapter {
         name: normalized.name,
         stateId: normalized.stateId,
         color: normalized.color,
+        faces: 0,
       });
     };
 
@@ -300,7 +310,7 @@ class BedrockWorldAdapter {
         if (!top) continue;
 
         let addedDepth = 0;
-        for (let y = top.y; y >= minY && addedDepth < 6; y -= 1) {
+        for (let y = top.y; y >= minY && addedDepth < 8; y -= 1) {
           const normalized = readFast(x, y, z);
           if (!normalized?.color) {
             if (addedDepth > 0) break;
@@ -341,6 +351,19 @@ class BedrockWorldAdapter {
       }
     }
 
+    for (const block of blocks) {
+      const lx = ((block.x % 16) + 16) % 16;
+      const lz = ((block.z % 16) + 16) % 16;
+      let faces = 0;
+      if (lx === 15 || !readFast(lx + 1, block.y, lz)?.color) faces |= FACE_BITS.px;
+      if (lx === 0 || !readFast(lx - 1, block.y, lz)?.color) faces |= FACE_BITS.nx;
+      if (!readFast(lx, block.y + 1, lz)?.color) faces |= FACE_BITS.py;
+      if (!readFast(lx, block.y - 1, lz)?.color) faces |= FACE_BITS.ny;
+      if (lz === 15 || !readFast(lx, block.y, lz + 1)?.color) faces |= FACE_BITS.pz;
+      if (lz === 0 || !readFast(lx, block.y, lz - 1)?.color) faces |= FACE_BITS.nz;
+      block.faces = faces;
+    }
+
     blocks.sort((a, b) => (a.y - b.y) || (a.x - b.x) || (a.z - b.z));
     return {
       x: coords.x,
@@ -351,7 +374,7 @@ class BedrockWorldAdapter {
       geometry: {
         bytesRead: size,
         columns,
-        blocks: blocks.slice(-4096),
+        blocks: blocks.filter((block) => block.faces).slice(-4096),
       },
       palette: [...names.entries()]
         .sort((a, b) => b[1] - a[1])

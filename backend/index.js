@@ -502,6 +502,7 @@ function sanitizeSpectateWorld(world) {
     real: Boolean(block?.real),
     name: String(block?.name || '').slice(0, 80),
     stateId: Number.isFinite(Number(block?.stateId)) ? Math.trunc(Number(block.stateId)) : 0,
+    faces: Number.isFinite(Number(block?.faces)) ? Math.max(0, Math.min(63, Math.trunc(Number(block.faces)))) : 63,
     color: /^#[0-9a-f]{6}$/i.test(String(block?.color || '')) || /^hsl\(/i.test(String(block?.color || ''))
       ? String(block.color).slice(0, 40)
       : '',

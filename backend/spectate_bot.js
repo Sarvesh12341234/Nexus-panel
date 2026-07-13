@@ -317,15 +317,12 @@ canvas{display:block;touch-action:none}
   scene.add(world);
   const entityGroup = new THREE.Group();
   scene.add(entityGroup);
-  const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
-  const instancedGroups = new Map();
+  const terrainMeshes = new Map();
   const entityMeshes = new Map();
   const materialCache = new Map();
   const textureCache = new Map();
-  const matrix = new THREE.Matrix4();
-  const scale = new THREE.Vector3(1, 1, 1);
-  const rotation = new THREE.Quaternion();
   let blockCount = 0;
+  let faceCount = 0;
   let worldSignature = '';
   let state = window.__NEXUS_INITIAL__ || {};
   let lookYawOffset = 0;
@@ -392,6 +389,14 @@ canvas{display:block;touch-action:none}
     return materialCache.get(key);
   };
   const materialKeyFor = (block) => colorFor(block) + ':' + String(block.name || '').slice(0, 32);
+  const faceDefs = [
+    { bit: 1, normal: [1, 0, 0], corners: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]] },
+    { bit: 2, normal: [-1, 0, 0], corners: [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]] },
+    { bit: 4, normal: [0, 1, 0], corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]] },
+    { bit: 8, normal: [0, -1, 0], corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] },
+    { bit: 16, normal: [0, 0, 1], corners: [[1, 0, 1], [1, 1, 1], [0, 1, 1], [0, 0, 1]] },
+    { bit: 32, normal: [0, 0, -1], corners: [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]] },
+  ];
   const blockRowsFromChunks = (chunks) => {
     const rows = [];
     for (const chunk of chunks) {
@@ -401,14 +406,48 @@ canvas{display:block;touch-action:none}
     }
     return rows.slice(-52000);
   };
+  const geometryForBlocks = (blocks) => {
+    const positions = [];
+    const normals = [];
+    const uvs = [];
+    const indices = [];
+    let faces = 0;
+    const uv = [[0, 0], [0, 1], [1, 1], [1, 0]];
+    for (const block of blocks) {
+      const mask = Number(block.faces || 63);
+      const x = Number(block.x || 0);
+      const y = Number(block.y || 64);
+      const z = Number(block.z || 0);
+      for (const face of faceDefs) {
+        if (!(mask & face.bit)) continue;
+        const base = positions.length / 3;
+        for (let index = 0; index < 4; index += 1) {
+          const corner = face.corners[index];
+          positions.push(x + corner[0], y + corner[1], z + corner[2]);
+          normals.push(face.normal[0], face.normal[1], face.normal[2]);
+          uvs.push(uv[index][0], uv[index][1]);
+        }
+        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+        faces += 1;
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    geometry.computeBoundingSphere();
+    geometry.userData.faces = faces;
+    return geometry;
+  };
   const rebuildWorld = (rows, signature) => {
     if (signature === worldSignature) return;
     worldSignature = signature;
-    for (const mesh of instancedGroups.values()) {
+    for (const mesh of terrainMeshes.values()) {
       world.remove(mesh);
-      mesh.dispose?.();
+      mesh.geometry.dispose();
     }
-    instancedGroups.clear();
+    terrainMeshes.clear();
     const buckets = new Map();
     for (const block of rows) {
       const key = materialKeyFor(block);
@@ -416,23 +455,12 @@ canvas{display:block;touch-action:none}
       buckets.get(key).push(block);
     }
     blockCount = rows.length;
+    faceCount = 0;
     for (const blocks of buckets.values()) {
-      const mesh = new THREE.InstancedMesh(cubeGeometry, materialFor(blocks[0]), blocks.length);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      for (let index = 0; index < blocks.length; index += 1) {
-        const block = blocks[index];
-        const h = Math.max(1, Math.min(24, Number(block.h || 1)));
-        scale.set(1, h, 1);
-        matrix.compose(
-          new THREE.Vector3(Number(block.x || 0) + 0.5, Number(block.y || 64) + h / 2, Number(block.z || 0) + 0.5),
-          rotation,
-          scale,
-        );
-        mesh.setMatrixAt(index, matrix);
-      }
-      mesh.instanceMatrix.needsUpdate = true;
-      instancedGroups.set(materialKeyFor(blocks[0]), mesh);
+      const geometry = geometryForBlocks(blocks);
+      faceCount += geometry.userData.faces || 0;
+      const mesh = new THREE.Mesh(geometry, materialFor(blocks[0]));
+      terrainMeshes.set(materialKeyFor(blocks[0]), mesh);
       world.add(mesh);
     }
   };
@@ -440,7 +468,7 @@ canvas{display:block;touch-action:none}
     state = next || state || {};
     const chunks = Array.isArray(state.world?.chunks) ? state.world.chunks : [];
     const rows = blockRowsFromChunks(chunks);
-    const signature = chunks.map((chunk) => [chunk.x, chunk.z, chunk.updatedAt, chunk.geometry?.blocks?.length || 0, chunk.geometry?.columns?.length || 0].join(':')).join('|');
+    const signature = chunks.map((chunk) => [chunk.x, chunk.z, chunk.updatedAt, chunk.geometry?.blocks?.length || 0, chunk.geometry?.columns?.length || 0, chunk.palette?.map?.((item) => item.count).join('.') || ''].join(':')).join('|');
     rebuildWorld(rows, signature);
     const entities = Array.isArray(state.entities) ? state.entities : [];
     const entityKeys = new Set();
@@ -472,8 +500,8 @@ canvas{display:block;touch-action:none}
     }
     const stats = state.world?.packetStats || {};
     const adapter = stats.adapter || {};
-    meta.textContent = (state.serverName || 'Server') + ' - ' + (state.botName || 'live-update') + ' - ' + (state.status || 'waiting') + ' - blocks ' + blockCount + ' - entities ' + entityMeshes.size;
-    debug.textContent = 'chunks ' + chunks.length + ' decoded ' + (stats.renderPackets || 0) + ' real blocks ' + blockCount + ' level_chunk ' + (stats.levelChunk || 0) + ' last ' + (stats.lastPacket || 'waiting') + (stats.adapterError || adapter.error ? ' - ' + (stats.adapterError || adapter.error) : '');
+    meta.textContent = (state.serverName || 'Server') + ' - ' + (state.botName || 'live-update') + ' - ' + (state.status || 'waiting') + ' - blocks ' + blockCount + ' - faces ' + faceCount + ' - entities ' + entityMeshes.size;
+    debug.textContent = 'chunks ' + chunks.length + ' decoded ' + (stats.renderPackets || 0) + ' hollow blocks ' + blockCount + ' faces ' + faceCount + ' level_chunk ' + (stats.levelChunk || 0) + ' last ' + (stats.lastPacket || 'waiting') + (stats.adapterError || adapter.error ? ' - ' + (stats.adapterError || adapter.error) : '');
     empty.style.display = blockCount ? 'none' : 'block';
   };
   const focusEntity = () => {
@@ -605,7 +633,7 @@ function startBedrockBot(config) {
     offline: (config.auth || 'offline') === 'offline',
     auth: config.auth || 'offline',
     enableChunkCaching: false,
-    viewDistance: Math.max(3, Math.min(8, Number(config.viewDistance || 6))),
+    viewDistance: Math.max(3, Math.min(8, Number(config.viewDistance || 8))),
     profilesFolder,
   });
   const players = new Set();
@@ -787,7 +815,7 @@ function startBedrockBot(config) {
     }
     try { client.queue('client_cache_status', { enabled: false }); } catch {}
     setTimeout(() => {
-      try { client.queue('request_chunk_radius', { chunk_radius: Math.max(3, Math.min(8, Number(config.viewDistance || 6))) }); } catch {}
+      try { client.queue('request_chunk_radius', { chunk_radius: Math.max(3, Math.min(8, Number(config.viewDistance || 8))) }); } catch {}
     }, 250).unref();
     send('status', { status: 'connected', target: config.username, message: `Bedrock spectate bot joined ${config.host}:${config.port}.` });
     publishPlayers();
