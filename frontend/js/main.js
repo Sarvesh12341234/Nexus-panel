@@ -23,6 +23,10 @@ const state = {
   consolePollAt: {},
   consoleInFlight: {},
   consoleMetricsAt: {},
+  consoleStream: null,
+  consoleStreamServerId: null,
+  consoleStreamReady: false,
+  consoleLineCache: {},
   presenceAt: 0,
   serverStatusSignature: '',
   playitTerminalTimer: null,
@@ -1774,7 +1778,10 @@ async function renderActiveView({ shellScroll = null } = {}) {
     if (view === 'plugins') renderPlugins();
     if (view === 'console') {
       prepareConsoleShell(activeServer());
+      openConsoleStream(activeServer());
       renderConsole({ force: true, timeoutMs: 900 }).catch(() => {});
+    } else {
+      closeConsoleStream();
     }
     if (view === 'files') {
       await renderFiles();
@@ -1861,9 +1868,84 @@ function prepareConsoleShell(server) {
   elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
   elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
   syncConsoleActionButtons(server, server.status);
-  if (!elements.consoleBox.dataset.rendered && !elements.consoleBox.textContent.trim()) {
+  const cached = state.consoleLineCache[server.id];
+  if (cached?.length && elements.consoleBox.dataset.serverId !== String(server.id)) {
+    renderConsoleLines(cached, server);
+    return;
+  }
+  if (elements.consoleBox.dataset.serverId !== String(server.id) || (!elements.consoleBox.dataset.rendered && !elements.consoleBox.textContent.trim())) {
+    elements.consoleBox.dataset.serverId = String(server.id);
     elements.consoleBox.innerHTML = `<div>[NexusPanel] Opening live console for ${escapeHtml(server.name)}...</div>`;
   }
+}
+
+function renderConsoleLines(lines, server) {
+  const consoleSignature = `${server?.id || 0}:${lines.length}:${lines.at(-1) || ''}`;
+  if (elements.consoleBox.dataset.rendered === consoleSignature) return;
+  elements.consoleBox.innerHTML = lines.map((line) => `<div>${escapeHtml(formatConsoleLine(line))}</div>`).join('');
+  elements.consoleBox.dataset.rendered = consoleSignature;
+  elements.consoleBox.dataset.serverId = String(server?.id || '');
+  if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
+}
+
+function closeConsoleStream() {
+  if (state.consoleStream) {
+    try { state.consoleStream.close(); } catch {}
+  }
+  state.consoleStream = null;
+  state.consoleStreamServerId = null;
+  state.consoleStreamReady = false;
+}
+
+function openConsoleStream(server) {
+  if (!server || typeof EventSource !== 'function') return false;
+  if (state.consoleStream && state.consoleStreamServerId === server.id) return true;
+  closeConsoleStream();
+  state.consoleStreamServerId = server.id;
+  state.consoleStreamReady = false;
+  const stream = new EventSource(`/api/servers/${encodeURIComponent(server.id)}/console/stream`);
+  state.consoleStream = stream;
+  stream.addEventListener('snapshot', (event) => {
+    if (state.activeView !== 'console' || state.activeServerId !== server.id) return;
+    state.consoleStreamReady = true;
+    const payload = JSON.parse(event.data || '{}');
+    const lines = Array.isArray(payload.lines) ? payload.lines : [];
+    state.consoleLineCache[server.id] = lines;
+    if (payload.status && server.status !== payload.status) {
+      server.status = payload.status;
+      renderStats();
+      updateLiveServerDom();
+    }
+    renderConsoleLines(lines, server);
+    syncConsoleActionButtons(server, payload.status || server.status);
+  });
+  stream.addEventListener('line', (event) => {
+    if (state.activeView !== 'console' || state.activeServerId !== server.id) return;
+    state.consoleStreamReady = true;
+    const payload = JSON.parse(event.data || '{}');
+    const line = payload.line;
+    if (!line) return;
+    const lines = state.consoleLineCache[server.id] || [];
+    lines.push(line);
+    while (lines.length > 600) lines.shift();
+    state.consoleLineCache[server.id] = lines;
+    appendConsoleImmediate(line);
+    elements.consoleBox.dataset.serverId = String(server.id);
+    if (payload.status && server.status !== payload.status) {
+      server.status = payload.status;
+      renderStats();
+      updateLiveServerDom();
+    }
+  });
+  stream.addEventListener('ping', (event) => {
+    if (state.activeView !== 'console' || state.activeServerId !== server.id) return;
+    const payload = JSON.parse(event.data || '{}');
+    if (payload.status) syncConsoleActionButtons(server, payload.status);
+  });
+  stream.onerror = () => {
+    state.consoleStreamReady = false;
+  };
+  return true;
 }
 
 async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
@@ -1874,6 +1956,7 @@ async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
     return;
   }
   prepareConsoleShell(server);
+  openConsoleStream(server);
   const serverId = server.id;
   const now = Date.now();
   if (!force && now - Number(state.consolePollAt[serverId] || 0) < 45) return;
@@ -1901,13 +1984,8 @@ async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
         : server.installStatus !== 'installed'
           ? [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] Install server software before starting.']
           : [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] No panel logs have been recorded yet. Press Start to begin.'];
-    const consoleSignature = `${lines.length}:${lines.at(-1) || ''}`;
-    if (elements.consoleBox.dataset.rendered !== consoleSignature) {
-      const consoleHtml = lines.map((line) => `<div>${escapeHtml(formatConsoleLine(line))}</div>`).join('');
-      elements.consoleBox.innerHTML = consoleHtml;
-      elements.consoleBox.dataset.rendered = consoleSignature;
-    }
-    if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
+    state.consoleLineCache[serverId] = lines;
+    renderConsoleLines(lines, server);
     if (needsMetrics) renderConsoleMetricsSoon(server, serverId, renderToken);
     renderPresence(server).catch(() => {});
   } finally {
@@ -3137,8 +3215,9 @@ function startRefreshLoop() {
   window.clearInterval(state.consoleFastTimer);
   state.consoleFastTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh || state.activeView !== 'console') return;
+    if (state.consoleStream && state.consoleStreamReady) return;
     renderConsole({ force: true }).catch(() => {});
-  }, 50);
+  }, 500);
   state.refreshTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
@@ -3212,8 +3291,11 @@ elements.activeServerSelect.addEventListener('change', () => {
   filePath = '';
   consoleRenderToken += 1;
   consoleStickToBottom = true;
+  closeConsoleStream();
   if (elements.serverConfigForm) elements.serverConfigForm.dataset.dirty = '0';
   if (elements.consoleBox && state.activeView === 'console') {
+    elements.consoleBox.dataset.rendered = '';
+    elements.consoleBox.dataset.serverId = String(state.activeServerId || '');
     elements.consoleBox.innerHTML = '<div>[NexusPanel] Switching server console...</div>';
   }
   renderServerSwitcher();
@@ -3881,6 +3963,7 @@ document.addEventListener('click', async (event) => {
     }
 
     if (action === 'logout') {
+      closeConsoleStream();
       await api('/api/logout', { method: 'POST' });
       state.user = null;
       window.clearInterval(state.refreshTimer);
@@ -4074,6 +4157,7 @@ document.addEventListener('click', async (event) => {
       filePath = '';
       consoleRenderToken += 1;
       consoleStickToBottom = true;
+      closeConsoleStream();
       renderServerSwitcher();
       return setView('console');
     }
@@ -4082,8 +4166,11 @@ document.addEventListener('click', async (event) => {
       filePath = '';
       consoleRenderToken += 1;
       consoleStickToBottom = true;
+      closeConsoleStream();
       if (elements.serverConfigForm) elements.serverConfigForm.dataset.dirty = '0';
       if (elements.consoleBox && state.activeView === 'console') {
+        elements.consoleBox.dataset.rendered = '';
+        elements.consoleBox.dataset.serverId = String(state.activeServerId || '');
         elements.consoleBox.innerHTML = '<div>[NexusPanel] Switching server console...</div>';
       }
       renderServerSwitcher();

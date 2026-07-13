@@ -21,7 +21,7 @@ const { assertInside, backupsRoot, displayPath, ensureServerDirs, findServerRoot
 const { clearSoftwareVersionCache, defaultSoftware, findSoftware, installedJavaMajor, pluginKindForFile, requiredJavaMajorForMinecraftVersion, resolveDownload, softwareCatalog, softwareVersions } = require('./software');
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { profileForServer, writeProfile } = require('./nexus_mark');
-const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer } = require('./runtime');
+const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer, subscribeConsole } = require('./runtime');
 const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions, zipEntries } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { processTreeMetrics } = require('./process_metrics');
@@ -5259,6 +5259,29 @@ app.get('/api/servers/:id/console', requirePermission(capabilities.CONSOLE_VIEW,
   if (!target) return res.status(404).json({ error: 'Server not found.' });
   res.setHeader('Cache-Control', 'no-store');
   res.json({ status: runtimeStatus(id), lines: consoleLogs(id) });
+});
+
+app.get('/api/servers/:id/console/stream', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
+  const id = Number(req.params.id);
+  const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
+  if (!target) return res.status(404).json({ error: 'Server not found.' });
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-store, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  const writeEvent = (event, payload) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+  writeEvent('snapshot', { status: runtimeStatus(id), lines: consoleLogs(id) });
+  const unsubscribe = subscribeConsole(id, (line) => writeEvent('line', { line, status: runtimeStatus(id) }));
+  const heartbeat = setInterval(() => writeEvent('ping', { status: runtimeStatus(id), at: Date.now() }), 15000);
+  heartbeat.unref();
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
 });
 
 app.get('/api/servers/:id/metrics', requireAuth, (req, res) => {

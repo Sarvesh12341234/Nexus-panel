@@ -10,6 +10,7 @@ const { installedJavaMajor, requiredJavaMajorForMinecraftVersion } = require('./
 const processes = new Map();
 const logs = new Map();
 const players = new Map();
+const logSubscribers = new Map();
 const intentionalStops = new Set();
 const pendingLogWrites = new Map();
 const logWriteChains = new Map();
@@ -59,6 +60,7 @@ function flushLogWrites() {
 setInterval(flushLogWrites, 150).unref();
 
 function appendLog(serverId, line) {
+  const numericServerId = Number(serverId);
   const rows = logs.has(serverId) ? logs.get(serverId) : persistedLogLines(serverId);
   const rendered = `[${new Date().toISOString()}] ${line}`;
   rows.push(rendered);
@@ -67,6 +69,14 @@ function appendLog(serverId, line) {
   const pending = pendingLogWrites.get(serverId) || [];
   pending.push(rendered);
   pendingLogWrites.set(serverId, pending);
+  const subscribers = logSubscribers.get(numericServerId);
+  if (subscribers) {
+    for (const send of subscribers) {
+      try {
+        send(rendered);
+      } catch {}
+    }
+  }
   return rendered;
 }
 
@@ -98,6 +108,19 @@ function runtimeStatus(serverId) {
 function consoleLogs(serverId) {
   if (!logs.has(serverId)) logs.set(serverId, persistedLogLines(serverId));
   return logs.get(serverId);
+}
+
+function subscribeConsole(serverId, send) {
+  const id = Number(serverId);
+  const subscribers = logSubscribers.get(id) || new Set();
+  subscribers.add(send);
+  logSubscribers.set(id, subscribers);
+  return () => {
+    const current = logSubscribers.get(id);
+    if (!current) return;
+    current.delete(send);
+    if (!current.size) logSubscribers.delete(id);
+  };
 }
 
 function trackPlayerLine(serverId, line) {
@@ -377,6 +400,7 @@ module.exports = {
   runtimeDetails,
   runtimeStatus,
   sendCommand,
+  subscribeConsole,
   startServer,
   restartServer,
   setExitHandler,
