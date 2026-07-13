@@ -497,13 +497,39 @@ canvas{display:block;touch-action:none}
       let mesh = entityMeshes.get(key);
       if (!mesh) {
         mesh = new THREE.Group();
-        const body = new THREE.Mesh(new THREE.BoxGeometry(.65, 1.55, .38), new THREE.MeshLambertMaterial({ color: entity.self ? 0x41e69b : 0x60a5fa }));
+        const bodyMaterial = new THREE.MeshLambertMaterial({ color: entity.self ? 0x2dd4bf : 0x2563eb });
+        const limbMaterial = new THREE.MeshLambertMaterial({ color: entity.self ? 0x99f6e4 : 0x93c5fd });
+        const skinMaterial = new THREE.MeshLambertMaterial({ color: entity.self ? 0xfde68a : 0xfbcfe8 });
+        const body = new THREE.Mesh(new THREE.BoxGeometry(.62, .92, .32), bodyMaterial);
         body.castShadow = true;
-        body.position.y = .78;
-        const head = new THREE.Mesh(new THREE.BoxGeometry(.62, .62, .62), new THREE.MeshLambertMaterial({ color: entity.self ? 0xa7f3d0 : 0xbfdbfe }));
+        body.position.y = 1.05;
+        const head = new THREE.Mesh(new THREE.BoxGeometry(.54, .54, .54), skinMaterial);
         head.castShadow = true;
-        head.position.y = 1.82;
-        mesh.add(body, head);
+        head.position.y = 1.78;
+        const leftArm = new THREE.Mesh(new THREE.BoxGeometry(.18, .82, .2), limbMaterial);
+        leftArm.position.set(-.48, 1.08, 0);
+        const rightArm = new THREE.Mesh(new THREE.BoxGeometry(.18, .82, .2), limbMaterial);
+        rightArm.position.set(.48, 1.08, 0);
+        const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(.22, .78, .22), limbMaterial);
+        leftLeg.position.set(-.18, .38, 0);
+        const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(.22, .78, .22), limbMaterial);
+        rightLeg.position.set(.18, .38, 0);
+        const nameCanvas = document.createElement('canvas');
+        nameCanvas.width = 256;
+        nameCanvas.height = 48;
+        const nameCtx = nameCanvas.getContext('2d');
+        nameCtx.fillStyle = 'rgba(0,0,0,.58)';
+        nameCtx.fillRect(0, 0, 256, 48);
+        nameCtx.fillStyle = '#eaffff';
+        nameCtx.font = '700 24px Inter,Segoe UI,Arial';
+        nameCtx.textAlign = 'center';
+        nameCtx.textBaseline = 'middle';
+        nameCtx.fillText(String(entity.name || key).slice(0, 24), 128, 25);
+        const nameTexture = new THREE.CanvasTexture(nameCanvas);
+        const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: nameTexture, transparent: true, depthTest: false }));
+        label.position.y = 2.35;
+        label.scale.set(2.2, .42, 1);
+        mesh.add(body, head, leftArm, rightArm, leftLeg, rightLeg, label);
         entityMeshes.set(key, mesh);
         entityGroup.add(mesh);
       }
@@ -541,6 +567,8 @@ canvas{display:block;touch-action:none}
     if (ex < terrainBounds.minX - margin || ex > terrainBounds.maxX + margin || ez < terrainBounds.minZ - margin || ez > terrainBounds.maxZ + margin) {
       return overview();
     }
+    const localTerrainY = nearestTerrainY(ex, ez, 5);
+    if (Number.isFinite(localTerrainY) && Number(entity.y || 64) < localTerrainY + 1) return overview();
     return entity;
   };
   const nearestTerrainY = (x, z, radius = 5) => {
