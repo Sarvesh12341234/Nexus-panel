@@ -129,6 +129,22 @@ function assertCommandAvailable(command, args, message) {
   }
 }
 
+function parseJsonFile(filePath) {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return value && typeof value === 'object' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function bundledJavaBinary(root, requiredMajor = 0) {
+  const meta = parseJsonFile(path.join(root, 'runtime', 'java-runtime.json'));
+  if (!meta?.javaBinary || !fs.existsSync(meta.javaBinary)) return '';
+  if (requiredMajor && Number(meta.major || 0) < requiredMajor) return '';
+  return meta.javaBinary;
+}
+
 function startServer(server, software) {
   if (processes.has(server.id)) return { ok: true, message: 'Server already running.' };
   if (!server.executable_path || !fs.existsSync(server.executable_path)) {
@@ -145,17 +161,20 @@ function startServer(server, software) {
   let args;
 
   if (software.key === 'java-vanilla' || software.key === 'paper' || software.key === 'purpur' || software.key === 'fabric') {
-    assertCommandAvailable(
-      'java',
-      ['-version'],
-      'Java runtime was not found in PATH. Install Java 21+ (Linux: apt install -y openjdk-21-jre-headless) then restart the server.',
-    );
-    const javaMajor = installedJavaMajor();
     const requiredMajor = requiredJavaMajorForMinecraftVersion(server.software_version || 'latest');
-    if (javaMajor && requiredMajor > javaMajor) {
+    const bundledJava = bundledJavaBinary(root, requiredMajor);
+    const javaMajor = installedJavaMajor();
+    if (!bundledJava) {
+      assertCommandAvailable(
+        'java',
+        ['-version'],
+        'Java runtime was not found in PATH. Install Java 21+ (Linux: apt install -y openjdk-21-jre-headless) then restart the server.',
+      );
+    }
+    if (!bundledJava && javaMajor && requiredMajor > javaMajor) {
       throw new Error(`${software.name} ${server.software_version || 'latest'} requires Java ${requiredMajor}, but this VPS is running Java ${javaMajor}. Reinstall with an older Minecraft version or install Java ${requiredMajor}+ on the VPS.`);
     }
-    command = 'java';
+    command = bundledJava || 'java';
     args = [`-Xmx${dbMemoryMb}M`, '-jar', executable, 'nogui'];
   } else if (software.key === 'pocketmine') {
     const header = fs.readFileSync(executable, { encoding: 'utf8', flag: 'r' }).slice(0, 80);

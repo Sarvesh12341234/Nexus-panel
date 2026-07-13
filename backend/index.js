@@ -2781,6 +2781,19 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     warnings.push(`${diagnostic.severity.toUpperCase()} ${diagnostic.summary} ${diagnostic.techniques[0]}`);
   });
 
+  if (software?.edition === 'java' && diagnostics.some((item) => item.id === 'bad-java-version' || item.id === 'java-missing')) {
+    try {
+      const requirement = await ensureSoftwareRequirements(software, server.id, (_progress, message) => {
+        appendLog(server.id, `[NexusPanel] Repair dependency check: ${message}`);
+      }, server.software_version || 'latest', root);
+      actions.push(`Verified Java dependency: ${requirement.message}`);
+      checks.push({ name: 'Java runtime dependency', ok: true, detail: requirement.message });
+    } catch (error) {
+      checks.push({ name: 'Java runtime dependency', ok: false, detail: error.message });
+      warnings.push(`Java dependency repair could not finish: ${error.message}`);
+    }
+  }
+
   let repair;
   try {
     repair = await repairMissingExecutable(server, software);
@@ -3012,6 +3025,50 @@ async function installPocketMineRuntime(root, serverId, onProgress) {
   return phpBinary;
 }
 
+function javaRuntimeMetaPath(root) {
+  return path.join(root, 'runtime', 'java-runtime.json');
+}
+
+function bundledJavaBinary(root, requiredMajor = 0) {
+  const meta = parseJsonObject(fs.existsSync(javaRuntimeMetaPath(root)) ? fs.readFileSync(javaRuntimeMetaPath(root), 'utf8') : '{}');
+  if (!meta?.javaBinary || !fs.existsSync(meta.javaBinary)) return '';
+  if (requiredMajor && Number(meta.major || 0) < requiredMajor) return '';
+  return meta.javaBinary;
+}
+
+function adoptiumArchitecture() {
+  if (process.arch === 'x64') return 'x64';
+  if (process.arch === 'arm64') return 'aarch64';
+  throw new Error(`Bundled Java auto-install does not support ${process.arch}. Install the required Java runtime manually.`);
+}
+
+async function installBundledJavaRuntime(root, serverId, major, onProgress) {
+  if (process.platform !== 'linux') throw new Error(`Java ${major}+ is required. Install it manually on this OS, then restart NexusPanel.`);
+  const existing = bundledJavaBinary(root, major);
+  if (existing) return existing;
+  const architecture = adoptiumArchitecture();
+  const runtimeDir = path.join(root, 'runtime', `java-${major}`);
+  const archivePath = path.join(root, 'runtime', `temurin-java-${major}-${architecture}.tar.gz`);
+  const url = `https://api.adoptium.net/v3/binary/latest/${major}/ga/linux/${architecture}/jre/hotspot/normal/eclipse?project=jdk`;
+  onProgress(7, `Downloading bundled Java ${major} runtime`);
+  await downloadToFile(url, archivePath, (progress) => {
+    onProgress(Math.max(7, Math.min(48, Math.round(progress * 0.48))), `Downloading bundled Java ${major} runtime`);
+  });
+  onProgress(52, `Extracting bundled Java ${major}`);
+  extractArchive(archivePath, runtimeDir);
+  const javaBinary = findFile(runtimeDir, 'java');
+  if (!javaBinary) throw new Error(`Bundled Java ${major} extraction finished but java binary was not found.`);
+  if (process.platform !== 'win32') await fs.promises.chmod(javaBinary, 0o755).catch(() => {});
+  await fs.promises.writeFile(javaRuntimeMetaPath(root), JSON.stringify({
+    major,
+    javaBinary,
+    provider: 'eclipse-temurin',
+    installedAt: new Date().toISOString(),
+  }, null, 2));
+  appendLog(serverId, `[NexusPanel] Bundled Java ${major} runtime ready: ${displayPath(javaBinary)}`);
+  return javaBinary;
+}
+
 async function verifyJarDownload(filePath, softwareName) {
   const handle = await fs.promises.open(filePath, 'r').catch(() => null);
   if (!handle) throw new Error(`${softwareName} download did not create a jar file.`);
@@ -3029,19 +3086,20 @@ async function verifyJarDownload(filePath, softwareName) {
 async function installForgeServer(root, serverId, download, executablePath, onProgress) {
   const installerPath = path.join(root, 'runtime', download.fileName || `forge-${download.forgeVersion}-installer.jar`);
   await fs.promises.mkdir(path.dirname(installerPath), { recursive: true });
+  const javaCommand = bundledJavaBinary(root, requiredJavaMajorForMinecraftVersion(download.version)) || 'java';
   onProgress(25, `Downloading Forge installer ${download.forgeVersion}`);
   await downloadToFile(download.url, installerPath, (progress) => onProgress(Math.max(25, Math.min(55, Math.round(25 + progress * 0.3))), `Downloading Forge installer ${download.forgeVersion}`));
   await verifyJarDownload(installerPath, 'Forge installer');
   onProgress(60, `Running Forge server installer ${download.forgeVersion}`);
-  await runShellCommand(`java -jar "${installerPath}" --installServer`, root, (chunk) => {
+  await runShellCommand(`"${javaCommand}" -jar "${installerPath}" --installServer`, root, (chunk) => {
     onProgress(72, String(chunk).trim().slice(-180) || `Installing Forge ${download.forgeVersion}`);
   });
   const argsPath = path.join(root, 'libraries', 'net', 'minecraftforge', 'forge', download.forgeVersion, process.platform === 'win32' ? 'win_args.txt' : 'unix_args.txt');
   const legacyJar = findFile(root, `forge-${download.forgeVersion}.jar`);
   if (!fs.existsSync(argsPath) && !legacyJar) throw new Error('Forge installer finished but no launch args or Forge jar was found.');
   const script = process.platform === 'win32'
-    ? `@echo off\r\nset MEM=%NEXUS_MARK_MEMORY_MB%\r\nif "%MEM%"=="" set MEM=1024\r\n${fs.existsSync(argsPath) ? `java -Xmx%MEM%M @\"${argsPath}\" nogui` : `java -Xmx%MEM%M -jar \"${legacyJar}\" nogui`}\r\n`
-    : `#!/bin/sh\nMEM="${'${NEXUS_MARK_MEMORY_MB:-1024}'}"\n${fs.existsSync(argsPath) ? `exec java -Xmx"$MEM"M @"${argsPath}" nogui` : `exec java -Xmx"$MEM"M -jar "${legacyJar}" nogui`}\n`;
+    ? `@echo off\r\nset MEM=%NEXUS_MARK_MEMORY_MB%\r\nif "%MEM%"=="" set MEM=1024\r\n${fs.existsSync(argsPath) ? `"${javaCommand}" -Xmx%MEM%M @\"${argsPath}\" nogui` : `"${javaCommand}" -Xmx%MEM%M -jar \"${legacyJar}\" nogui`}\r\n`
+    : `#!/bin/sh\nMEM="${'${NEXUS_MARK_MEMORY_MB:-1024}'}"\n${fs.existsSync(argsPath) ? `exec "${javaCommand}" -Xmx"$MEM"M @"${argsPath}" nogui` : `exec "${javaCommand}" -Xmx"$MEM"M -jar "${legacyJar}" nogui`}\n`;
   await fs.promises.mkdir(path.dirname(executablePath), { recursive: true });
   await fs.promises.writeFile(executablePath, script, 'utf8');
   if (process.platform !== 'win32') await fs.promises.chmod(executablePath, 0o755);
@@ -3534,7 +3592,7 @@ function installSteamcmdRequirement() {
   throw new Error('SteamCMD is required but no supported package manager was found.');
 }
 
-function ensureSoftwareRequirements(software, serverId, onProgress, version = 'latest') {
+async function ensureSoftwareRequirements(software, serverId, onProgress, version = 'latest', root = null) {
   if (software.edition === 'java') {
     let javaMajor = installedJavaMajor();
     if (process.platform !== 'linux') {
@@ -3554,6 +3612,10 @@ function ensureSoftwareRequirements(software, serverId, onProgress, version = 'l
     }
     const requiredMajor = requiredJavaMajorForMinecraftVersion(version);
     if (requiredMajor > javaMajor) {
+      if (root) {
+        await installBundledJavaRuntime(root, serverId, requiredMajor, onProgress);
+        return { ok: true, message: `Bundled Java ${requiredMajor} runtime installed.` };
+      }
       throw new Error(`${software.name} ${version} requires Java ${requiredMajor}, but this VPS is running Java ${javaMajor}. Pick an older Minecraft version from the version list or install Java ${requiredMajor}+ on the VPS.`);
     }
     return { ok: true, message: `Java ${javaMajor} runtime ready.` };
@@ -4938,9 +5000,9 @@ app.post('/api/servers/:id/software/install', requirePermission(capabilities.SOF
 
   resolveDownload(selectedSoftware, version)
     .then(async (download) => {
-      ensureSoftwareRequirements(selectedSoftware, id, (progress, message) => {
+      await ensureSoftwareRequirements(selectedSoftware, id, (progress, message) => {
         db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);
-      }, download.version || version);
+      }, download.version || version, root);
       if (selectedSoftware.key === 'pocketmine') {
         await installPocketMineRuntime(root, id, (progress, message) => {
           db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);

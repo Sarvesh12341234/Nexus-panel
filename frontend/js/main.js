@@ -27,6 +27,7 @@ const state = {
   serverStatusSignature: '',
   playitTerminalTimer: null,
   pluginSearchSignature: '',
+  pendingSoftwareSelection: null,
   viewScroll: {},
   shellScroll: { sidebarTop: 0, navTop: 0 },
 };
@@ -1732,7 +1733,7 @@ function renderSoftware() {
         </div>
         <p>${escapeHtml(software.notes)}</p>
         <div class="stat-row"><span class="muted">Executable</span><code>${escapeHtml(selected ? server.executablePath : software.expectedPath)}</code></div>
-        <label>Version <select data-software-version="${software.key}" ${compatible ? '' : 'disabled'}><option value="">Loading versions...</option></select></label>
+        <label>Version <select data-software-version="${software.key}" data-current-version="${selected ? escapeHtml(server.softwareVersion || '') : ''}" ${compatible ? '' : 'disabled'}><option value="">Loading versions...</option></select></label>
         <div class="install-track"><span data-live-install-track style="width:${selected ? server.installProgress : 0}%"></span></div>
         <div class="stat-row"><span class="muted" data-live-install-message data-live-message-format="software">${selected ? `${escapeHtml(server.installMessage)} (${escapeHtml(server.softwareVersion || 'latest')})` : 'Not selected'}</span><strong data-live-install-progress>${selected ? `${server.installProgress}%` : ''}</strong></div>
         <button type="button" data-action="install-software" data-software-key="${software.key}" ${compatible ? '' : 'disabled'}>${selected && server.installStatus === 'installed' ? 'Reinstall' : 'Install'}</button>
@@ -2768,13 +2769,16 @@ async function hydrateSoftwareVersionSelects() {
   const selects = [...document.querySelectorAll('[data-software-version]')];
   await Promise.all(selects.map(async (select) => {
     const key = select.dataset.softwareVersion;
-    const selected = select.value;
+    const selected = state.pendingSoftwareSelection?.softwareKey === key
+      ? state.pendingSoftwareSelection.softwareVersion
+      : (select.dataset.currentVersion || select.value);
     const versions = await getSoftwareVersions(key);
     select.innerHTML = versions.length
       ? versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('')
       : '<option value="manual">Version lookup failed - manual</option>';
     select.value = versions.includes(selected) ? selected : (versions[0] || 'manual');
   }));
+  state.pendingSoftwareSelection = null;
 }
 
 function updateLiveServerDom() {
@@ -3107,16 +3111,21 @@ elements.serverForm.addEventListener('submit', async (event) => {
   payload.port = Number(payload.port);
   payload.maxMemoryMb = Number(payload.maxMemoryMb);
   payload.cpuCores = Number(payload.cpuCores || 1);
+  const requestedSoftware = {
+    softwareKey: payload.softwareKey,
+    softwareVersion: payload.softwareVersion || 'latest',
+  };
   try {
     const result = await api('/api/servers', { method: 'POST', body: JSON.stringify(payload) });
     state.activeServerId = result.server.id;
+    state.pendingSoftwareSelection = requestedSoftware;
     elements.serverForm.reset();
     elements.serverForm.autoRestart.checked = true;
     elements.serverForm.crashBackup.checked = true;
     elements.serverForm.port.value = '19132';
     elements.serverForm.maxMemoryMb.value = '1024';
     elements.serverForm.cpuCores.value = '1';
-    showToast('Server created. Install software from the Software tab.');
+    showToast(`Server created. ${requestedSoftware.softwareVersion} is selected in Software; click Install or change it.`);
     await refresh();
     setView('software');
   } catch (error) {
