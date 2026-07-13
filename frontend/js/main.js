@@ -1920,7 +1920,7 @@ async function renderSpectate() {
     <div class="metric-grid">
       <div><strong data-spectate-status>${escapeHtml(data.status || 'stopped')}</strong><span>Session</span></div>
       <div><strong data-spectate-server>${escapeHtml(data.serverStatus || server.status)}</strong><span>Server</span></div>
-      <div><strong data-spectate-engine>${escapeHtml(data.serverType === 'bedrock' ? 'NexusVision' : data.engine || 'Bot engine')}</strong><span>${data.serverType === 'bedrock' ? 'Packet renderer' : data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
+      <div><strong data-spectate-engine>${escapeHtml(data.serverType === 'bedrock' ? 'Bedrock adapter' : data.engine || 'Bot engine')}</strong><span>${data.serverType === 'bedrock' ? 'Real chunk decode' : data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
       <div><strong data-spectate-bot>${escapeHtml(data.botName || 'live-update')}</strong><span>${escapeHtml(data.authMode || 'offline')} auth</span></div>
       <div><strong data-spectate-target>${escapeHtml(data.target || 'Overview')}</strong><span>Target</span></div>
       <div><strong data-spectate-pid>${data.pid ? Number(data.pid) : '-'}</strong><span>Bot PID</span></div>
@@ -2028,11 +2028,11 @@ function updateSpectateLiveDom(data) {
   };
   setText('[data-spectate-status]', data.status || 'stopped');
   setText('[data-spectate-server]', data.serverStatus || '');
-  setText('[data-spectate-engine]', data.serverType === 'bedrock' ? 'NexusVision' : data.engine || 'Bot engine');
+  setText('[data-spectate-engine]', data.serverType === 'bedrock' ? 'Bedrock adapter' : data.engine || 'Bot engine');
   setText('[data-spectate-bot]', data.botName || 'live-update');
   setText('[data-spectate-target]', data.target || 'Overview');
   setText('[data-spectate-pid]', data.pid ? String(Number(data.pid)) : '-');
-  setText('[data-spectate-message]', data.error || (data.framePushActive ? 'Real spectator-client frame stream is active.' : data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.serverType === 'bedrock' ? 'Headless Bedrock packet renderer is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
+  setText('[data-spectate-message]', data.error || (data.framePushActive ? 'Real spectator-client frame stream is active.' : data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.serverType === 'bedrock' ? 'Bedrock chunk adapter is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
   const detail = panel.querySelector('[data-spectate-detail]');
   if (detail) {
     detail.textContent = data.framePushActive
@@ -2045,7 +2045,7 @@ function updateSpectateLiveDom(data) {
   }
   const badge = panel.querySelector('[data-spectate-badge]');
   if (badge) {
-    badge.textContent = data.serverType === 'bedrock' ? 'NexusVision ready' : data.packageInstalled ? 'Engine ready' : 'Needs engine';
+    badge.textContent = data.serverType === 'bedrock' ? 'Adapter ready' : data.packageInstalled ? 'Engine ready' : 'Needs engine';
     badge.classList.toggle('is-on', Boolean(data.packageInstalled && data.status !== 'missing-engine'));
   }
   const signature = (data.players || []).join('|');
@@ -2148,7 +2148,14 @@ function rgbShade(color, amount) {
   return `rgb(${colorChannel(color[0], amount)}, ${colorChannel(color[1], amount)}, ${colorChannel(color[2], amount)})`;
 }
 
-function packetTerrainColor(column, seed) {
+function adapterBlockColor(column, seed) {
+  if (typeof column.color === 'string' && /^#[0-9a-f]{6}$/i.test(column.color)) {
+    return [
+      parseInt(column.color.slice(1, 3), 16),
+      parseInt(column.color.slice(3, 5), 16),
+      parseInt(column.color.slice(5, 7), 16),
+    ];
+  }
   const density = Math.max(0, Math.min(1, Number(column.d || 0)));
   const y = Number(column.y || 64);
   const hash = spectateHash(`${column.x}:${column.z}:${Math.round(y)}:${seed}`);
@@ -2167,9 +2174,6 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   const chunks = Array.isArray(world.chunks) ? world.chunks : [];
   const blockUpdates = Array.isArray(world.blockUpdates) ? world.blockUpdates : [];
   const packetStats = world.packetStats || {};
-  const chunkSet = new Set(chunks.map((chunk) => `${chunk.x},${chunk.z}`));
-  const focusChunkX = Math.floor(Number(focus.x || 0) / 16);
-  const focusChunkZ = Math.floor(Number(focus.z || 0) / 16);
   const tile = Math.max(10, Math.min(18, width / 90));
   const originX = width * 0.5;
   const originY = height * 0.58;
@@ -2243,7 +2247,7 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
       project(x, baseY + heightY, z + size),
     ];
     const density = Number(column.d || 0);
-    const baseColor = packetTerrainColor(column, seed);
+    const baseColor = adapterBlockColor(column, seed);
     const distance = Math.hypot(x - Number(focus.x || 0), z - Number(focus.z || 0));
     const fog = Math.max(0.34, Math.min(1, 1 - distance / 170));
     const alpha = Math.max(0.68, Math.min(0.98, 0.74 + density * 0.22)) * fog;
@@ -2279,28 +2283,13 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
     ctx.restore();
   };
 
-  const packetChunks = chunks;
-  for (const chunk of packetChunks.slice(-192)) {
-    drawPacketDiamond(chunk.x, chunk.z, chunk.pseudo ? 0.42 : 0.72);
+  for (const chunk of chunks.slice(-64)) {
+    drawPacketDiamond(chunk.x, chunk.z, 0.68);
   }
 
   const geometryColumns = chunks
     .flatMap((chunk) => Array.isArray(chunk.geometry?.columns) ? chunk.geometry.columns : [])
     .slice(-8192);
-  const visible = [];
-  for (let cx = focusChunkX - 3; cx <= focusChunkX + 3; cx += 1) {
-    for (let cz = focusChunkZ - 3; cz <= focusChunkZ + 3; cz += 1) {
-      if (chunks.length && !chunkSet.has(`${cx},${cz}`)) continue;
-      for (let lx = 0; lx < 16; lx += 4) {
-        for (let lz = 0; lz < 16; lz += 4) {
-          const wx = cx * 16 + lx;
-          const wz = cz * 16 + lz;
-          const y = terrainHeightAt(wx, wz, seed);
-          visible.push({ x: wx, y, z: wz, sort: wx + wz });
-        }
-      }
-    }
-  }
   if (geometryColumns.length) {
     const sortedColumns = [...geometryColumns].sort((left, right) => {
       const leftDepth = (Number(left.x || 0) - Number(focus.x || 0)) + (Number(left.z || 0) - Number(focus.z || 0));
@@ -2311,19 +2300,6 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
       const point = project(column.x, column.y, column.z);
       if (point.x < -100 || point.x > width + 100 || point.y < height * 0.08 || point.y > height + 120) continue;
       drawSolidColumn(column);
-    }
-  } else if (chunks.length) {
-    visible.sort((a, b) => a.sort - b.sort);
-    for (const block of visible.slice(-360)) {
-      const point = project(block.x, block.y, block.z);
-      if (point.x < -80 || point.x > width + 80 || point.y < height * 0.18 || point.y > height + 80) continue;
-      const distance = Math.hypot(block.x - Number(focus.x || 0), block.z - Number(focus.z || 0));
-      ctx.save();
-      ctx.globalAlpha = Math.max(0.12, Math.min(0.62, 1 - distance / 120));
-      const color = packetTerrainColor(block, seed);
-      ctx.fillStyle = rgbShade(color, 1.08);
-      ctx.fillRect(point.x - 3, point.y - 3, 6, 6);
-      ctx.restore();
     }
   }
 
@@ -2352,29 +2328,36 @@ function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
   ctx.fillStyle = '#f8fafc';
   ctx.font = '700 13px Inter, Segoe UI, Arial';
   ctx.textAlign = 'left';
-  ctx.fillText('NexusVision GPU packet renderer', width - 398, 56);
+  ctx.fillText('Bedrock real chunk adapter', width - 398, 56);
   ctx.fillStyle = '#cbd5e1';
   ctx.font = '13px Inter, Segoe UI, Arial';
+  const adapter = packetStats.adapter || {};
   ctx.fillText(`chunks ${chunks.length}  columns ${geometryColumns.length}  packets ${Number(packetStats.total || 0)}`, width - 398, 80);
-  ctx.fillText(`bytes ${Number(packetStats.bytesTotal || 0)}  render ${Number(packetStats.renderPackets || 0)}  level_chunk ${Number(packetStats.levelChunk || 0)}`, width - 398, 102);
+  ctx.fillText(`decoded ${Number(packetStats.renderPackets || 0)}  blobs ${Number(packetStats.cacheBlobs || 0)}  level_chunk ${Number(packetStats.levelChunk || 0)}`, width - 398, 102);
   ctx.fillText(`last ${packetStats.lastPacket || 'waiting'}  yaw ${Math.round(Number(focus.yaw || 0))}`, width - 398, 124);
   if (!chunks.length) {
     const samples = Array.isArray(packetStats.samples) ? packetStats.samples : [];
+    const adapterError = packetStats.adapterError || adapter.error || '';
     ctx.fillStyle = 'rgba(4, 10, 18, 0.72)';
-    roundRect(ctx, width / 2 - 300, height * 0.25, 600, samples.length ? 112 : 58, 10);
+    roundRect(ctx, width / 2 - 330, height * 0.25, 660, samples.length || adapterError ? 132 : 58, 10);
     ctx.fill();
     ctx.fillStyle = '#f8fafc';
     ctx.font = '700 14px Inter, Segoe UI, Arial';
     ctx.textAlign = 'center';
     ctx.fillText(Number(packetStats.total || 0) > 0
-      ? `Receiving ${packetStats.lastPacket || 'packets'}, waiting for renderable chunk bytes`
+      ? `Receiving ${packetStats.lastPacket || 'packets'}, waiting for real decoded Bedrock chunks`
       : 'Connected, waiting for Bedrock world packets', width / 2, height * 0.25 + 30);
+    if (adapterError) {
+      ctx.font = '12px Inter, Segoe UI, Arial';
+      ctx.fillStyle = '#fecaca';
+      ctx.fillText(adapterError.slice(0, 96), width / 2, height * 0.25 + 54);
+    }
     if (samples.length) {
       ctx.font = '12px Inter, Segoe UI, Arial';
       ctx.fillStyle = '#cbd5e1';
       samples.slice(-3).forEach((sample, index) => {
         const keys = (sample.keys || []).slice(0, 4).join(',');
-        ctx.fillText(`${sample.name || 'packet'} bytes=${sample.bytes || 0} keys=${keys}`, width / 2, height * 0.25 + 58 + index * 18);
+        ctx.fillText(`${sample.name || 'packet'} bytes=${sample.bytes || 0} keys=${keys}`, width / 2, height * 0.25 + 76 + index * 18);
       });
     }
   }
@@ -2594,7 +2577,7 @@ function drawSpectateVideo(canvas, data, elapsed) {
     ctx.fillStyle = '#bfdbfe';
     ctx.font = '700 12px Inter, Segoe UI, Arial';
     ctx.textAlign = 'center';
-    ctx.fillText('NexusVision reconstructs this view from Bedrock packets', width / 2, height - 22);
+    ctx.fillText('Bedrock adapter renders only decoded real chunk data', width / 2, height - 22);
     ctx.restore();
   }
 }
@@ -2636,7 +2619,7 @@ function drawSpectateFailure(canvas, error) {
   ctx.fillStyle = '#41e69b';
   ctx.font = '800 22px Inter, Segoe UI, Arial';
   ctx.textAlign = 'center';
-  ctx.fillText('NexusVision renderer fault', width / 2, height / 2 - 24);
+  ctx.fillText('Bedrock adapter renderer fault', width / 2, height / 2 - 24);
   ctx.fillStyle = '#cbd5e1';
   ctx.font = '600 14px Inter, Segoe UI, Arial';
   ctx.fillText(String(error?.message || error || 'Unknown render error').slice(0, 120), width / 2, height / 2 + 8);

@@ -392,10 +392,10 @@ function startLocalFramePush(server, session) {
   if (session.framePushChild && !session.framePushChild.killed) return;
   const readiness = localFramePushReadiness();
   if (!readiness.ok) {
-    session.rendererMode = 'bedrock-packet-renderer';
+    session.rendererMode = 'bedrock-adapter';
     session.rendererStatus = 'packet-renderer';
-    session.rendererMessage = `${readiness.message} NexusPanel is using the headless packet renderer instead.`;
-    session.message = `${session.message || 'Live spectate started.'} Headless packet renderer is active.`;
+    session.rendererMessage = `${readiness.message} Bedrock adapter is waiting for real chunk decode instead.`;
+    session.message = `${session.message || 'Live spectate started.'} Bedrock adapter is active.`;
     appendLog(server.id, `[NexusPanel] Live Spectate local video capture unavailable: ${readiness.message}`);
     return;
   }
@@ -501,6 +501,12 @@ function sanitizeSpectateWorld(world) {
             z: Number.isFinite(Number(column?.z)) ? Math.trunc(Number(column.z)) : 0,
             h: Number.isFinite(Number(column?.h)) ? Math.max(1, Math.min(24, Math.trunc(Number(column.h)))) : 4,
             d: Number.isFinite(Number(column?.d)) ? Math.max(0, Math.min(1, Number(column.d))) : 0,
+            real: Boolean(column?.real),
+            name: String(column?.name || '').slice(0, 80),
+            stateId: Number.isFinite(Number(column?.stateId)) ? Math.trunc(Number(column.stateId)) : 0,
+            color: /^#[0-9a-f]{6}$/i.test(String(column?.color || '')) || /^hsl\(/i.test(String(column?.color || ''))
+              ? String(column.color).slice(0, 40)
+              : '',
           }))
           .slice(0, 256)
         : [];
@@ -509,6 +515,12 @@ function sanitizeSpectateWorld(world) {
         z: Number.isFinite(Number(chunk?.z)) ? Math.trunc(Number(chunk.z)) : 0,
         pseudo: Boolean(chunk?.pseudo),
         source: String(chunk?.source || '').slice(0, 50),
+        palette: (Array.isArray(chunk?.palette) ? chunk.palette : [])
+          .map((entry) => ({
+            name: String(entry?.name || '').slice(0, 80),
+            count: Number.isFinite(Number(entry?.count)) ? Math.trunc(Number(entry.count)) : 0,
+          }))
+          .slice(0, 12),
         size: Number.isFinite(Number(chunk?.size)) ? Math.max(0, Math.trunc(Number(chunk.size))) : 0,
         digest: Number.isFinite(Number(chunk?.digest ?? chunk?.geometry?.digest)) ? Math.trunc(Number(chunk.digest ?? chunk.geometry.digest)) : 0,
         geometry: {
@@ -536,12 +548,20 @@ function sanitizeSpectateWorld(world) {
     geometryColumns: Number.isFinite(Number(rawStats.geometryColumns)) ? Math.trunc(Number(rawStats.geometryColumns)) : 0,
     bytesTotal: Number.isFinite(Number(rawStats.bytesTotal)) ? Math.trunc(Number(rawStats.bytesTotal)) : 0,
     renderPackets: Number.isFinite(Number(rawStats.renderPackets)) ? Math.trunc(Number(rawStats.renderPackets)) : 0,
+    cacheBlobs: Number.isFinite(Number(rawStats.cacheBlobs)) ? Math.trunc(Number(rawStats.cacheBlobs)) : 0,
     movePlayer: Number.isFinite(Number(rawStats.movePlayer)) ? Math.trunc(Number(rawStats.movePlayer)) : 0,
     moveEntity: Number.isFinite(Number(rawStats.moveEntity)) ? Math.trunc(Number(rawStats.moveEntity)) : 0,
     addPlayer: Number.isFinite(Number(rawStats.addPlayer)) ? Math.trunc(Number(rawStats.addPlayer)) : 0,
     playerList: Number.isFinite(Number(rawStats.playerList)) ? Math.trunc(Number(rawStats.playerList)) : 0,
     lastPacketAt: Number.isFinite(Number(rawStats.lastPacketAt)) ? Number(rawStats.lastPacketAt) : 0,
     lastPacket: String(rawStats.lastPacket || '').slice(0, 60),
+    adapterError: String(rawStats.adapterError || '').slice(0, 220),
+    adapter: rawStats.adapter && typeof rawStats.adapter === 'object' ? {
+      ready: Boolean(rawStats.adapter.ready),
+      version: String(rawStats.adapter.version || '').slice(0, 60),
+      chunks: Number.isFinite(Number(rawStats.adapter.chunks)) ? Math.trunc(Number(rawStats.adapter.chunks)) : 0,
+      error: String(rawStats.adapter.error || '').slice(0, 220),
+    } : { ready: false, version: '', chunks: 0, error: '' },
     samples: (Array.isArray(rawStats.samples) ? rawStats.samples : [])
       .map((sample) => ({
         name: String(sample?.name || '').slice(0, 50),
@@ -552,7 +572,7 @@ function sanitizeSpectateWorld(world) {
       .slice(0, 8),
   };
   return {
-    mode: String(world?.mode || 'nexusvision-packet-wireframe').slice(0, 60),
+    mode: String(world?.mode || 'bedrock-prismarine-adapter').slice(0, 60),
     chunks,
     blockUpdates,
     packetStats,
@@ -613,7 +633,7 @@ function inferSpectateFromServerLogs(server, session) {
     session.botName = liveName;
     session.status = 'connected';
     session.message = server.type === 'bedrock'
-      ? `${liveName} is connected. NexusVision packet renderer is building a headless live view.`
+      ? `${liveName} is connected. Bedrock adapter is decoding real chunks.`
       : `${liveName} is connected and spawned. Live feed is following the bot perspective.`;
     session.updatedAt = Date.now();
     if (session.timeout) {
@@ -663,13 +683,13 @@ function spectateSessionPayload(server, req = null) {
     pid: session?.child?.pid || 0,
     botName: session?.botName || spectateBotName(server),
     authMode: session?.authMode || spectateAuthMode(server),
-    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-packet-renderer'),
-    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'packet-renderer'),
+    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-adapter'),
+    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'bedrock-adapter'),
     rendererPort: session?.rendererPort || (server.type === 'java' ? spectateRendererPort(server) : 0),
     rendererUrl: spectateRendererUrl(server, session, req),
     rendererMessage: session?.rendererMessage || (server.type === 'java'
       ? 'Java screenshare renderer starts after the bot spawns. Install prismarine-viewer if it stays unavailable.'
-      : 'Headless Bedrock packet renderer is active. Real frame-push video will replace it if a client capture becomes available.'),
+      : 'Bedrock chunk adapter is active. It renders only real decoded chunk data.'),
     clientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
     framePushActive,
     framePushUpdatedAt: frameFeed?.updatedAt || 0,
@@ -742,12 +762,12 @@ function startSpectateSession(server, req = null) {
     updatedAt: Date.now(),
     botName: config.username,
     authMode: config.auth,
-    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-packet-renderer',
-    rendererStatus: server.type === 'java' ? 'starting' : 'packet-renderer',
+    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-adapter',
+    rendererStatus: server.type === 'java' ? 'starting' : 'bedrock-adapter',
     rendererPort: config.rendererPort,
     rendererMessage: server.type === 'java'
       ? `Starting Java first-person renderer on port ${config.rendererPort}...`
-      : 'Using headless Bedrock packet renderer. Real frame-push video will replace it if a client capture becomes available.',
+      : 'Using Bedrock chunk adapter. It renders real decoded chunks only.',
     target: players[0] || '',
     players,
     entities: [],
@@ -787,7 +807,7 @@ function startSpectateSession(server, req = null) {
     if (message.type === 'world') {
       const previous = session.world || {};
       session.world = sanitizeSpectateWorld({
-        mode: message.mode || previous.mode || 'nexusvision-packet-wireframe',
+        mode: message.mode || previous.mode || 'bedrock-prismarine-adapter',
         chunks: message.chunks || previous.chunks || [],
         blockUpdates: [...(previous.blockUpdates || []), ...(message.blockUpdates || [])].slice(-256),
         packetStats: message.packetStats || previous.packetStats || {},

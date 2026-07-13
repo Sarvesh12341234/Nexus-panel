@@ -1,4 +1,5 @@
 const path = require('node:path');
+const { BedrockWorldAdapter, asBuffer, chunkCoords } = require('./bedrock_adapter');
 
 function send(type, payload = {}) {
   if (process.send) process.send({ type, ...payload });
@@ -68,115 +69,10 @@ function sendEntities(values) {
   send('entities', { entities });
 }
 
-function packetChunkKey(packet) {
-  const x = finiteNumber(
-    packet?.x
-      ?? packet?.chunk_x
-      ?? packet?.chunkX
-      ?? packet?.chunk_position?.x
-      ?? packet?.chunkPosition?.x
-      ?? packet?.position?.x
-      ?? packet?.pos?.x,
-    NaN,
-  );
-  const z = finiteNumber(
-    packet?.z
-      ?? packet?.chunk_z
-      ?? packet?.chunkZ
-      ?? packet?.chunk_position?.z
-      ?? packet?.chunkPosition?.z
-      ?? packet?.position?.z
-      ?? packet?.pos?.z,
-    NaN,
-  );
-  if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
-  return { key: `${Math.trunc(x)},${Math.trunc(z)}`, x: Math.trunc(x), z: Math.trunc(z) };
-}
-
 function objectKeys(value) {
   return value && typeof value === 'object' && !Buffer.isBuffer(value)
     ? Object.keys(value).slice(0, 12)
     : [];
-}
-
-function findPacketBytes(value, depth = 0, seen = new Set()) {
-  if (!value || depth > 5 || seen.has(value)) return null;
-  if (Buffer.isBuffer(value)) return value;
-  if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findPacketBytes(item, depth + 1, seen);
-      if (found) return found;
-    }
-    return null;
-  }
-  if (typeof value !== 'object') return null;
-  seen.add(value);
-  for (const key of ['payload', 'data', 'blob', 'sub_chunk_data', 'cache_blobs', 'raw_payload', 'buffer']) {
-    const found = findPacketBytes(value[key], depth + 1, seen);
-    if (found) return found;
-  }
-  for (const item of Object.values(value)) {
-    const found = findPacketBytes(item, depth + 1, seen);
-    if (found) return found;
-  }
-  return null;
-}
-
-function chunkGeometryFromBytes(packet, chunk) {
-  const bytes = findPacketBytes(packet);
-  if (!bytes || !bytes.length) return { columns: [], bytesRead: 0, digest: 0 };
-  let digest = 2166136261;
-  let energy = 0;
-  for (let index = 0; index < bytes.length; index += 1) {
-    const byte = bytes[index];
-    digest ^= byte;
-    digest = Math.imul(digest, 16777619) >>> 0;
-    energy = (energy + byte) >>> 0;
-  }
-  const columns = [];
-  const stride = Math.max(1, Math.floor(bytes.length / 256));
-  for (let localX = 0; localX < 16; localX += 1) {
-    for (let localZ = 0; localZ < 16; localZ += 1) {
-      const sample = (localX * 131 + localZ * 67 + digest + ((localX * localZ) << 3)) % bytes.length;
-      const b0 = bytes[sample];
-      const b1 = bytes[(sample + stride) % bytes.length];
-      const b2 = bytes[(sample + stride * 3) % bytes.length];
-      const b3 = bytes[(sample + stride * 7) % bytes.length];
-      const signal = (b0 ^ ((b1 << 1) & 255) ^ ((b2 << 2) & 255)) & 255;
-      const height = 42 + (signal % 64);
-      const density = Math.round(((b0 + b1 + b2 + b3) / 1020) * 1000) / 1000;
-      columns.push({
-        x: chunk.x * 16 + localX,
-        z: chunk.z * 16 + localZ,
-        y: height,
-        h: 1 + (b2 % 10),
-        d: density,
-      });
-    }
-  }
-  return { columns, bytesRead: bytes.length, digest: digest >>> 0, energy: energy >>> 0 };
-}
-
-function pseudoChunkFromBytes(name, packet, index) {
-  const bytes = findPacketBytes(packet);
-  if (!bytes || bytes.length < 96) return null;
-  let digest = 2166136261;
-  const limit = Math.min(bytes.length, 4096);
-  for (let offset = 0; offset < limit; offset += 1) {
-    digest ^= bytes[offset];
-    digest = Math.imul(digest, 16777619) >>> 0;
-  }
-  const radius = 3;
-  const slot = Math.abs((digest + index * 17) % 49);
-  const x = (slot % 7) - radius;
-  const z = Math.floor(slot / 7) - radius;
-  return {
-    key: `packet:${name}:${digest}:${index}`,
-    x,
-    z,
-    pseudo: true,
-  };
 }
 
 function startJavaBot(config) {
@@ -305,8 +201,8 @@ function startBedrockBot(config) {
   });
   const players = new Set();
   const entities = new Map();
-  const chunks = new Map();
   const blockUpdates = [];
+  const adapter = new BedrockWorldAdapter({ version: config.version || config.protocolVersion || '' });
   const packetStats = {
     total: 0,
     levelChunk: 0,
@@ -345,12 +241,12 @@ function startBedrockBot(config) {
   };
   const samplePacket = (name, packet) => {
     if (packetStats.samples.some((sample) => sample.name === name)) return;
-    const bytes = findPacketBytes(packet);
+    const bytes = asBuffer(packet);
     packetStats.samples.push({
       name,
       keys: objectKeys(packet),
       bytes: bytes?.length || 0,
-      hasChunkKey: Boolean(packetChunkKey(packet)),
+      hasChunkKey: Boolean(chunkCoords(packet)),
     });
     if (packetStats.samples.length > 8) packetStats.samples.shift();
   };
@@ -380,36 +276,24 @@ function startBedrockBot(config) {
     sendEntities([...entities.values()]);
   };
   const publishWorld = () => {
-    const now = Date.now();
-    for (const [key, chunk] of [...chunks.entries()]) {
-      if (now - Number(chunk.updatedAt || 0) > 5 * 60 * 1000) chunks.delete(key);
-    }
     send('world', {
-      mode: 'nexusvision-packet-wireframe',
-      chunks: [...chunks.values()].slice(-64),
+      mode: 'bedrock-prismarine-adapter',
+      chunks: adapter.world(),
       blockUpdates: blockUpdates.splice(0, blockUpdates.length).slice(-128),
-      packetStats: { ...packetStats },
+      packetStats: { ...packetStats, adapter: adapter.status() },
     });
   };
-  const rememberChunkPacket = (packet, packetName = 'level_chunk') => {
-    const explicitChunk = packetChunkKey(packet);
-    const chunk = explicitChunk || pseudoChunkFromBytes(packetName, packet, observedPacketIndex);
-    if (!chunk) return;
-    const geometry = chunkGeometryFromBytes(packet, chunk);
-    if (!geometry.bytesRead) return;
+  const rememberChunkPacket = async (packet) => {
+    const bytes = asBuffer(packet);
+    if (bytes?.length) packetStats.bytesTotal += bytes.length;
+    const result = await adapter.ingestLevelChunk(packet);
+    if (!result.decoded) {
+      if (result.error) packetStats.adapterError = result.error;
+      return;
+    }
     packetStats.renderPackets += 1;
-    packetStats.geometryColumns += geometry.columns.length;
-    packetStats.bytesTotal += geometry.bytesRead;
-    chunks.set(chunk.key, {
-      x: chunk.x,
-      z: chunk.z,
-      pseudo: Boolean(chunk.pseudo),
-      source: packetName,
-      updatedAt: Date.now(),
-      size: geometry.bytesRead || finiteNumber(packet?.payload?.length ?? packet?.data?.length ?? packet?.blob?.length),
-      digest: geometry.digest,
-      geometry,
-    });
+    packetStats.geometryColumns += result.chunk.geometry.columns.length;
+    packetStats.adapterError = '';
   };
   const rememberBlockUpdatePacket = (packet) => {
     const position = packetPosition(packet);
@@ -426,10 +310,14 @@ function startBedrockBot(config) {
     observedPacketIndex += 1;
     const normalized = countPacket(name);
     if (packet) samplePacket(normalized, packet);
-    const bytes = packet ? findPacketBytes(packet) : null;
-    const chunkLike = /chunk|subchunk|sub_chunk|level|blob|block/i.test(normalized);
-    if (packet && ((normalized === 'level_chunk' || normalized === 'levelchunk') || chunkLike || (bytes && bytes.length >= 512))) {
-      rememberChunkPacket(packet, normalized);
+    if (packet && (normalized === 'level_chunk' || normalized === 'levelchunk')) {
+      rememberChunkPacket(packet).catch((error) => {
+        packetStats.adapterError = error.message;
+      });
+    }
+    if (packet && /cache.*(?:blob|miss)|blob.*cache/i.test(normalized)) {
+      const stored = adapter.ingestCacheBlobPacket(packet);
+      if (stored) packetStats.cacheBlobs = Number(packetStats.cacheBlobs || 0) + stored;
     }
     if ((normalized === 'update_block' || normalized === 'updateblock') && packet) rememberBlockUpdatePacket(packet);
   };
