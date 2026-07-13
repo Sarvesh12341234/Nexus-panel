@@ -1960,7 +1960,7 @@ function renderSpectateSurface(data) {
     `;
   }
   if (data.serverType === 'bedrock') {
-    return '<canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="NexusPanel Bedrock packet-rendered spectate video"></canvas>';
+    return '<div class="spectate-empty-video"><div><strong>Bedrock renderer starting</strong><span>Only real decoded chunk/entity data will be shown here.</span></div></div>';
   }
   return '<canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>';
 }

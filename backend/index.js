@@ -5209,6 +5209,16 @@ app.get('/api/servers/:id/spectate/stream', requirePermission(capabilities.CONSO
   req.on('close', () => clearInterval(timer));
 });
 
+app.post('/api/servers/:id/spectate/control', requirePermission(capabilities.CONSOLE_COMMAND, permissions.SEND_COMMANDS), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const session = spectateSessions.get(Number(server.id));
+  if (!session || session.status === 'stopped') return res.status(409).json({ error: 'Start the spectate bot first.' });
+  const moved = moveSpectateBot(server, session, req.body.action, req.body.yaw);
+  if (!moved) return res.status(400).json({ error: 'Movement command could not be applied.' });
+  try { session.child?.send?.({ type: 'local-move', entity: moved }); } catch {}
+  res.json({ ok: true, entity: moved });
+});
+
 app.get(['/api/servers/:id/spectate/renderer', '/api/servers/:id/spectate/renderer/*'], requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
   const server = getServerOr404(req.params.id);
   const session = spectateSessions.get(Number(server.id));

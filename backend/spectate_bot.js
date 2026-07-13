@@ -240,16 +240,6 @@ function startBedrockBrowserViewer(config, getState) {
     req.on('close', () => clients.delete(res));
   });
 
-  app.get('/control', (req, res) => {
-    const action = String(req.query.action || '').toLowerCase();
-    const yaw = finiteNumber(req.query.yaw);
-    if (!['forward', 'back', 'left', 'right', 'up', 'down'].includes(action)) {
-      return res.status(400).json({ ok: false, error: 'Invalid movement action.' });
-    }
-    send('control', { action, yaw });
-    res.json({ ok: true, action });
-  });
-
   app.get('/', (_req, res) => {
     res.type('html').send(`<!doctype html>
 <html lang="en">
@@ -285,7 +275,7 @@ canvas{display:block;touch-action:none}
 <div id="hud"><div id="title">Bedrock Live Renderer</div><div id="meta">Starting viewer...</div></div>
 <div id="debug"></div>
 <div id="reticle"></div>
-<div id="empty">Waiting for decoded Bedrock chunks<br><small>Keep the bot online and move near terrain.</small></div>
+<div id="empty">No real terrain decoded yet<br><small>Only decoded Bedrock chunk packets are rendered here.</small></div>
 <div id="controls" aria-label="Bot movement controls">
   <button id="moveForward" type="button" data-move="forward">W</button>
   <button id="moveLeft" type="button" data-move="left">A</button>
@@ -331,38 +321,6 @@ canvas{display:block;touch-action:none}
   scene.add(world);
   const entityGroup = new THREE.Group();
   scene.add(entityGroup);
-  const fallbackWorld = new THREE.Group();
-  const fallbackGround = new THREE.Mesh(
-    new THREE.PlaneGeometry(768, 768, 48, 48),
-    new THREE.MeshLambertMaterial({ color: 0x5f9f45, side: THREE.DoubleSide })
-  );
-  fallbackGround.rotation.x = -Math.PI / 2;
-  fallbackGround.position.y = 62;
-  const fallbackGrid = new THREE.GridHelper(768, 96, 0xe5f7d0, 0x386b36);
-  fallbackGrid.position.y = 62.025;
-  const fallbackBlocks = new THREE.Group();
-  const fallbackBlockMaterials = [
-    new THREE.MeshLambertMaterial({ color: 0x4f9a3f }),
-    new THREE.MeshLambertMaterial({ color: 0x7a5a38 }),
-    new THREE.MeshLambertMaterial({ color: 0x7f8587 }),
-    new THREE.MeshLambertMaterial({ color: 0xc9bc76 }),
-  ];
-  for (let ix = -7; ix <= 7; ix += 1) {
-    for (let iz = 4; iz <= 18; iz += 1) {
-      if ((ix * 13 + iz * 17) % 5 === 0) continue;
-      const h = 1 + Math.abs((ix * 7 + iz * 3) % 3);
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, h, 1), fallbackBlockMaterials[Math.abs(ix + iz) % fallbackBlockMaterials.length]);
-      mesh.position.set(ix * 3, 62 + h / 2, -iz * 3);
-      fallbackBlocks.add(mesh);
-    }
-  }
-  const fallbackHorizon = new THREE.Mesh(
-    new THREE.BoxGeometry(620, 46, 6),
-    new THREE.MeshLambertMaterial({ color: 0x5d8d4c })
-  );
-  fallbackHorizon.position.set(0, 78, -180);
-  fallbackWorld.add(fallbackGround, fallbackGrid, fallbackBlocks, fallbackHorizon);
-  scene.add(fallbackWorld);
   const blockMeshes = new Map();
   const entityMeshes = new Map();
   const materialCache = new Map();
@@ -491,7 +449,6 @@ canvas{display:block;touch-action:none}
     const adapter = stats.adapter || {};
     meta.textContent = (state.serverName || 'Server') + ' - ' + (state.botName || 'live-update') + ' - ' + (state.status || 'waiting') + ' - blocks ' + blockMeshes.size + ' - entities ' + entityMeshes.size;
     debug.textContent = 'chunks ' + chunks.length + ' decoded ' + (stats.renderPackets || 0) + ' level_chunk ' + (stats.levelChunk || 0) + ' last ' + (stats.lastPacket || 'waiting') + (stats.adapterError || adapter.error ? ' - ' + (stats.adapterError || adapter.error) : '');
-    fallbackWorld.visible = blockMeshes.size === 0;
     empty.style.display = blockMeshes.size ? 'none' : 'block';
   };
   const focusEntity = () => {
@@ -503,7 +460,12 @@ canvas{display:block;touch-action:none}
     return Number(focus.yaw || 0) * Math.PI / 180 + lookYawOffset;
   };
   const moveBot = (action) => {
-    fetch('control?action=' + encodeURIComponent(action) + '&yaw=' + encodeURIComponent(currentYaw()), { cache: 'no-store' }).catch(() => {});
+    fetch('../control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, yaw: currentYaw() }),
+      cache: 'no-store',
+    }).catch(() => {});
   };
   controls.addEventListener('click', (event) => {
     const action = event.target?.dataset?.move;
@@ -529,12 +491,6 @@ canvas{display:block;touch-action:none}
     const baseYaw = Number(focus.yaw || 0) * Math.PI / 180;
     const yaw = baseYaw + lookYawOffset;
     const pitch = Math.max(-1.18, Math.min(0.92, Number(focus.pitch || 0) * Math.PI / 180 + lookPitchOffset));
-    fallbackWorld.position.x = Math.round(fx / 32) * 32;
-    fallbackWorld.position.z = Math.round(fz / 32) * 32;
-    fallbackBlocks.rotation.y = yaw;
-    fallbackHorizon.position.x = Math.sin(yaw) * 180;
-    fallbackHorizon.position.z = Math.cos(yaw) * 180;
-    fallbackHorizon.rotation.y = yaw;
     camera.position.set(fx, fy, fz);
     camera.lookAt(
       fx + Math.sin(yaw) * Math.cos(pitch) * 32,
