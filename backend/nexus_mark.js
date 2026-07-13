@@ -41,6 +41,7 @@ function profileForServer(server, nexu = null) {
   const cpuCores = Math.max(1, Math.min(hostCpuCount(), Number(server.cpu_cores || nexu?.resources?.cpuCores || 1)));
   const ramMb = Math.max(256, Number(server.max_memory_mb || nexu?.resources?.ramMb || 1024));
   const windowsHardGuardMb = Math.max(ramMb + 384, Math.ceil(ramMb * 1.35));
+  const advancedIsolation = process.env.NEXUSPANEL_ADVANCED_ISOLATION !== '0';
   return {
     engine: 'nexus-mark',
     version: 1,
@@ -56,11 +57,22 @@ function profileForServer(server, nexu = null) {
     networkScope: nexu?.security?.nexusMark?.network || 'game-only',
     writeScope: nexu?.security?.nexusMark?.writeScope || 'server-root',
     sourceOfTruth: 'sqlite-allocation',
+    advancedIsolation,
     hardening: [
       'absolute-path-sandbox',
       'per-server-root',
       'owner-only-terminal-gate',
       'ram-allocation-guard',
+      'systemd-memorymax',
+      'systemd-cpuquota',
+      'systemd-readwritepaths',
+      'systemd-private-tmp',
+      ...(advancedIsolation ? [
+        'systemd-private-devices',
+        'systemd-protect-proc',
+        'systemd-capability-drop',
+        'systemd-syscall-filter',
+      ] : []),
       'safe-backup-exclusion',
       'no-docker-daemon',
     ],
@@ -72,7 +84,12 @@ function profileForServer(server, nexu = null) {
         startupCpuQuota: `${startupCpuLimitPercent(cpuCores)}%`,
         noNewPrivileges: true,
         privateTmp: true,
-        protectSystem: 'strict-planned',
+        privateDevices: advancedIsolation,
+        protectSystem: 'strict',
+        protectProc: advancedIsolation ? 'invisible' : 'default',
+        capabilityBoundingSet: advancedIsolation ? '' : 'systemd-default',
+        addressFamilies: advancedIsolation ? ['AF_INET', 'AF_INET6', 'AF_UNIX'] : ['systemd-default'],
+        systemCallFilter: advancedIsolation ? ['@system-service', '~@mount', '~@swap', '~@reboot', '~@raw-io', '~@privileged'] : ['systemd-default'],
       }
       : { note: 'Windows/macOS use path sandbox + process guard only.' },
     windowsPlan: process.platform === 'win32'
@@ -97,6 +114,37 @@ function wrapCommand(command, args, profile) {
   if (probe.status !== 0) return { command, args, unit: '' };
   clearStaleUnits(profile.serverId, spawnSync);
   launchSequence = (launchSequence + 1) % 1000000;
+  const advancedIsolation = process.env.NEXUSPANEL_ADVANCED_ISOLATION !== '0' && profile.advancedIsolation !== false;
+  const advancedProperties = advancedIsolation
+    ? [
+      '--property',
+      'PrivateDevices=yes',
+      '--property',
+      'ProtectHome=read-only',
+      '--property',
+      'ProtectClock=yes',
+      '--property',
+      'ProtectKernelTunables=yes',
+      '--property',
+      'ProtectKernelModules=yes',
+      '--property',
+      'ProtectKernelLogs=yes',
+      '--property',
+      'ProtectControlGroups=yes',
+      '--property',
+      'ProcSubset=pid',
+      '--property',
+      'ProtectProc=invisible',
+      '--property',
+      'CapabilityBoundingSet=',
+      '--property',
+      'SystemCallArchitectures=native',
+      '--property',
+      'SystemCallFilter=@system-service ~@mount ~@swap ~@reboot ~@raw-io ~@privileged',
+      '--property',
+      'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX',
+    ]
+    : [];
   const unit = [
     'nexusmark',
     String(profile.serverId).replace(/[^a-z0-9_.-]/gi, '-'),
@@ -132,6 +180,7 @@ function wrapCommand(command, args, profile) {
       'RestrictSUIDSGID=yes',
       '--property',
       'LockPersonality=yes',
+      ...advancedProperties,
       '--',
       command,
       ...args,

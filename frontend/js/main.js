@@ -322,6 +322,7 @@ function loadUiPreferences() {
 }
 
 function applyUiPreferences(preferences = uiPreferences) {
+  const shellScroll = currentShellScroll();
   document.body.dataset.density = preferences.compact ? 'compact' : 'comfortable';
   document.body.dataset.reducedMotion = preferences.reducedMotion ? 'true' : 'false';
   document.body.dataset.buttonShape = preferences.buttonShape;
@@ -355,7 +356,10 @@ function applyUiPreferences(preferences = uiPreferences) {
   if (!nav) return;
   const buttons = new Map([...nav.querySelectorAll('[data-view]')].map((button) => [button.dataset.view, button]));
   const order = [...preferences.navOrder, ...defaultNavOrder].filter((key, index, list) => buttons.has(key) && list.indexOf(key) === index);
-  for (const key of order) nav.appendChild(buttons.get(key));
+  const currentOrder = [...nav.querySelectorAll('[data-view]')].map((button) => button.dataset.view).join('|');
+  if (currentOrder !== order.join('|')) {
+    for (const key of order) nav.appendChild(buttons.get(key));
+  }
   const priority = new Map((preferences.actionPriority || []).map((action, index) => [action, index]));
   document.querySelectorAll('.server-actions [data-action], .file-toolbar [data-action], .row-actions [data-action]').forEach((button) => {
     button.style.order = String(priority.has(button.dataset.action) ? priority.get(button.dataset.action) : priority.size + 100);
@@ -363,6 +367,7 @@ function applyUiPreferences(preferences = uiPreferences) {
   applyButtonLayout(preferences);
   applyComponentLayout(preferences);
   restoreLayoutSelection();
+  restoreShellScroll(shellScroll);
 }
 
 function reapplyDynamicLayout() {
@@ -1752,7 +1757,7 @@ async function renderActiveView() {
   if (state.activeView === 'properties') await renderProperties();
   if (state.activeView === 'whitelist') await renderWhitelist();
   if (state.activeView === 'plugins') renderPlugins();
-  if (state.activeView === 'console') await renderConsole();
+  if (state.activeView === 'console') await renderConsole({ force: true });
   if (state.activeView === 'files') {
     await renderFiles();
     await renderUploadSessions();
@@ -1823,7 +1828,7 @@ function renderPlugins() {
   }).join('');
 }
 
-async function renderConsole() {
+async function renderConsole({ force = false } = {}) {
   const server = activeServer();
   const renderToken = ++consoleRenderToken;
   if (!server) {
@@ -1833,7 +1838,7 @@ async function renderConsole() {
   }
   const serverId = server.id;
   const now = Date.now();
-  if (now - Number(state.consolePollAt[serverId] || 0) < 250) return;
+  if (!force && now - Number(state.consolePollAt[serverId] || 0) < 120) return;
   state.consolePollAt[serverId] = now;
   if (state.consoleInFlight[serverId]) return;
   state.consoleInFlight[serverId] = true;
@@ -2919,6 +2924,8 @@ function setView(view) {
   state.activeView = view;
   if (view === 'console') {
     consoleStickToBottom = true;
+    const server = activeServer();
+    if (server) state.consolePollAt[server.id] = 0;
   }
   renderView();
   renderActiveView().catch((error) => showToast(error.message));
@@ -2955,17 +2962,21 @@ function shellScrollTargets() {
 }
 
 function saveShellScroll() {
+  state.shellScroll = currentShellScroll();
+}
+
+function currentShellScroll() {
   const { sidebar, nav } = shellScrollTargets();
-  state.shellScroll = {
+  return {
     sidebarTop: sidebar?.scrollTop || 0,
     navTop: nav?.scrollTop || 0,
   };
 }
 
-function restoreShellScroll() {
+function restoreShellScroll(position = state.shellScroll) {
   const { sidebar, nav } = shellScrollTargets();
-  if (sidebar) sidebar.scrollTop = state.shellScroll.sidebarTop || 0;
-  if (nav) nav.scrollTop = state.shellScroll.navTop || 0;
+  if (sidebar) sidebar.scrollTop = position?.sidebarTop || 0;
+  if (nav) nav.scrollTop = position?.navTop || 0;
 }
 
 function accessName(level) {
@@ -3079,18 +3090,18 @@ function startRefreshLoop() {
   window.clearInterval(state.consoleFastTimer);
   state.consoleFastTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh || state.activeView !== 'console') return;
-    renderConsole().catch(() => {});
-  }, 250);
+    renderConsole({ force: true }).catch(() => {});
+  }, 200);
   state.refreshTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
-    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy || state.activeView === 'console' ? 500 : 1800);
+    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy || state.activeView === 'console' ? 350 : 1600);
     if (dueStatus || liveBusy) {
       state.statusRefreshAt = Date.now();
       refreshServerStatusOnly().catch(() => {});
     }
     if (state.activeView === 'files') renderUploadSessions().catch(() => {});
-  }, 500);
+  }, 350);
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -3236,7 +3247,7 @@ elements.commandForm.addEventListener('submit', async (event) => {
     const result = await api(`/api/servers/${server.id}/command`, { method: 'POST', body: JSON.stringify(payload) });
     elements.commandForm.reset();
     if (result.line) state.consolePollAt[server.id] = 0;
-    await renderConsole();
+    await renderConsole({ force: true });
   } catch (error) {
     showToast(error.message);
   }
@@ -3282,7 +3293,7 @@ if (elements.serverConfigForm) {
       elements.serverConfigForm.dataset.dirty = '0';
       await refresh();
       fillServerConfigForm(activeServer(), true);
-      await renderConsole();
+      await renderConsole({ force: true });
     } catch (error) {
       showToast(error.message);
     }
@@ -4138,7 +4149,7 @@ document.addEventListener('click', async (event) => {
       }
       showToast(`${op} requested.`);
       await refresh();
-      if (state.activeView === 'console') await renderConsole();
+      if (state.activeView === 'console') await renderConsole({ force: true });
       return;
     }
     if (action === 'agree-eula') {
