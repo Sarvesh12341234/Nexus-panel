@@ -3594,6 +3594,11 @@ function installSteamcmdRequirement() {
 
 async function ensureSoftwareRequirements(software, serverId, onProgress, version = 'latest', root = null) {
   if (software.edition === 'java') {
+    const requiredMajor = requiredJavaMajorForMinecraftVersion(version);
+    if (process.platform === 'linux' && root) {
+      await installBundledJavaRuntime(root, serverId, requiredMajor, onProgress);
+      return { ok: true, message: `Bundled Java ${requiredMajor} runtime ready.` };
+    }
     let javaMajor = installedJavaMajor();
     if (process.platform !== 'linux') {
       if (!javaMajor) throw new Error('Java runtime was not found. Install Java 21+ manually, then restart NexusPanel.');
@@ -3610,7 +3615,6 @@ async function ensureSoftwareRequirements(software, serverId, onProgress, versio
       }
       appendLog(serverId, '[NexusPanel] Requirement installed: Java 21 runtime.');
     }
-    const requiredMajor = requiredJavaMajorForMinecraftVersion(version);
     if (requiredMajor > javaMajor) {
       if (root) {
         await installBundledJavaRuntime(root, serverId, requiredMajor, onProgress);

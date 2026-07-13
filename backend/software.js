@@ -173,6 +173,7 @@ function requiredJavaMajorForMinecraftVersion(version) {
 }
 
 function hostJavaCompatibleVersions(versions) {
+  if (process.platform === 'linux' && process.env.NEXUSPANEL_HIDE_BUNDLED_JAVA_VERSIONS !== '1') return versions;
   const javaMajor = installedJavaMajor() || 21;
   return versions.filter((version) => requiredJavaMajorForMinecraftVersion(version) <= javaMajor);
 }
