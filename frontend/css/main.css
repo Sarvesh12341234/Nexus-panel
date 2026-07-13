@@ -24,6 +24,11 @@ body[data-theme="crimson"] { --bg:#10050c; --sidebar:#190812; --green:#fb7185; -
 body[data-theme="forest"] { --bg:#06130b; --sidebar:#0a1b10; --green:#4ade80; --cyan:#34d399; --yellow:#bef264; --red:#f87171; --glow:rgba(74,222,128,.3); }
 body[data-theme="ice"] { --bg:#06111f; --sidebar:#081827; --green:#bae6fd; --cyan:#67e8f9; --yellow:#e0f2fe; --red:#fda4af; --glow:rgba(103,232,249,.34); }
 body[data-theme="candy"] { --bg:#140816; --sidebar:#1f0b23; --green:#f0abfc; --cyan:#67e8f9; --yellow:#fef08a; --red:#fb7185; --glow:rgba(240,171,252,.34); }
+body[data-theme="volt"] { --bg:#070a04; --sidebar:#0d1408; --green:#ccff00; --cyan:#00ffd5; --yellow:#fff566; --red:#ff3d71; --glow:rgba(204,255,0,.34); }
+body[data-theme="aurora"] { --bg:#061018; --sidebar:#0a1620; --green:#76ffcf; --cyan:#8ab4ff; --yellow:#f6d365; --red:#ff6b8a; --glow:rgba(118,255,207,.32); }
+body[data-theme="lava"] { --bg:#100503; --sidebar:#1a0805; --green:#ffb703; --cyan:#ff6b00; --yellow:#ffe45e; --red:#ff2e2e; --glow:rgba(255,107,0,.36); }
+body[data-theme="berry"] { --bg:#12051a; --sidebar:#1c0a29; --green:#ff4fd8; --cyan:#7c3cff; --yellow:#ffe066; --red:#ff477e; --glow:rgba(255,79,216,.34); }
+body[data-theme="matrix"] { --bg:#020a05; --sidebar:#06150b; --green:#39ff14; --cyan:#00ffaa; --yellow:#d9ff5c; --red:#ff4d6d; --glow:rgba(57,255,20,.34); }
 body[data-theme="blackhole-pic"] { --bg:#02040a; --sidebar:#070b13; --green:#9cc7ff; --cyan:#73e3ff; --yellow:#ff8a5c; --red:#ff5d7a; --glow:rgba(115,227,255,.34); --picture-image:url("/pictures/blackhole.jpg"); }
 body[data-theme="whitehole-pic"] { --bg:#080914; --sidebar:#0d1020; --green:#c6f7ff; --cyan:#9bbcff; --yellow:#ffd6ff; --red:#fb7185; --glow:rgba(198,247,255,.3); --picture-image:url("/pictures/whitehole.jpg"); }
 body[data-theme="moon-pic"] { --bg:#050914; --sidebar:#0a1020; --green:#d9e8ff; --cyan:#93c5fd; --yellow:#fde68a; --red:#fb7185; --glow:rgba(147,197,253,.3); --picture-image:url("/pictures/moon.jpg"); }
@@ -1318,7 +1323,7 @@ code {
 }
 
 .optimizer-summary {
-  grid-template-columns: minmax(260px, 420px);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .optimizer-summary article {
@@ -1332,6 +1337,29 @@ code {
 
 .optimizer-action strong {
   font-size: 1.7rem;
+}
+
+.optimizer-hero,
+.optimizer-plan {
+  grid-column: span 2;
+}
+
+.optimizer-hero p,
+.optimizer-plan small {
+  margin: 0;
+  color: var(--muted);
+}
+
+.optimizer-plan {
+  align-content: start;
+}
+
+.optimizer-plan code {
+  display: block;
+  margin-top: .45rem;
+  padding: .55rem .7rem;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, .24);
 }
 
 .optimizer-message {
@@ -1497,9 +1525,6 @@ code {
   }
 }
 
-/* ===== SETTINGS PAGE STYLES ===== */
-
-/* Settings groups */
 .settings-group {
   background: var(--panel-2);
   border-radius: 14px;
@@ -1535,7 +1560,6 @@ code {
   flex-shrink: 0;
 }
 
-/* Setting rows */
 .setting-row {
   display: flex;
   align-items: center;
@@ -1550,6 +1574,17 @@ code {
   padding-bottom: 0;
 }
 
+.setting-inline {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto minmax(120px, .5fr);
+  gap: .8rem;
+  align-items: end;
+}
+
+.setting-inline button {
+  min-width: 150px;
+}
+
 .setting-row label {
   min-width: 140px;
   font-weight: 600;
@@ -1558,7 +1593,6 @@ code {
   margin: 0;
 }
 
-/* Timezone select */
 #userTimezoneSelect {
   background: var(--bg);
   color: var(--text);
@@ -1599,7 +1633,6 @@ code {
   padding: 4px 0;
 }
 
-/* Backup interval inputs */
 #backupHours,
 #backupMinutes {
   background: var(--bg);
@@ -1632,7 +1665,6 @@ code {
   font-weight: 500;
 }
 
-/* Backup display */
 #backupDisplay {
   font-weight: 700;
   padding: 6px 16px;
@@ -1650,7 +1682,6 @@ code {
   border-color: color-mix(in srgb, var(--muted), transparent 70%);
 }
 
-/* Server select dropdown */
 #settingsServerSelect {
   background: var(--bg);
   color: var(--text);
@@ -1678,7 +1709,6 @@ code {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan), transparent 70%);
 }
 
-/* Buttons in settings */
 .settings-group .secondary {
   background: color-mix(in srgb, var(--cyan), transparent 85%);
   color: var(--text);
@@ -1711,7 +1741,6 @@ code {
   transform: none;
 }
 
-/* Status messages */
 #timezoneStatus,
 #backupStatus {
   display: inline-block;
@@ -1722,6 +1751,11 @@ code {
   transition: all 0.3s ease;
   min-height: 38px;
   min-width: 80px;
+}
+
+.setting-inline #timezoneStatus {
+  align-self: end;
+  width: 100%;
 }
 
 #timezoneStatus[style*="color: #4CAF50"],
@@ -1751,7 +1785,21 @@ code {
   }
 }
 
-/* Help text */
+@media (max-width: 760px) {
+  .optimizer-hero,
+  .optimizer-plan {
+    grid-column: span 1;
+  }
+
+  .setting-inline {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .setting-inline button {
+    width: 100%;
+  }
+}
 .help-text {
   display: block;
   color: var(--muted);
@@ -1761,7 +1809,6 @@ code {
   opacity: 0.8;
 }
 
-/* Responsive design */
 @media (max-width: 768px) {
   .settings-group {
     padding: 16px;
@@ -1819,7 +1866,6 @@ code {
   }
 }
 
-/* Dark theme overrides for settings */
 body[data-theme-mode="picture"] .settings-group {
   background: color-mix(in srgb, var(--panel), rgba(0,0,0,0.6) 30%);
   backdrop-filter: blur(12px);

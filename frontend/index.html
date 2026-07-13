@@ -238,7 +238,9 @@
 
         <section class="view-section" id="view-plugins" hidden>
           <form class="modrinth-form surface" id="modrinthForm">
-            <label>Search Modrinth <input name="query" placeholder="LuckPerms, Geyser, ViaVersion"></label>
+            <label>Search marketplace <input name="query" placeholder="LuckPerms, Geyser, ViaVersion"></label>
+            <label>Type <select name="projectType"><option value="plugin">Plugin</option><option value="mod">Mod</option></select></label>
+            <label>Loader <select name="loader"><option value="paper">Paper/Spigot</option><option value="purpur">Purpur</option><option value="fabric">Fabric</option><option value="forge">Forge</option><option value="">Any loader</option></select></label>
             <button type="submit">Search</button>
           </form>
           <div class="modrinth-grid" id="modrinthGrid"></div>
@@ -271,17 +273,7 @@
               <select name="adminDurationMode"><option value="permanent">Permanent</option><option value="temporary">Temporary</option></select>
               <input name="adminDurationValue" type="number" min="1" max="525600" value="60">
               <select name="adminDurationUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select>
-              <label>Permission preset
-                <select name="accessLevel">
-                  <option value="0">View only</option>
-                  <option value="5" selected>Start / stop servers</option>
-                  <option value="20">View console logs</option>
-                  <option value="40">Send console commands</option>
-                  <option value="60">Manage servers and software</option>
-                  <option value="80">Manage files and backups</option>
-                  <option value="100">Full administrator</option>
-                </select>
-              </label>
+              <input name="accessLevel" type="hidden" value="5">
               <fieldset class="admin-permissions">
                 <legend>Exact permissions</legend>
                 <div class="admin-permission-actions">
@@ -302,7 +294,7 @@
                     <label><input type="checkbox" name="permissionKey" value="console.command"> Send commands</label>
                   </div>
                   <div class="permission-group"><h4>Server Setup</h4>
-                    <label><input type="checkbox" name="permissionKey" value="server.manage"> Manage servers</label>
+                    <label><input type="checkbox" name="permissionKey" value="server.manage"> Manage servers and Repair &amp; Diagnose</label>
                     <label><input type="checkbox" name="permissionKey" value="software.manage"> Manage software</label>
                     <label><input type="checkbox" name="permissionKey" value="properties.manage"> Server properties</label>
                     <label><input type="checkbox" name="permissionKey" value="whitelist.manage"> Whitelist</label>

@@ -18,12 +18,15 @@ const state = {
   activeView: 'dashboard',
   activeServerId: null,
   refreshTimer: null,
+  consoleFastTimer: null,
   statusRefreshAt: 0,
   consolePollAt: {},
   consoleMetricsAt: {},
   presenceAt: 0,
   serverStatusSignature: '',
   playitTerminalTimer: null,
+  pluginSearchSignature: '',
+  viewScroll: {},
 };
 
 const elements = {
@@ -197,6 +200,11 @@ const themes = [
   { key: 'forest', name: 'Plain · Emerald Forest', mode: 'plain' },
   { key: 'ice', name: 'Plain · Ice Prism', mode: 'plain' },
   { key: 'candy', name: 'Plain · Candy Pop', mode: 'plain' },
+  { key: 'volt', name: 'Plain - Neon Volt', mode: 'plain' },
+  { key: 'aurora', name: 'Plain - Aurora Glass', mode: 'plain' },
+  { key: 'lava', name: 'Plain - Lava Core', mode: 'plain' },
+  { key: 'berry', name: 'Plain - Berry Blast', mode: 'plain' },
+  { key: 'matrix', name: 'Plain - Matrix Lime', mode: 'plain' },
   { key: 'forge-ui', name: 'Plain - Forge Geometry', mode: 'plain' },
   { key: 'blackhole-pic', name: 'blackhole', mode: 'picture' },
   { key: 'whitehole-pic', name: 'whitehole', mode: 'picture' },
@@ -1565,6 +1573,7 @@ function renderServerRows() {
     return;
   }
   const canOpenConsole = can(CAPABILITIES.CONSOLE_VIEW, state.permissions.VIEW_CONSOLE);
+  const canOpenFiles = can(CAPABILITIES.FILES_MANAGE, state.permissions.MANAGE_FILES);
   const canManageServers = can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
   elements.serverRowsGrid.innerHTML = state.servers.map((server) => `
     <article class="server-row-card ${server.id === state.activeServerId ? 'is-selected' : ''}" data-server-id="${server.id}" data-live-server-id="${server.id}">
@@ -1574,7 +1583,7 @@ function renderServerRows() {
       </div>
       <code>${escapeHtml(server.serverPath || '')}</code>
       <div class="row-actions">
-        <button type="button" data-action="manage-server" ${canOpenConsole ? '' : 'hidden'}>Open</button>
+        <button type="button" data-action="open-files" ${canOpenFiles ? '' : 'hidden'}>Open</button>
         <button class="secondary" type="button" data-action="open-console" ${canOpenConsole ? '' : 'hidden'}>Console</button>
         <button class="danger" type="button" data-action="delete-server" ${canManageServers ? '' : 'hidden'} ${server.status === 'online' ? 'disabled' : ''}>Delete</button>
       </div>
@@ -1593,6 +1602,7 @@ function renderServers() {
   const canStop = can(CAPABILITIES.SERVER_STOP, state.permissions.POWER_SERVERS);
   const canRestart = can(CAPABILITIES.SERVER_RESTART, state.permissions.POWER_SERVERS);
   const canOpenConsole = can(CAPABILITIES.CONSOLE_VIEW, state.permissions.VIEW_CONSOLE);
+  const canOpenFiles = can(CAPABILITIES.FILES_MANAGE, state.permissions.MANAGE_FILES);
   const canManageServers = can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
   elements.serverGrid.innerHTML = state.servers.map((server) => {
     const isOnline = server.status === 'online';
@@ -1609,7 +1619,7 @@ function renderServers() {
         <div class="stat-row"><span class="muted">Address</span><strong>${server.host}:${server.port}</strong></div>
         <div class="stat-row"><span class="muted">Path</span><code>${escapeHtml(server.serverPath || 'pending')}</code></div>
         <div class="server-actions">
-          <button type="button" data-action="select-server" ${canManageServers ? '' : 'hidden'}>Manage</button>
+          <button type="button" data-action="open-files" ${canOpenFiles ? '' : 'hidden'}>Open</button>
           <button class="secondary" type="button" data-action="open-console" ${canOpenConsole ? '' : 'hidden'}>Console</button>
           <button class="secondary" type="button" data-action="start-server" ${canStart ? '' : 'hidden'} ${isOnline || !installed ? 'disabled' : ''}>Start</button>
           <button class="secondary" type="button" data-action="stop-server" ${canStop ? '' : 'hidden'} ${isOnline ? '' : 'disabled'}>Stop</button>
@@ -1784,8 +1794,14 @@ function renderPlugins() {
     elements.modrinthGrid.innerHTML = '<p class="empty-state">Bedrock Dedicated Server does not support server plugins. Use File Manager to add resource packs or behavior packs, or switch software to PocketMine for plugins.</p>';
   } else if (server.softwareKey === 'pocketmine') {
     elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Poggit: PurePerms, ScoreHud, Worlds';
+    elements.modrinthForm.querySelector('[name="projectType"]').disabled = true;
+    elements.modrinthForm.querySelector('[name="loader"]').disabled = true;
+    loadPluginMarketplace({ featured: true }).catch(() => {});
   } else {
     elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Modrinth: Geyser, LuckPerms, ViaVersion';
+    elements.modrinthForm.querySelector('[name="projectType"]').disabled = false;
+    elements.modrinthForm.querySelector('[name="loader"]').disabled = false;
+    loadPluginMarketplace({ featured: true }).catch(() => {});
   }
 
   const plugins = state.plugins.filter((plugin) => plugin.serverId === server.id);
@@ -1853,6 +1869,46 @@ async function renderConsole() {
   if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
   if (metricsBundle) renderConsoleMetrics(server, metricsBundle[0], metricsBundle[1]);
   renderPresence(server).catch(() => {});
+}
+
+async function loadPluginMarketplace({ featured = false } = {}) {
+  const server = activeServer();
+  if (!server || !elements.modrinthGrid) return;
+  if (server.softwareKey === 'bedrock-vanilla') {
+    elements.modrinthGrid.innerHTML = '<p class="empty-state">Bedrock Dedicated Server packs need behavior/resource pack registration. Use File Manager for now; PocketMine plugins are available after switching software.</p>';
+    return;
+  }
+  const payload = formData(elements.modrinthForm);
+  const source = server.softwareKey === 'pocketmine' ? 'poggit' : 'modrinth';
+  const query = featured ? '' : String(payload.query || '');
+  const loader = source === 'modrinth' ? String(payload.loader || '') : '';
+  const projectType = source === 'modrinth' ? String(payload.projectType || 'plugin') : '';
+  const signature = `${source}:${server.id}:${query}:${loader}:${projectType}`;
+  if (featured && state.pluginSearchSignature === signature && elements.modrinthGrid.children.length) return;
+  state.pluginSearchSignature = signature;
+  elements.modrinthGrid.innerHTML = '<p class="empty-state">Loading marketplace cards...</p>';
+  const params = new URLSearchParams({ serverId: server.id, query });
+  if (loader) params.set('loader', loader);
+  if (projectType) params.set('projectType', projectType);
+  const data = await api(`/api/${source}/search?${params}`);
+  elements.modrinthGrid.innerHTML = data.hits.map((project) => `
+    <article class="modrinth-card">
+      <div class="status-row">
+        <strong>${escapeHtml(project.title)}</strong>
+        <span class="pill">${Number(project.downloads || 0).toLocaleString()} downloads</span>
+      </div>
+      <p>${escapeHtml(project.description || '')}</p>
+      ${project.iconUrl ? `<img class="plugin-icon" src="${escapeHtml(project.iconUrl)}" alt="">` : ''}
+      <div class="template-tags">${(project.categories || []).slice(0, 5).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>
+      <div class="install-track" hidden><span style="width:0%"></span></div>
+      <button type="button"
+        data-action="${source === 'poggit' ? 'install-poggit' : 'install-modrinth'}"
+        data-project-id="${escapeHtml(project.projectId || '')}"
+        data-project-name="${escapeHtml(project.title)}"
+        data-download-url="${escapeHtml(project.downloadUrl || '')}"
+        data-file-name="${escapeHtml(project.fileName || '')}">Install</button>
+    </article>
+  `).join('') || `<p class="empty-state">${escapeHtml(data.message || `No ${source} items found. Try a broader search.`)}</p>`;
 }
 
 function appendConsoleImmediate(line) {
@@ -2063,14 +2119,12 @@ function renderSettings() {
         </div>
         <div class="tunnel-output" id="normalTunnelOutput">Select a server, choose TCP or UDP, then click Show tunnel status.</div>
       </div>`}` : ''}
-
-      <!-- Timezone with Save Button -->
       <div class="settings-group">
-        <label>Timezone
-          <select name="timeZone" id="userTimezoneSelect">${zoneOptions}</select>
-        </label>
-        <button type="button" class="secondary" data-action="save-timezone" style="margin-top: 8px;">Save Timezone</button>
-        <span id="timezoneStatus" style="margin-left: 10px;"></span>
+        <div class="setting-inline">
+          <label>Timezone <select name="timeZone" id="userTimezoneSelect">${zoneOptions}</select></label>
+          <button type="button" class="secondary" data-action="save-timezone">Save Timezone</button>
+          <span id="timezoneStatus"></span>
+        </div>
       </div>
       ${canManageSettings ? '<button class="save-wide" type="submit">Save Panel Settings</button>' : ''}
     </form>
@@ -2322,7 +2376,6 @@ function renderBackups() {
     const requests = data.shareRequests || [];
     const shared = data.sharedBackups || [];
 
-    // Helper function to format backup display name
     function formatBackupDisplayName(filename) {
       if (!filename) return 'Unknown';
       const name = filename.replace(/\.zip$/, '');
@@ -2344,7 +2397,6 @@ function renderBackups() {
       return name;
     }
 
-    // Helper function to format date in 12-hour format
     function formatBackupDate(timestamp) {
       const date = new Date(timestamp);
       if (Number.isNaN(date.getTime())) return 'Invalid Date';
@@ -2449,18 +2501,27 @@ async function renderOptimizer() {
 
   try {
     const optimizer = state.optimizer || await api('/api/optimizer/status').catch(() => ({}));
+    const commands = await api('/api/optimizer/plan').catch(() => ({ commands: [] }));
+    const cards = [
+      ['Platform', optimizer.platform || 'System', 'Host profile detected by NexusPanel'],
+      ['Applied', optimizer.applied ? 'Yes' : 'No', optimizer.message || 'No optimizer changes applied yet'],
+      ['CPU Cores', state.settings?.maxCpuCores || navigator.hardwareConcurrency || 1, 'Used for server allocation limits'],
+      ['RAM Ceiling', `${state.settings?.maxAllocatableMemoryMb || 0} MB`, 'Max allocatable memory after host reserve'],
+      ['Plan Items', commands.commands?.length || 0, 'Safe host tuning commands available'],
+      ['Mode', 'No background agent', 'Runs only when you click Optimize'],
+    ];
     elements.optimizerSummary.innerHTML = `
-      <article class="optimizer-action">
+      <article class="optimizer-action optimizer-hero">
         <span>Host Optimizer</span>
         <strong>${escapeHtml(optimizer.platform || 'System')}</strong>
-        <button type="button" data-action="apply-optimizer">Optimize</button>
+        <p>${escapeHtml(optimizer.message || 'Review and apply safe VPS tuning from one place.')}</p>
+        <button type="button" data-action="apply-optimizer">Optimize VPS</button>
       </article>
-      ${[
-        'BBR/fq tuning','UDP buffers','TCP fast open','MTU probing','DNS cache plan','Low swap profile','File limits','World I/O cache','Crash backup hooks','Chunked uploads',
-        'Live whitelist reload','External backups','Server RAM watcher','Player tracker','Console scroll lock','Upload resume','Upload cancel','ZIP extract','Safe updater','Theme engine',
-        'Per-server plugin paths','PocketMine PHP runtime','Bedrock auto install','Software version checker','Tunnel token vault','Admin access tiers','Mobile layout','One-click EULA','Backup rotation','No Docker overhead',
-        'Direct process manager','Public alias notes','Safe path sandbox','Archive downloader','Systemd service mode','Live status polling','Low-RAM SQLite','No database daemon','Packs folders','Server delete guard'
-      ].map((item) => `<article><span>${escapeHtml(item)}</span><strong>Ready</strong></article>`).join('')}
+      ${cards.map(([label, value, detail]) => `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`).join('')}
+      <article class="optimizer-plan">
+        <span>Command Preview</span>
+        ${(commands.commands || []).slice(0, 8).map((item) => `<code>${escapeHtml(item.command || item)}</code>`).join('') || '<small>No host commands required on this OS.</small>'}
+      </article>
     `;
   } catch (error) {
     elements.optimizerSummary.innerHTML = '<p class="empty-state">Error loading optimizer data.</p>';
@@ -2561,7 +2622,7 @@ async function renderFixed() {
         </div>
       `).join('') || '<p class="empty-state">No full access commands queued.</p>'}
     </div>
-    <h3>Seven day fixed log</h3>
+    <h3>Last 24 hours</h3>
     <div class="plugin-list">
       ${(data.logs || []).map((item) => `
         <div class="plugin-row">
@@ -2572,7 +2633,7 @@ async function renderFixed() {
           </div>
           <span class="badge is-on">fixed</span>
         </div>
-      `).join('') || `<p class="empty-state">${escapeHtml(data.error || 'No fixed events recorded in the last 7 days.')}</p>`}
+      `).join('') || `<p class="empty-state">${escapeHtml(data.error || 'No fixed events recorded in the last 24 hours.')}</p>`}
     </div>
   `;
 }
@@ -2594,12 +2655,9 @@ async function renderSecurity(forceHealth = false) {
     const checks = state.health?.checks || [];
     elements.healthPanel.innerHTML = `
       <div class="section-head">
-        <div><p class="eyebrow">Smart Check</p><h2>${escapeHtml(state.health?.summary || 'No check yet')}</h2></div>
+        <div><p class="eyebrow">Security</p><h2>${escapeHtml(state.health?.summary || 'No check yet')}</h2></div>
         <div class="row-actions">
-          <button class="secondary" type="button" data-action="repair-preview">Preview repair</button>
-          <button class="secondary" type="button" data-action="copy-repair-bundle">Copy repair bundle</button>
           <button class="secondary" type="button" data-action="database-snapshot">Snapshot DB</button>
-          <button class="secondary" type="button" data-action="adaptive-heal">Adaptive heal</button>
           <button class="secondary" type="button" data-action="ddos-scan">DDoS scan</button>
           <button type="button" data-action="run-health-check">Run check now</button>
         </div>
@@ -2608,39 +2666,17 @@ async function renderSecurity(forceHealth = false) {
       <div class="health-grid">
         ${checks.map((check) => `<article class="${check.ok ? 'is-ok' : 'is-bad'}"><strong>${escapeHtml(check.name)}</strong><span>${escapeHtml(check.message)}</span></article>`).join('') || '<p class="empty-state">Run a health check to verify panel folders, database, software, and Java.</p>'}
       </div>
-      <h3>Adaptive engine</h3>
-      <div class="health-grid">
-        ${(state.adaptiveInsights || []).map((insight) => `<article class="${insight.anomalies?.length ? 'is-bad' : 'is-ok'}"><strong>${escapeHtml(insight.section)} ${insight.health}%</strong><span>${insight.learnedSamples < 5 ? `Learning baseline (${insight.learnedSamples}/5)` : insight.anomalies?.length ? `${insight.anomalies.length} learned anomaly signal(s)` : 'Operating inside its learned baseline'}</span></article>`).join('')}
-      </div>
-      <h3>Diagnostics</h3>
       <div class="plugin-list" id="ddosPanel"></div>
-      <div class="health-grid">
-        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.parameterCount || 0).toLocaleString()}-parameter diagnostics ranker</strong><span>${Number(state.repairBrain?.agent?.modelMemoryMb || 0)} MB model - ${Number(state.repairBrain?.agent?.featureDimensions || 0).toLocaleString()} hashed features - ${escapeHtml(state.repairBrain?.agent?.architecture || 'loading')}</span></article>
-        <article class="${state.repairBrain?.agent?.bounded ? 'is-ok' : 'is-bad'}"><strong>${Number(state.repairBrain?.agent?.episodes || 0)} repair episodes</strong><span>${Number(state.repairBrain?.agent?.validatedEpisodes || 0)} stable validation(s) - ${Number(state.repairBrain?.agent?.learnedWeights || 0)} learned weights - ${Number(state.repairBrain?.agent?.estimatedStateMemoryMb || 0)} MB bounded state.</span></article>
-        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.cumulativeReward || 0)} reinforcement reward</strong><span>${Number(state.repairBrain?.agent?.failedEpisodes || 0)} negative episode(s) - repeat crashes weaken failed paths and stable uptime strengthens them.</span></article>
-        <article class="${state.settings?.repairWebEnabled ? 'is-ok' : ''}"><strong>Web research ${state.settings?.repairWebEnabled ? 'enabled' : 'disabled'}</strong><span>${(state.repairBrain?.agent?.web?.enabledSources || []).length} bounded sources - ${Number(state.repairBrain?.agent?.web?.languageUnderstanding?.naturalLanguageIntents || 0)} English intent(s) - ${Object.values(state.repairBrain?.agent?.web?.sourceHealth || {}).filter((source) => source.healthy).length} recently healthy - ${Number(state.repairBrain?.agent?.web?.cachedQueries || 0)} cached search(es) - web code execution never.</span></article>
-        <article class="${state.repairBrain?.agent?.terminal?.enabled ? 'is-ok' : ''}"><strong>Terminal diagnostics ${state.repairBrain?.agent?.terminal?.enabled ? 'enabled' : 'disabled'}</strong><span>${Number(state.repairBrain?.agent?.terminal?.auditedCommands || 0)} audited probe(s) - ${Number(state.repairBrain?.agent?.terminal?.averageMs || 0)} ms average - key ${escapeHtml(state.repairBrain?.agent?.terminal?.accessHashPreview || 'hidden')}.</span></article>
-        <article class="is-ok"><strong>${Number(state.repairBrain?.agent?.plans || 0)} repair plans</strong><span>${Number(state.repairBrain?.agent?.sandboxVerifiedPlans || 0)} sandbox-verified · ${Number(state.repairBrain?.agent?.sandboxBlockedPlans || 0)} blocked before production.</span></article>
-        <article class="is-ok"><strong>${Number(state.repairBrain?.knowledge?.diagnosticSignals || 0)} crash signals</strong><span>${Number(state.repairBrain?.knowledge?.rules || 0)} cause families across game, world, network, storage, runtime, and VPS health.</span></article>
-        <article class="is-ok"><strong>${Number(state.repairBrain?.playbooks?.count || 0)} repair playbooks</strong><span>${Number(state.repairBrain?.playbooks?.replays || 0)} automatic replay(s) completed.</span></article>
-        <article class="${state.repairBrain?.commands?.validated ? 'is-ok' : ''}"><strong>${Number(state.repairBrain?.commands?.observed || 0)} terminal fixes observed</strong><span>${Number(state.repairBrain?.commands?.validated || 0)} stability-validated; ${Number(state.repairBrain?.commands?.safe || 0)} eligible for safe replay.</span></article>
-        <article class="${state.repairBrain?.database?.ok ? 'is-ok' : 'is-bad'}"><strong>SQLite ${state.repairBrain?.database?.ok ? 'verified' : 'warning'}</strong><span>${escapeHtml(state.repairBrain?.database?.quickCheck || 'not checked')} · ${Number(state.repairBrain?.database?.foreignKeyErrors || 0)} foreign-key issue(s).</span></article>
-      </div>
-      <div class="plugin-list">
-        ${(state.repairBrain?.agent?.recentPlans || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)} · ${escapeHtml(item.title)}</strong><div class="muted">${escapeHtml(item.risk || 'unknown risk')} · score ${Number(item.score || 0).toFixed(2)} · ${item.sandboxChecks?.filter((check) => check.ok).length || 0}/${item.sandboxChecks?.length || 0} sandbox checks</div></div><span class="badge ${item.sandboxOk ? 'is-on' : ''}">${escapeHtml(item.status)}</span></div>`).join('')}
-        ${(state.repairBrain?.agent?.recentEpisodes || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)} · agent episode ${item.id}</strong><div class="muted">${escapeHtml(item.diagnoses?.[0]?.summary || 'VPS and server evidence analyzed')} · ${Math.round(Number(item.confidence || 0) * 100)}% confidence · reward ${Number(item.reward || 0)}</div></div><div class="row-actions"><span class="badge ${item.status === 'validated' ? 'is-on' : ''}">${escapeHtml(item.status)}</span>${state.user?.role === 'owner' && !String(item.feedbackSource || '').startsWith('owner-') ? `<button class="secondary" type="button" data-action="agent-feedback" data-episode-id="${item.id}" data-feedback="helpful">Helpful</button><button class="danger" type="button" data-action="agent-feedback" data-episode-id="${item.id}" data-feedback="wrong">Wrong</button>` : ''}</div></div>`).join('')}
-        ${(state.repairBrain?.recent || []).map((item) => `<div class="plugin-row"><div><strong>${escapeHtml(item.serverName)}</strong><div class="muted">${escapeHtml(item.commandPreview)} · exit ${item.exitCode ?? 'pending'}</div></div><span class="badge ${item.validated ? 'is-on' : ''}">${item.validated ? `learned · ${item.replayCount} replay(s)` : item.safeToReplay ? 'validating' : 'evidence only'}</span></div>`).join('') || ((state.repairBrain?.agent?.recentEpisodes || []).length ? '' : '<p class="empty-state">Validated repair and agent learning episodes will appear here.</p>')}
-      </div>
     `;
   }
 
   if (elements.auditPanel) {
     elements.auditPanel.innerHTML = `
-      <div class="section-head"><div><p class="eyebrow">Last Checked</p><h2>Recent logins</h2></div></div>
+      <div class="section-head"><div><p class="eyebrow">Audit</p><h2>Recent logins</h2></div></div>
       <div class="audit-list">
         ${state.loginEvents.map((event) => `
           <article class="audit-row">
-            <div><strong>${escapeHtml(event.email)}</strong><span>${escapeHtml(event.browser)} · ${escapeHtml(event.device)}</span></div>
+            <div><strong>${escapeHtml(event.email)}</strong><span>${escapeHtml(event.browser)} - ${escapeHtml(event.device)}</span></div>
             <code>${escapeHtml(event.ip || 'unknown IP')}</code>
             <time>${escapeHtml(formatPanelDate(event.createdAt))}</time>
           </article>
@@ -2649,7 +2685,6 @@ async function renderSecurity(forceHealth = false) {
     `;
   }
 }
-
 function renderSoftwareChoices() {
   const type = elements.serverForm.type.value;
   const compatible = state.softwareCatalog.filter((software) => software.edition === type);
@@ -2818,6 +2853,7 @@ function setView(view) {
     showToast('That section is not included in this account access role.');
     return;
   }
+  saveActiveViewScroll();
   state.activeView = view;
   if (view === 'console') {
     consoleStickToBottom = true;
@@ -2825,10 +2861,27 @@ function setView(view) {
   renderView();
   renderActiveView().catch((error) => showToast(error.message));
   window.requestAnimationFrame(() => {
-    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
-    if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
-    document.querySelector('.workspace')?.scrollTo?.({ top: 0, left: 0, behavior: 'auto' });
+    restoreActiveViewScroll();
   });
+}
+
+function workspaceScroller() {
+  return document.querySelector('.workspace') || document.scrollingElement || document.documentElement;
+}
+
+function saveActiveViewScroll() {
+  const scroller = workspaceScroller();
+  state.viewScroll[state.activeView] = {
+    windowTop: window.scrollY || document.documentElement.scrollTop || 0,
+    workspaceTop: scroller?.scrollTop || 0,
+  };
+}
+
+function restoreActiveViewScroll() {
+  const saved = state.viewScroll[state.activeView] || { windowTop: 0, workspaceTop: 0 };
+  window.scrollTo({ top: saved.windowTop || 0, left: 0, behavior: 'auto' });
+  const scroller = workspaceScroller();
+  if (scroller) scroller.scrollTo?.({ top: saved.workspaceTop || 0, left: 0, behavior: 'auto' });
 }
 
 function accessName(level) {
@@ -2905,26 +2958,21 @@ function formatConsoleLine(line) {
   ));
 }
 
-// ===== BACKUP DATE FORMATTER (12-HOUR FORMAT) =====
 function formatBackupDate(timestamp) {
   return formatPanelDate(timestamp, { seconds: false });
 }
 
-// ===== FORMAT BACKUP FILENAME FOR DISPLAY =====
 function formatBackupDisplayName(filename) {
   if (!filename) return 'Unknown';
 
-  // Remove .zip extension
   const name = filename.replace(/\.zip$/, '');
 
-  // Try to parse the filename: server-backup-auto-25-12-2026--10-30-PM
   const parts = name.split('--');
   if (parts.length === 2) {
     const [datePart, timePart] = parts;
     const dateSegments = datePart.split('-');
     const timeSegments = timePart.split('-');
 
-    // Extract date: 25-12-2026 -> Dec 25, 2026
     const day = dateSegments[dateSegments.length - 3] || '';
     const month = dateSegments[dateSegments.length - 2] || '';
     const year = dateSegments[dateSegments.length - 1] || '';
@@ -2932,7 +2980,6 @@ function formatBackupDisplayName(filename) {
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const monthName = monthNames[parseInt(month) - 1] || month;
 
-    // Extract time: 10-30-PM -> 10:30 PM
     const hour = timeSegments[0] || '';
     const minute = timeSegments[1] || '';
     const ampm = timeSegments[2] || '';
@@ -2940,26 +2987,26 @@ function formatBackupDisplayName(filename) {
     return `${monthName} ${parseInt(day)}, ${year} | ${parseInt(hour)}:${minute} ${ampm}`;
   }
 
-  // Fallback: just show the name without extension
   return name;
 }
 
 function startRefreshLoop() {
   window.clearInterval(state.refreshTimer);
+  window.clearInterval(state.consoleFastTimer);
+  state.consoleFastTimer = window.setInterval(() => {
+    if (!state.user || !uiPreferences.liveRefresh || state.activeView !== 'console') return;
+    renderConsole().catch(() => {});
+  }, 650);
   state.refreshTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
-    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy ? 1500 : 5000);
-    if (state.activeView === 'console') {
-      renderConsole().catch(() => {});
-      if (!dueStatus) return;
-    }
+    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy || state.activeView === 'console' ? 1200 : 2500);
     if (dueStatus || liveBusy) {
       state.statusRefreshAt = Date.now();
       refreshServerStatusOnly().catch(() => {});
     }
     if (state.activeView === 'files') renderUploadSessions().catch(() => {});
-  }, 1500);
+  }, 900);
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -3082,31 +3129,8 @@ elements.modrinthForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const server = activeServer();
   if (!server) return showToast('Create a server first.');
-  if (server.softwareKey === 'bedrock-vanilla') {
-    elements.modrinthGrid.innerHTML = '<p class="empty-state">Bedrock Dedicated Server supports resource/behavior packs, not plugins. Use PocketMine for Bedrock plugins.</p>';
-    return;
-  }
-  const payload = formData(elements.modrinthForm);
   try {
-    const source = server.softwareKey === 'pocketmine' ? 'poggit' : 'modrinth';
-    const data = await api(`/api/${source}/search?serverId=${server.id}&query=${encodeURIComponent(payload.query || '')}`);
-    elements.modrinthGrid.innerHTML = data.hits.map((project) => `
-      <article class="modrinth-card">
-        <div class="status-row">
-          <strong>${escapeHtml(project.title)}</strong>
-          <span class="pill">${Number(project.downloads || 0).toLocaleString()} downloads</span>
-        </div>
-        <p>${escapeHtml(project.description || '')}</p>
-        ${project.iconUrl ? `<img class="plugin-icon" src="${escapeHtml(project.iconUrl)}" alt="">` : ''}
-        <div class="install-track" hidden><span style="width:0%"></span></div>
-        <button type="button"
-          data-action="${source === 'poggit' ? 'install-poggit' : 'install-modrinth'}"
-          data-project-id="${escapeHtml(project.projectId || '')}"
-          data-project-name="${escapeHtml(project.title)}"
-          data-download-url="${escapeHtml(project.downloadUrl || '')}"
-          data-file-name="${escapeHtml(project.fileName || '')}">Install</button>
-      </article>
-    `).join('') || `<p class="empty-state">${escapeHtml(data.message || `No ${source} plugins found. Try a broader search.`)}</p>`;
+    await loadPluginMarketplace();
   } catch (error) {
     showToast(error.message);
   }
@@ -3625,21 +3649,34 @@ window.addEventListener('resize', () => {
   });
 });
 
-function applyAdminPermissionPreset(level = elements.adminForm.accessLevel.value) {
+function applyAdminPermissionPreset(level = elements.adminForm.accessLevel?.value || 5) {
   const selected = new Set(ADMIN_PERMISSION_PRESETS[Number(level)] || []);
   elements.adminForm.querySelectorAll('[name="permissionKey"]').forEach((checkbox) => {
     checkbox.checked = selected.has(checkbox.value);
   });
 }
 
-elements.adminForm.accessLevel.addEventListener('change', () => applyAdminPermissionPreset());
+if (elements.adminForm.accessLevel?.tagName === 'SELECT') {
+  elements.adminForm.accessLevel.addEventListener('change', () => applyAdminPermissionPreset());
+}
+
+function accessLevelForPermissionKeys(keys) {
+  const selected = new Set(keys || []);
+  if (selected.size === 0) return 0;
+  if ([CAPABILITIES.ADMINS_MANAGE, CAPABILITIES.SECURITY_VIEW, CAPABILITIES.SETTINGS_MANAGE].some((key) => selected.has(key))) return 100;
+  if ([CAPABILITIES.FILES_MANAGE, CAPABILITIES.BACKUPS_MANAGE, CAPABILITIES.PLUGINS_MANAGE].some((key) => selected.has(key))) return 80;
+  if ([CAPABILITIES.SERVER_MANAGE, CAPABILITIES.SOFTWARE_MANAGE, CAPABILITIES.PROPERTIES_MANAGE, CAPABILITIES.WHITELIST_MANAGE, CAPABILITIES.OPTIMIZER_MANAGE, CAPABILITIES.NETWORK_MANAGE].some((key) => selected.has(key))) return 60;
+  if (selected.has(CAPABILITIES.CONSOLE_COMMAND)) return 40;
+  if (selected.has(CAPABILITIES.CONSOLE_VIEW)) return 20;
+  return 5;
+}
 
 elements.adminForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const payload = formData(elements.adminForm);
-  payload.accessLevel = Number(payload.accessLevel);
   payload.permissionKeys = [...elements.adminForm.querySelectorAll('[name="permissionKey"]:checked')]
     .map((checkbox) => checkbox.value);
+  payload.accessLevel = accessLevelForPermissionKeys(payload.permissionKeys);
   try {
     await api('/api/users', { method: 'POST', body: JSON.stringify(payload) });
     elements.adminForm.reset();
@@ -3663,7 +3700,6 @@ document.addEventListener('click', async (event) => {
     const serverCard = event.target.closest('[data-server-id]');
     if (serverCard) state.activeServerId = Number(serverCard.dataset.serverId);
 
-        // ===== SAVE TIMEZONE =====
     if (action === 'save-timezone') {
       const select = document.getElementById('userTimezoneSelect');
       const status = document.getElementById('timezoneStatus');
@@ -3906,6 +3942,10 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'select-server') return setView('software');
     if (action === 'open-console') return setView('console');
+    if (action === 'open-files') {
+      filePath = '';
+      return setView('files');
+    }
     if (action === 'create-template-server') {
       const key = actionTarget.dataset.templateKey;
       const name = document.querySelector(`[data-template-name="${CSS.escape(key)}"]`)?.value || '';
@@ -4030,16 +4070,16 @@ document.addEventListener('click', async (event) => {
       actionTarget.disabled = true;
       try {
         showToast('Running quick panel speed test...');
-        const downloadSize = 2 * 1024 * 1024;
+        const downloadSize = 512 * 1024;
         const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 9000);
+        const timeout = window.setTimeout(() => controller.abort(), 3500);
         const downloadStart = performance.now();
         const downloadBuffer = await fetch(`/api/network/download-test?size=${downloadSize}&t=${Date.now()}`, { credentials: 'same-origin', signal: controller.signal }).then((res) => {
           if (!res.ok) throw new Error('Download speed test failed.');
           return res.arrayBuffer();
         });
         const downloadSeconds = Math.max(0.001, (performance.now() - downloadStart) / 1000);
-        const uploadBuffer = new Uint8Array(1024 * 1024).fill(90);
+        const uploadBuffer = new Uint8Array(256 * 1024).fill(90);
         const uploadStart = performance.now();
         const uploadResult = await fetch('/api/network/upload-test', {
           method: 'POST',

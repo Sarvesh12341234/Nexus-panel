@@ -162,7 +162,31 @@ function repairFullAccessEnabled() {
 }
 
 function pruneFixedLogs() {
-  db.prepare('DELETE FROM fixed_logs WHERE created_at < ?').run(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  db.prepare('DELETE FROM fixed_logs WHERE created_at < ?').run(Date.now() - 24 * 60 * 60 * 1000);
+  pruneRepairAgentHistory();
+}
+
+function pruneRepairAgentHistory() {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const stale = db.prepare(`
+    SELECT id, confidence, feedback_source
+    FROM repair_agent_episodes
+    WHERE created_at < ?
+      AND COALESCE(feedback_source, '') NOT LIKE 'owner-%'
+      AND COALESCE(feedback_source, '') NOT LIKE 'auto-expired-%'
+    ORDER BY id ASC
+    LIMIT 40
+  `).all(cutoff);
+  for (const episode of stale) {
+    const confidence = Number(episode.confidence || 0);
+    const reward = confidence >= 0.5 ? 1 : -1;
+    repairAgent.feedback(episode.id, reward, reward > 0 ? 'auto-expired-helpful' : 'auto-expired-wrong');
+  }
+  const oldPlans = db.prepare('SELECT id FROM repair_agent_episodes WHERE created_at < ?').all(cutoff).map((row) => row.id);
+  if (!oldPlans.length) return;
+  const placeholders = oldPlans.map(() => '?').join(',');
+  db.prepare(`DELETE FROM repair_agent_plans WHERE episode_id IN (${placeholders})`).run(...oldPlans);
+  db.prepare(`DELETE FROM repair_agent_episodes WHERE id IN (${placeholders})`).run(...oldPlans);
 }
 
 function logFixed({ serverId = null, category = 'panel', title = '', detail = '', source = 'panel' }) {
@@ -2135,7 +2159,6 @@ async function createServerBackupUnlocked(server, reason = 'manual') {
   const archiveName = `${serverName}-backup-${reason}-${backupTimestamp(now, timeZone)}.zip`;
   const archivePath = path.join(backupsDir, archiveName);
 
-  // ===== EXISTING BACKUP LOGIC =====
   const excludedTopLevel = new Set(['archives', 'backup', 'backups', 'backupfolder', 'software', 'runtime']);
   const entries = (await fs.promises.readdir(root, { withFileTypes: true }))
     .filter((entry) => !excludedTopLevel.has(entry.name.toLowerCase()))
@@ -3480,8 +3503,8 @@ app.get('/api/overview', (req, res) => {
     loginEvents: req.user && hasPermission(req.user, capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS) ? loginEventRows(10) : [],
     health: req.user && hasPermission(req.user, capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS) ? (fs.existsSync(healthPath) ? readHealthFile() : null) : null,
     optimizer: req.user && hasPermission(req.user, capabilities.OPTIMIZER_MANAGE, permissions.MANAGE_SERVERS) ? optimizerStatus() : null,
-    adaptiveInsights: req.user ? adaptiveInsights(req.user, req) : [],
-    repairBrain: req.user && hasPermission(req.user, capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS) ? repairBrainPayload() : null,
+    adaptiveInsights: [],
+    repairBrain: null,
   };
 
   res.json(payload);
@@ -3513,7 +3536,6 @@ app.post('/api/user/timezone', requirePermission(capabilities.TIMEZONE_MANAGE, p
   try {
     const { timezone } = req.body;
     if (!timezone) return res.status(400).json({ error: 'Timezone is required' });
-    // Validate timezone
     try {
       Intl.DateTimeFormat(undefined, { timeZone: timezone });
     } catch {
@@ -3762,7 +3784,7 @@ app.get('/api/fixed/logs', requirePermission(capabilities.SECURITY_VIEW, permiss
     createdAt: row.created_at,
   }));
   res.json({
-    retentionDays: 2,
+    retentionDays: 1,
     logs,
     consoleLogPolicy: {
       memoryLinesPerServer: 600,
@@ -4935,10 +4957,13 @@ app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
   if (software && !['paper', 'purpur'].includes(software.key)) {
     return res.json({ hits: [], source: 'modrinth', message: 'Modrinth plugins are available for Paper/Purpur Java servers.' });
   }
-  const loader = req.query.loader || (software && ['paper', 'purpur'].includes(software.key) ? 'paper' : '');
+  const loader = String(req.query.loader || (software && ['paper', 'purpur'].includes(software.key) ? 'paper' : '')).trim().toLowerCase();
+  const projectType = ['mod', 'plugin'].includes(String(req.query.projectType || '').toLowerCase())
+    ? String(req.query.projectType).toLowerCase()
+    : 'plugin';
   const version = String(req.query.version || server?.software_version || '').trim();
   const query = String(req.query.query || '').trim();
-  const facets = [['project_type:plugin'], ['server_side:required', 'server_side:optional']];
+  const facets = [[`project_type:${projectType}`], ['server_side:required', 'server_side:optional']];
   if (loader) facets.push([`categories:${loader}`]);
   if (version && !['latest', 'manual'].includes(version) && req.query.strictVersion === '1') facets.push([`versions:${version}`]);
 
@@ -5938,7 +5963,7 @@ async function runAdaptiveMaintenance() {
     const normalized = JSON.stringify(ranges);
     if (normalized !== upload.chunks_json || uploadedBytes !== upload.uploaded_bytes) {
       db.prepare('UPDATE upload_sessions SET chunks_json = ?, uploaded_bytes = ?, message = ? WHERE server_id = ? AND relative_path = ?')
-        .run(normalized, uploadedBytes, 'Adaptive engine normalized upload ranges', upload.server_id, upload.relative_path);
+        .run(normalized, uploadedBytes, 'Maintenance normalized upload ranges', upload.server_id, upload.relative_path);
       actions.push(`Normalized upload ${upload.relative_path}`);
     }
     const updatedAt = new Date(`${upload.updated_at}Z`).getTime();
@@ -5982,9 +6007,9 @@ async function runAdaptiveMaintenance() {
   if (actions.length) {
     logFixed({
       category: 'maintenance',
-      title: 'Adaptive maintenance completed',
+      title: 'Maintenance completed',
       detail: actions.slice(0, 20).join('\n'),
-      source: 'adaptive-engine',
+      source: 'panel-maintenance',
     });
   }
   return { ok: true, ...adaptiveMaintenanceStatus };
@@ -5998,11 +6023,11 @@ function liveAgentDiagnosisKey(diagnostics) {
     .join('|');
 }
 
-function recentLiveAgentEpisode(serverId, signature, diagnosisKey, cooldownMs = 6 * 60 * 60 * 1000) {
+function recentLiveAgentEpisode(serverId, signature, diagnosisKey, cooldownMs = 24 * 60 * 60 * 1000) {
   const rows = db.prepare(`
     SELECT id, diagnoses_json, created_at
     FROM repair_agent_episodes
-    WHERE server_id = ? AND signature = ? AND status = 'live-observed' AND created_at >= ?
+    WHERE server_id = ? AND signature = ? AND status IN ('live-observed', 'validated', 'failed') AND created_at >= ?
     ORDER BY created_at DESC
     LIMIT 12
   `).all(Number(serverId), String(signature || ''), Date.now() - cooldownMs);
