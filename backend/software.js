@@ -1,4 +1,5 @@
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { displayPath, softwareRoot } = require('./paths');
 
 const SOFTWARE = [
@@ -128,19 +129,67 @@ function softwareCatalog() {
   }));
 }
 
+function parseVersionParts(value) {
+  return String(value || '').split('.').map((part) => Number(part)).filter((part) => Number.isFinite(part));
+}
+
+function compareParts(left, right) {
+  const a = parseVersionParts(left);
+  const b = parseVersionParts(right);
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    const av = a[index] || 0;
+    const bv = b[index] || 0;
+    if (av > bv) return 1;
+    if (av < bv) return -1;
+  }
+  return 0;
+}
+
+function parseJavaMajor(output) {
+  const text = String(output || '');
+  const legacy = text.match(/version\s+"1\.(\d+)/i)?.[1];
+  if (legacy) return Number(legacy);
+  const modern = text.match(/version\s+"(\d+)(?:[._]\d+)?/i)?.[1];
+  if (modern) return Number(modern);
+  return 0;
+}
+
+function installedJavaMajor() {
+  const result = spawnSync('java', ['-version'], { encoding: 'utf8', windowsHide: true });
+  if (result.error || result.status !== 0) return 0;
+  return parseJavaMajor(`${result.stderr || ''}\n${result.stdout || ''}`);
+}
+
+function requiredJavaMajorForMinecraftVersion(version) {
+  const value = String(version || '').trim();
+  if (/^\d{2,}\./.test(value)) return 25;
+  if (/^\d+w/i.test(value)) return 25;
+  if (!/^1\.\d+(?:\.\d+)?$/.test(value)) return 21;
+  if (compareParts(value, '1.20.5') >= 0) return 21;
+  if (compareParts(value, '1.18') >= 0) return 17;
+  if (compareParts(value, '1.17') >= 0) return 16;
+  return 8;
+}
+
+function hostJavaCompatibleVersions(versions) {
+  const javaMajor = installedJavaMajor() || 21;
+  return versions.filter((version) => requiredJavaMajorForMinecraftVersion(version) <= javaMajor);
+}
+
 async function minecraftVersions() {
   const manifest = await cached('mojang-version-manifest', () => fetchJson('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'));
-  return manifest.versions
+  return hostJavaCompatibleVersions(manifest.versions
     .filter((version) => version.type === 'release')
-    .map((version) => version.id);
+    .map((version) => version.id));
 }
 
 async function fabricGameVersions() {
   const versions = await cached('fabric-game-versions', () => fetchJson('https://meta.fabricmc.net/v2/versions/game'));
-  return versions
+  return hostJavaCompatibleVersions(versions
     .filter((version) => version.stable)
     .map((version) => String(version.version || '').trim())
-    .filter(Boolean);
+    .filter(Boolean));
 }
 
 async function latestFabricLoader() {
@@ -172,7 +221,7 @@ async function forgeArtifactVersions() {
 
 async function forgeMinecraftVersions() {
   const versions = await forgeArtifactVersions();
-  return [...new Set(versions.map((version) => version.split('-')[0]).filter(Boolean))];
+  return hostJavaCompatibleVersions([...new Set(versions.map((version) => version.split('-')[0]).filter(Boolean))]);
 }
 
 async function resolveForgeArtifact(requestedVersion) {
@@ -194,12 +243,14 @@ async function softwareVersions(key) {
     const versions = [...new Set((Array.isArray(groupedVersions) ? groupedVersions : [])
       .map((version) => String(version || '').trim())
       .filter(Boolean))];
-    return versions.length ? versions : ['latest'];
+    const compatible = hostJavaCompatibleVersions(versions);
+    return compatible.length ? compatible : ['manual'];
   }
 
   if (software.versionMode === 'purpur') {
     const project = await cached('purpur-project', () => fetchJson('https://api.purpurmc.org/v2/purpur'));
-    return [...project.versions].reverse();
+    const compatible = hostJavaCompatibleVersions([...project.versions].reverse());
+    return compatible.length ? compatible : ['manual'];
   }
 
   if (software.versionMode === 'fabric') return fabricGameVersions();
@@ -384,7 +435,9 @@ module.exports = {
   compatibleSoftware,
   defaultSoftware,
   findSoftware,
+  installedJavaMajor,
   pluginKindForFile,
+  requiredJavaMajorForMinecraftVersion,
   resolveDownload,
   clearSoftwareVersionCache,
   softwareCatalog,

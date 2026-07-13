@@ -18,7 +18,7 @@ const { RepairWebResearch } = require('./repair_web');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
 const { assertInside, backupsRoot, displayPath, ensureServerDirs, findServerRoot, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
-const { clearSoftwareVersionCache, defaultSoftware, findSoftware, pluginKindForFile, resolveDownload, softwareCatalog, softwareVersions } = require('./software');
+const { clearSoftwareVersionCache, defaultSoftware, findSoftware, installedJavaMajor, pluginKindForFile, requiredJavaMajorForMinecraftVersion, resolveDownload, softwareCatalog, softwareVersions } = require('./software');
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { profileForServer, writeProfile } = require('./nexus_mark');
 const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer } = require('./runtime');
@@ -2255,12 +2255,15 @@ function executableCandidates(server, software) {
     server.server_path = root;
     appendLog(server.id, `[NexusPanel] Recovered server root: ${displayPath(root)}`);
   }
-  return [
-    server.executable_path,
+  const preferred = [
     path.join(root, 'software', software.executable),
     path.join(root, software.executable),
     findFile(root, software.executable),
   ].filter(Boolean);
+  const stored = server.executable_path && path.basename(server.executable_path) === software.executable
+    ? [server.executable_path]
+    : [];
+  return [...preferred, ...stored].filter(Boolean);
 }
 
 function preferredExecutablePath(server, software) {
@@ -3531,23 +3534,29 @@ function installSteamcmdRequirement() {
   throw new Error('SteamCMD is required but no supported package manager was found.');
 }
 
-function ensureSoftwareRequirements(software, serverId, onProgress) {
+function ensureSoftwareRequirements(software, serverId, onProgress, version = 'latest') {
   if (software.edition === 'java') {
-    if (commandWorks('java', ['-version'])) return { ok: true, message: 'Java already installed.' };
+    let javaMajor = installedJavaMajor();
     if (process.platform !== 'linux') {
-      throw new Error('Java runtime was not found. On Windows install Java 21+ manually, then restart NexusPanel.');
+      if (!javaMajor) throw new Error('Java runtime was not found. Install Java 21+ manually, then restart NexusPanel.');
+    } else if (!javaMajor) {
+      onProgress(6, 'Java missing. Installing Java 21 runtime');
+      const installed = installLinuxPackage({
+        apt: ['openjdk-21-jre-headless'],
+        dnf: ['java-21-openjdk-headless'],
+        pacman: ['jdk21-openjdk'],
+      });
+      javaMajor = installedJavaMajor();
+      if (!installed || !javaMajor) {
+        throw new Error('Java auto-install did not complete. Install Java 21+ and retry.');
+      }
+      appendLog(serverId, '[NexusPanel] Requirement installed: Java 21 runtime.');
     }
-    onProgress(6, 'Java missing. Installing Java 21 runtime');
-    const installed = installLinuxPackage({
-      apt: ['openjdk-21-jre-headless'],
-      dnf: ['java-21-openjdk-headless'],
-      pacman: ['jdk21-openjdk'],
-    });
-    if (!installed || !commandWorks('java', ['-version'])) {
-      throw new Error('Java auto-install did not complete. Install Java 21+ and retry.');
+    const requiredMajor = requiredJavaMajorForMinecraftVersion(version);
+    if (requiredMajor > javaMajor) {
+      throw new Error(`${software.name} ${version} requires Java ${requiredMajor}, but this VPS is running Java ${javaMajor}. Pick an older Minecraft version from the version list or install Java ${requiredMajor}+ on the VPS.`);
     }
-    appendLog(serverId, '[NexusPanel] Requirement installed: Java 21 runtime.');
-    return { ok: true, message: 'Java 21 runtime installed.' };
+    return { ok: true, message: `Java ${javaMajor} runtime ready.` };
   }
   if (software.key === 'pocketmine') {
     return { ok: true, message: 'PocketMine uses bundled PHP.' };
@@ -4931,7 +4940,7 @@ app.post('/api/servers/:id/software/install', requirePermission(capabilities.SOF
     .then(async (download) => {
       ensureSoftwareRequirements(selectedSoftware, id, (progress, message) => {
         db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);
-      });
+      }, download.version || version);
       if (selectedSoftware.key === 'pocketmine') {
         await installPocketMineRuntime(root, id, (progress, message) => {
           db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);

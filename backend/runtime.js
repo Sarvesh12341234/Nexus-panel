@@ -5,6 +5,7 @@ const { spawnOptions, wrapCommand } = require('./nexus_mark');
 const { hostCpuCount } = require('./system_info');
 const { ensureServerDirs, externalDataRoot } = require('./paths');
 const { processTreeMetrics } = require('./process_metrics');
+const { installedJavaMajor, requiredJavaMajorForMinecraftVersion } = require('./software');
 
 const processes = new Map();
 const logs = new Map();
@@ -149,6 +150,11 @@ function startServer(server, software) {
       ['-version'],
       'Java runtime was not found in PATH. Install Java 21+ (Linux: apt install -y openjdk-21-jre-headless) then restart the server.',
     );
+    const javaMajor = installedJavaMajor();
+    const requiredMajor = requiredJavaMajorForMinecraftVersion(server.software_version || 'latest');
+    if (javaMajor && requiredMajor > javaMajor) {
+      throw new Error(`${software.name} ${server.software_version || 'latest'} requires Java ${requiredMajor}, but this VPS is running Java ${javaMajor}. Reinstall with an older Minecraft version or install Java ${requiredMajor}+ on the VPS.`);
+    }
     command = 'java';
     args = [`-Xmx${dbMemoryMb}M`, '-jar', executable, 'nogui'];
   } else if (software.key === 'pocketmine') {
