@@ -240,6 +240,16 @@ function startBedrockBrowserViewer(config, getState) {
     req.on('close', () => clients.delete(res));
   });
 
+  app.get('/control', (req, res) => {
+    const action = String(req.query.action || '').toLowerCase();
+    const yaw = finiteNumber(req.query.yaw);
+    if (!['forward', 'back', 'left', 'right', 'up', 'down'].includes(action)) {
+      return res.status(400).json({ ok: false, error: 'Invalid movement action.' });
+    }
+    send('control', { action, yaw });
+    res.json({ ok: true, action });
+  });
+
   app.get('/', (_req, res) => {
     res.type('html').send(`<!doctype html>
 <html lang="en">
@@ -257,9 +267,18 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#020712;col
 #reticle:before,#reticle:after{content:"";position:absolute;background:#eaffff;border-radius:2px}
 #reticle:before{left:12px;top:0;width:2px;height:26px}
 #reticle:after{left:0;top:12px;width:26px;height:2px}
-#empty{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:4;text-align:center;padding:12px 15px;background:rgba(2,8,18,.72);border:1px solid rgba(123,211,255,.22);border-radius:8px;display:none}
+#empty{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);z-index:4;text-align:center;padding:12px 15px;background:rgba(2,8,18,.72);border:1px solid rgba(123,211,255,.22);border-radius:8px;display:none}
+#controls{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:5;display:grid;grid-template-columns:54px 54px 54px;grid-template-rows:44px 44px;gap:6px}
+#controls button{border:1px solid rgba(207,250,254,.36);background:rgba(4,18,24,.78);color:#eaffff;border-radius:8px;font:850 16px Inter,Segoe UI,Arial;box-shadow:0 8px 20px rgba(0,0,0,.25)}
+#controls button:active{background:#41e69b;color:#04110b;transform:translateY(1px)}
+#moveForward{grid-column:2;grid-row:1}
+#moveLeft{grid-column:1;grid-row:2}
+#moveBack{grid-column:2;grid-row:2}
+#moveRight{grid-column:3;grid-row:2}
+#verticalControls{position:fixed;right:14px;bottom:14px;z-index:5;display:grid;gap:6px}
+#verticalControls button{width:54px;height:40px;border:1px solid rgba(207,250,254,.36);background:rgba(4,18,24,.78);color:#eaffff;border-radius:8px;font:850 14px Inter,Segoe UI,Arial}
 canvas{display:block;touch-action:none}
-@media(max-width:720px){#hud{font-size:13px;padding:10px 12px}#debug{position:fixed;top:auto;right:10px;left:10px;bottom:10px;max-width:none}#meta,#debug{font-size:11px}}
+@media(max-width:720px){#hud{font-size:13px;padding:10px 12px}#debug{position:fixed;top:auto;right:10px;left:10px;bottom:118px;max-width:none}#meta,#debug{font-size:11px}#verticalControls{right:10px;bottom:14px}}
 </style>
 </head>
 <body>
@@ -267,6 +286,16 @@ canvas{display:block;touch-action:none}
 <div id="debug"></div>
 <div id="reticle"></div>
 <div id="empty">Waiting for decoded Bedrock chunks<br><small>Keep the bot online and move near terrain.</small></div>
+<div id="controls" aria-label="Bot movement controls">
+  <button id="moveForward" type="button" data-move="forward">W</button>
+  <button id="moveLeft" type="button" data-move="left">A</button>
+  <button id="moveBack" type="button" data-move="back">S</button>
+  <button id="moveRight" type="button" data-move="right">D</button>
+</div>
+<div id="verticalControls" aria-label="Bot vertical controls">
+  <button type="button" data-move="up">UP</button>
+  <button type="button" data-move="down">DN</button>
+</div>
 <script>window.__NEXUS_INITIAL__=${jsonScript(getState())};</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -274,6 +303,8 @@ canvas{display:block;touch-action:none}
   const meta = document.getElementById('meta');
   const debug = document.getElementById('debug');
   const empty = document.getElementById('empty');
+  const controls = document.getElementById('controls');
+  const verticalControls = document.getElementById('verticalControls');
   if (!window.THREE) {
     meta.textContent = 'Three.js could not load in this browser.';
     empty.style.display = 'block';
@@ -286,10 +317,15 @@ canvas{display:block;touch-action:none}
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.75));
   renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   document.body.appendChild(renderer.domElement);
   scene.add(new THREE.HemisphereLight(0xbfe7ff, 0x536c42, 1.15));
   const sun = new THREE.DirectionalLight(0xffffff, 1.05);
   sun.position.set(55, 95, 36);
+  sun.castShadow = true;
+  sun.shadow.mapSize.width = 1024;
+  sun.shadow.mapSize.height = 1024;
   scene.add(sun);
   const world = new THREE.Group();
   scene.add(world);
@@ -297,23 +333,40 @@ canvas{display:block;touch-action:none}
   scene.add(entityGroup);
   const fallbackWorld = new THREE.Group();
   const fallbackGround = new THREE.Mesh(
-    new THREE.PlaneGeometry(640, 640, 32, 32),
-    new THREE.MeshLambertMaterial({ color: 0x426f46, side: THREE.DoubleSide })
+    new THREE.PlaneGeometry(768, 768, 48, 48),
+    new THREE.MeshLambertMaterial({ color: 0x5f9f45, side: THREE.DoubleSide })
   );
   fallbackGround.rotation.x = -Math.PI / 2;
   fallbackGround.position.y = 62;
-  const fallbackGrid = new THREE.GridHelper(640, 80, 0xc7f9d4, 0x6ea783);
+  const fallbackGrid = new THREE.GridHelper(768, 96, 0xe5f7d0, 0x386b36);
   fallbackGrid.position.y = 62.025;
+  const fallbackBlocks = new THREE.Group();
+  const fallbackBlockMaterials = [
+    new THREE.MeshLambertMaterial({ color: 0x4f9a3f }),
+    new THREE.MeshLambertMaterial({ color: 0x7a5a38 }),
+    new THREE.MeshLambertMaterial({ color: 0x7f8587 }),
+    new THREE.MeshLambertMaterial({ color: 0xc9bc76 }),
+  ];
+  for (let ix = -7; ix <= 7; ix += 1) {
+    for (let iz = 4; iz <= 18; iz += 1) {
+      if ((ix * 13 + iz * 17) % 5 === 0) continue;
+      const h = 1 + Math.abs((ix * 7 + iz * 3) % 3);
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, h, 1), fallbackBlockMaterials[Math.abs(ix + iz) % fallbackBlockMaterials.length]);
+      mesh.position.set(ix * 3, 62 + h / 2, -iz * 3);
+      fallbackBlocks.add(mesh);
+    }
+  }
   const fallbackHorizon = new THREE.Mesh(
-    new THREE.BoxGeometry(520, 34, 4),
-    new THREE.MeshLambertMaterial({ color: 0x6c8f57 })
+    new THREE.BoxGeometry(620, 46, 6),
+    new THREE.MeshLambertMaterial({ color: 0x5d8d4c })
   );
   fallbackHorizon.position.set(0, 78, -180);
-  fallbackWorld.add(fallbackGround, fallbackGrid, fallbackHorizon);
+  fallbackWorld.add(fallbackGround, fallbackGrid, fallbackBlocks, fallbackHorizon);
   scene.add(fallbackWorld);
   const blockMeshes = new Map();
   const entityMeshes = new Map();
   const materialCache = new Map();
+  const textureCache = new Map();
   let state = window.__NEXUS_INITIAL__ || {};
   let lookYawOffset = 0;
   let lookPitchOffset = 0;
@@ -332,10 +385,51 @@ canvas{display:block;touch-action:none}
     if (name.includes('wood') || name.includes('log')) return 0x8b633e;
     return 0x6fb06a;
   };
+  const textureFor = (color, name) => {
+    const key = color + ':' + String(name || '').slice(0, 32);
+    if (textureCache.has(key)) return textureCache.get(key);
+    const canvas = document.createElement('canvas');
+    canvas.width = 16;
+    canvas.height = 16;
+    const ctx = canvas.getContext('2d');
+    const base = new THREE.Color(color);
+    const shade = (amount) => {
+      const c = base.clone().multiplyScalar(amount);
+      return '#' + c.getHexString();
+    };
+    ctx.fillStyle = shade(1);
+    ctx.fillRect(0, 0, 16, 16);
+    const lower = String(name || '').toLowerCase();
+    const topBand = lower.includes('grass') ? '#6dbd4b' : lower.includes('water') ? '#58a6e8' : shade(1.16);
+    ctx.fillStyle = topBand;
+    ctx.fillRect(0, 0, 16, lower.includes('grass') ? 4 : 2);
+    for (let y = 0; y < 16; y += 2) {
+      for (let x = 0; x < 16; x += 2) {
+        const bit = ((x * 19 + y * 31 + key.length * 7) % 11);
+        ctx.fillStyle = shade(bit < 4 ? 0.82 : bit > 8 ? 1.22 : 1);
+        ctx.fillRect(x, y, 2, 2);
+      }
+    }
+    ctx.strokeStyle = 'rgba(0,0,0,.24)';
+    ctx.strokeRect(0.5, 0.5, 15, 15);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    textureCache.set(key, texture);
+    return texture;
+  };
   const materialFor = (column) => {
     const color = colorFor(column);
-    if (!materialCache.has(color)) materialCache.set(color, new THREE.MeshLambertMaterial({ color }));
-    return materialCache.get(color);
+    const key = color + ':' + String(column.name || '').slice(0, 32);
+    if (!materialCache.has(key)) {
+      materialCache.set(key, new THREE.MeshLambertMaterial({
+        color: 0xffffff,
+        map: textureFor(color, column.name),
+      }));
+    }
+    return materialCache.get(key);
   };
   const setState = (next) => {
     state = next || state || {};
@@ -352,6 +446,8 @@ canvas{display:block;touch-action:none}
       if (!blockMeshes.has(key)) {
         const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, h, 1), materialFor(column));
         mesh.position.set(x + 0.5, y + h / 2, z + 0.5);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         blockMeshes.set(key, mesh);
         world.add(mesh);
       }
@@ -373,8 +469,10 @@ canvas{display:block;touch-action:none}
       if (!mesh) {
         mesh = new THREE.Group();
         const body = new THREE.Mesh(new THREE.BoxGeometry(.65, 1.55, .38), new THREE.MeshLambertMaterial({ color: entity.self ? 0x41e69b : 0x60a5fa }));
+        body.castShadow = true;
         body.position.y = .78;
         const head = new THREE.Mesh(new THREE.BoxGeometry(.62, .62, .62), new THREE.MeshLambertMaterial({ color: entity.self ? 0xa7f3d0 : 0xbfdbfe }));
+        head.castShadow = true;
         head.position.y = 1.82;
         mesh.add(body, head);
         entityMeshes.set(key, mesh);
@@ -400,6 +498,29 @@ canvas{display:block;touch-action:none}
     const entities = Array.isArray(state.entities) ? state.entities : [];
     return entities.find((item) => item.name === state.target) || entities.find((item) => item.self) || entities[0] || { x: 0, y: 64, z: 0 };
   };
+  const currentYaw = () => {
+    const focus = focusEntity();
+    return Number(focus.yaw || 0) * Math.PI / 180 + lookYawOffset;
+  };
+  const moveBot = (action) => {
+    fetch('control?action=' + encodeURIComponent(action) + '&yaw=' + encodeURIComponent(currentYaw()), { cache: 'no-store' }).catch(() => {});
+  };
+  controls.addEventListener('click', (event) => {
+    const action = event.target?.dataset?.move;
+    if (action) moveBot(action);
+  });
+  verticalControls.addEventListener('click', (event) => {
+    const action = event.target?.dataset?.move;
+    if (action) moveBot(action);
+  });
+  addEventListener('keydown', (event) => {
+    if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+    const key = event.key.toLowerCase();
+    const action = key === 'w' ? 'forward' : key === 's' ? 'back' : key === 'a' ? 'left' : key === 'd' ? 'right' : key === ' ' ? 'up' : key === 'shift' ? 'down' : '';
+    if (!action) return;
+    event.preventDefault();
+    moveBot(action);
+  });
   const animate = () => {
     const focus = focusEntity();
     const fx = Number(focus.x || 0);
@@ -410,7 +531,8 @@ canvas{display:block;touch-action:none}
     const pitch = Math.max(-1.18, Math.min(0.92, Number(focus.pitch || 0) * Math.PI / 180 + lookPitchOffset));
     fallbackWorld.position.x = Math.round(fx / 32) * 32;
     fallbackWorld.position.z = Math.round(fz / 32) * 32;
-    fallbackHorizon.position.x = -Math.sin(yaw) * 180;
+    fallbackBlocks.rotation.y = yaw;
+    fallbackHorizon.position.x = Math.sin(yaw) * 180;
     fallbackHorizon.position.z = Math.cos(yaw) * 180;
     fallbackHorizon.rotation.y = yaw;
     camera.position.set(fx, fy, fz);
@@ -462,7 +584,7 @@ canvas{display:block;touch-action:none}
 </html>`);
   });
 
-  const server = app.listen(config.rendererPort, '0.0.0.0', () => {
+  const server = app.listen(config.rendererPort, '127.0.0.1', () => {
     send('renderer', {
       status: 'ready',
       mode: 'bedrock-threejs-viewer',
@@ -777,6 +899,14 @@ function startBedrockBot(config) {
   });
 
   process.on('message', (message) => {
+    if (message?.type === 'local-move' && message.entity) {
+      rememberEntity(message.entity.id || message.entity.name || config.username, {
+        ...message.entity,
+        name: message.entity.name || config.username,
+        self: true,
+      });
+      publishEntities();
+    }
     if (message?.type === 'target') {
       config.target = cleanPlayerName(message.target);
       send('status', { status: 'connected', target: config.target, message: `Following ${config.target || 'overview'}.` });

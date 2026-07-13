@@ -603,6 +603,60 @@ function sendSpectateModeCommand(server, botName) {
   }, server.type === 'bedrock' ? 1800 : 500).unref();
 }
 
+function moveSpectateBot(server, session, action, yaw) {
+  if (!session || server.type !== 'bedrock' || runtimeStatus(server.id) !== 'online') return null;
+  const cleanAction = String(action || '').toLowerCase();
+  if (!['forward', 'back', 'left', 'right', 'up', 'down'].includes(cleanAction)) return null;
+  const botName = session.botName || spectateBotName(server);
+  const target = minecraftCommandTarget(botName);
+  if (!target) return null;
+  const self = (session.entities || []).find((entity) => entity.self)
+    || (session.entities || []).find((entity) => entity.name === botName)
+    || { x: 0, y: 64, z: 0, yaw: 0, pitch: 0, self: true, name: botName, id: botName };
+  const angle = Number.isFinite(Number(yaw)) ? Number(yaw) : (Number(self.yaw || 0) * Math.PI / 180);
+  const step = 2.2;
+  let dx = 0;
+  let dy = 0;
+  let dz = 0;
+  if (cleanAction === 'forward') {
+    dx = Math.sin(angle) * step;
+    dz = Math.cos(angle) * step;
+  } else if (cleanAction === 'back') {
+    dx = -Math.sin(angle) * step;
+    dz = -Math.cos(angle) * step;
+  } else if (cleanAction === 'left') {
+    dx = Math.sin(angle - Math.PI / 2) * step;
+    dz = Math.cos(angle - Math.PI / 2) * step;
+  } else if (cleanAction === 'right') {
+    dx = Math.sin(angle + Math.PI / 2) * step;
+    dz = Math.cos(angle + Math.PI / 2) * step;
+  } else if (cleanAction === 'up') {
+    dy = 1.6;
+  } else if (cleanAction === 'down') {
+    dy = -1.6;
+  }
+  const next = {
+    ...self,
+    id: self.id || botName,
+    name: botName,
+    x: Math.round((Number(self.x || 0) + dx) * 100) / 100,
+    y: Math.round(Math.max(-64, Math.min(512, Number(self.y || 64) + dy)) * 100) / 100,
+    z: Math.round((Number(self.z || 0) + dz) * 100) / 100,
+    yaw: Math.round((angle * 180) / Math.PI),
+    self: true,
+    updatedAt: Date.now(),
+  };
+  const others = (session.entities || []).filter((entity) => entity.id !== next.id && entity.name !== botName);
+  session.entities = sanitizeSpectateEntities([next, ...others]);
+  session.updatedAt = Date.now();
+  try {
+    sendCommand(server.id, `tp ${target} ${next.x} ${next.y} ${next.z}`);
+  } catch (error) {
+    appendLog(server.id, `[NexusPanel] Live Spectate movement failed: ${error.message}`);
+  }
+  return next;
+}
+
 function latestSpectateLogEvent(server, botName) {
   const recentLines = consoleLogs(server.id)
     .filter((line) => String(line).includes(botName))
@@ -817,6 +871,12 @@ function startSpectateSession(server, req = null) {
         packetStats: message.packetStats || previous.packetStats || {},
         updatedAt: Date.now(),
       });
+    }
+    if (message.type === 'control') {
+      const moved = moveSpectateBot(server, session, message.action, message.yaw);
+      if (moved) {
+        try { child.send({ type: 'local-move', entity: moved }); } catch {}
+      }
     }
     if (message.type === 'status') {
       session.status = message.status || session.status;
