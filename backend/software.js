@@ -1,6 +1,5 @@
 const path = require('node:path');
 const { displayPath, softwareRoot } = require('./paths');
-const hybridCache = require('./hybrid_cache');
 
 const SOFTWARE = [
   {
@@ -82,7 +81,7 @@ const cache = new Map();
 async function cached(key, loader) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.time < CACHE_MS) return hit.value;
-  const value = await hybridCache.cachedJson(`software:${key}`, loader, CACHE_SECONDS);
+  const value = await loader();
   cache.set(key, { time: Date.now(), value });
   return value;
 }
@@ -101,7 +100,6 @@ function clearSoftwareVersionCache() {
       cache.delete(key);
     }
   }
-  hybridCache.delPattern('software:*').catch(() => {});
 }
 
 async function fetchJson(url) {

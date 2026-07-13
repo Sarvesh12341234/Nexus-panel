@@ -258,17 +258,11 @@ curl -X POST http://YOUR_PANEL:3000/api/host/provision \
 
 Passwords are hashed with Node's `crypto.scryptSync`. Login sessions are stored in SQLite and sent as signed HTTP-only cookies.
 
-## Hybrid Data Engine
-
-NexusPanel uses SQLite as the durable source of truth for users, sessions, servers, allocations, audit records, and Nexus-Mark limits. Redis is used as an optional hot cache for slow upstream reads such as software versions, Modrinth marketplace cards, Poggit releases, and repeated catalog lookups. If Redis is unavailable, the panel falls back to a bounded in-process cache and keeps running from SQLite.
-
-Linux installers install and start Redis automatically when the host package manager supports it. Systemd services default to `NEXUSPANEL_REDIS_URL=redis://127.0.0.1:6379`; set `NEXUSPANEL_REDIS_ENABLED=0` to force SQLite-only mode.
-
 ## Current MVP
 
 - First-run owner creation
 - Email/password login
-- SQLite users, sessions, server records, and Redis-backed hot cache for external lookups
+- SQLite users, sessions, server records, and bounded in-process cache for external lookups
 - Owner admin creation and access editing
 - Guarded API routes based on numeric permissions
 - Basic server dashboard records for Bedrock and Java

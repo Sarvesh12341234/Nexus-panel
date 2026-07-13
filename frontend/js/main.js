@@ -21,12 +21,14 @@ const state = {
   consoleFastTimer: null,
   statusRefreshAt: 0,
   consolePollAt: {},
+  consoleInFlight: {},
   consoleMetricsAt: {},
   presenceAt: 0,
   serverStatusSignature: '',
   playitTerminalTimer: null,
   pluginSearchSignature: '',
   viewScroll: {},
+  shellScroll: { sidebarTop: 0, navTop: 0 },
 };
 
 const elements = {
@@ -1730,7 +1732,7 @@ function renderSoftware() {
         </div>
         <p>${escapeHtml(software.notes)}</p>
         <div class="stat-row"><span class="muted">Executable</span><code>${escapeHtml(selected ? server.executablePath : software.expectedPath)}</code></div>
-        <label>Version <select data-software-version="${software.key}" ${compatible ? '' : 'disabled'}><option value="latest">Latest</option></select></label>
+        <label>Version <select data-software-version="${software.key}" ${compatible ? '' : 'disabled'}><option value="">Loading versions...</option></select></label>
         <div class="install-track"><span data-live-install-track style="width:${selected ? server.installProgress : 0}%"></span></div>
         <div class="stat-row"><span class="muted" data-live-install-message data-live-message-format="software">${selected ? `${escapeHtml(server.installMessage)} (${escapeHtml(server.softwareVersion || 'latest')})` : 'Not selected'}</span><strong data-live-install-progress>${selected ? `${server.installProgress}%` : ''}</strong></div>
         <button type="button" data-action="install-software" data-software-key="${software.key}" ${compatible ? '' : 'disabled'}>${selected && server.installStatus === 'installed' ? 'Reinstall' : 'Install'}</button>
@@ -1832,6 +1834,9 @@ async function renderConsole() {
   const now = Date.now();
   if (now - Number(state.consolePollAt[serverId] || 0) < 250) return;
   state.consolePollAt[serverId] = now;
+  if (state.consoleInFlight[serverId]) return;
+  state.consoleInFlight[serverId] = true;
+  try {
   const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 1500;
   if (needsMetrics) state.consoleMetricsAt[serverId] = now;
   const [data, metricsBundle] = await Promise.all([
@@ -1869,6 +1874,9 @@ async function renderConsole() {
   if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
   if (metricsBundle) renderConsoleMetrics(server, metricsBundle[0], metricsBundle[1]);
   renderPresence(server).catch(() => {});
+  } finally {
+    state.consoleInFlight[serverId] = false;
+  }
 }
 
 async function loadPluginMarketplace({ featured = false } = {}) {
@@ -2522,7 +2530,6 @@ async function renderOptimizer() {
       ['Applied', optimizer.applied ? 'Yes' : 'No', optimizer.message || 'No optimizer changes applied yet'],
       ['CPU Cores', state.settings?.maxCpuCores || navigator.hardwareConcurrency || 1, 'Used for server allocation limits'],
       ['RAM Ceiling', `${state.settings?.maxAllocatableMemoryMb || 0} MB`, 'Max allocatable memory after host reserve'],
-      ['Data Engine', state.settings?.dataEngine?.connected ? 'SQLite + Redis' : 'SQLite', state.settings?.dataEngine?.connected ? `${state.settings.dataEngine.hits} cache hit(s), ${state.settings.dataEngine.localKeys} warm key(s)` : 'Redis cache is optional and will auto-enable when available'],
       ['Plan Items', commands.commands?.length || 0, 'Safe host tuning commands available'],
       ['Mode', 'No background agent', 'Runs only when you click Optimize'],
     ];
@@ -2595,24 +2602,31 @@ function renderAdmins() {
 
 async function renderFixed() {
   if (!elements.fixedPanel) return;
+  elements.fixedPanel.innerHTML = `
+    <div class="section-head"><div><p class="eyebrow">Fixed</p><h2>Repair and action history</h2></div><button class="secondary" type="button" data-action="refresh-fixed">Refresh</button></div>
+    <p class="empty-state">Loading fixed history...</p>
+  `;
   if (!can(CAPABILITIES.SECURITY_VIEW, state.permissions.MANAGE_ADMINS)) {
-    elements.fixedPanel.innerHTML = '<p class="empty-state">Fixed history needs security access.</p>';
+    elements.fixedPanel.innerHTML = `
+      <div class="section-head"><div><p class="eyebrow">Fixed</p><h2>Repair and action history</h2></div><button class="secondary" type="button" data-action="refresh-fixed">Refresh</button></div>
+      <p class="empty-state">Fixed history needs security access.</p>
+    `;
     return;
   }
   const data = await api('/api/fixed/logs').catch((error) => ({
     error: error.message,
     logs: [],
-    retentionDays: 2,
+    retentionDays: 1,
     consoleLogPolicy: {},
   }));
-  const agentData = await api('/api/repair/agent/status').catch(() => ({ agent: state.repairBrain?.agent || {} }));
+  const agentData = await api('/api/repair/agent/status').catch(() => ({ agent: state.repairBrain?.agent || { terminal: {} } }));
   const agent = agentData.agent || {};
   const terminal = agent.terminal || {};
   const policy = data.consoleLogPolicy || {};
   elements.fixedPanel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Fixed</p><h2>Repair and action history</h2></div><button class="secondary" type="button" data-action="refresh-fixed">Refresh</button></div>
     <div class="quick-stats">
-      <article><span>Retention</span><strong>${Number(data.retentionDays || 2)} days</strong></article>
+      <article><span>Retention</span><strong>${Number(data.retentionDays || 1)} day${Number(data.retentionDays || 1) === 1 ? '' : 's'}</strong></article>
       <article><span>Console memory cap</span><strong>${Number(policy.memoryLinesPerServer || 600)} lines</strong></article>
       <article><span>Disk log rotation</span><strong>${formatBytes(Number(policy.diskRotateBytes || 4 * 1024 * 1024))}</strong></article>
       <article><span>Lag risk</span><strong>${escapeHtml(policy.lagRisk || 'low')}</strong></article>
@@ -2656,8 +2670,23 @@ async function renderFixed() {
 
 async function renderSecurity(forceHealth = false) {
   if (!can(CAPABILITIES.SECURITY_VIEW, state.permissions.MANAGE_ADMINS)) {
-    if (elements.auditPanel) elements.auditPanel.innerHTML = '<p class="empty-state">Security audit needs owner/admin access.</p>';
+    const message = '<p class="empty-state">Security audit needs owner/admin access.</p>';
+    if (elements.healthPanel) elements.healthPanel.innerHTML = message;
+    if (elements.auditPanel) elements.auditPanel.innerHTML = message;
     return;
+  }
+  if (elements.healthPanel) {
+    elements.healthPanel.innerHTML = `
+      <div class="section-head">
+        <div><p class="eyebrow">Security</p><h2>Loading checks...</h2></div>
+        <div class="row-actions">
+          <button class="secondary" type="button" data-action="database-snapshot">Snapshot DB</button>
+          <button class="secondary" type="button" data-action="ddos-scan">DDoS scan</button>
+          <button type="button" data-action="run-health-check">Run check now</button>
+        </div>
+      </div>
+      <p class="empty-state">Loading security status...</p>
+    `;
   }
 
   const [audit, health] = await Promise.all([
@@ -2715,12 +2744,22 @@ async function hydrateCreateVersionSelect() {
   if (!key || key === lastCreateSoftwareKey) return;
   lastCreateSoftwareKey = key;
   const versions = await getSoftwareVersions(key);
-  elements.softwareVersionSelect.innerHTML = versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('');
+  elements.softwareVersionSelect.innerHTML = versions.length
+    ? versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('')
+    : '<option value="manual">Version lookup failed - manual</option>';
 }
 
 async function getSoftwareVersions(key, force = false) {
   if (!force && versionCache.has(key)) return versionCache.get(key);
-  const versions = await api(`/api/software/${encodeURIComponent(key)}/versions`).then((data) => data.versions).catch(() => ['latest']);
+  let versions = [];
+  try {
+    const data = await api(`/api/software/${encodeURIComponent(key)}/versions`);
+    versions = Array.isArray(data.versions) ? data.versions.filter(Boolean) : [];
+  } catch (error) {
+    showToast(`Version lookup failed for ${key}: ${error.message}`);
+    return versionCache.get(key) || [];
+  }
+  if (!versions.length) versions = ['manual'];
   versionCache.set(key, versions);
   return versions;
 }
@@ -2731,8 +2770,10 @@ async function hydrateSoftwareVersionSelects() {
     const key = select.dataset.softwareVersion;
     const selected = select.value;
     const versions = await getSoftwareVersions(key);
-    select.innerHTML = versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('');
-    select.value = versions.includes(selected) ? selected : (versions[0] || 'latest');
+    select.innerHTML = versions.length
+      ? versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('')
+      : '<option value="manual">Version lookup failed - manual</option>';
+    select.value = versions.includes(selected) ? selected : (versions[0] || 'manual');
   }));
 }
 
@@ -2870,6 +2911,7 @@ function setView(view) {
     return;
   }
   saveActiveViewScroll();
+  saveShellScroll();
   state.activeView = view;
   if (view === 'console') {
     consoleStickToBottom = true;
@@ -2878,6 +2920,7 @@ function setView(view) {
   renderActiveView().catch((error) => showToast(error.message));
   window.requestAnimationFrame(() => {
     restoreActiveViewScroll();
+    restoreShellScroll();
   });
 }
 
@@ -2898,6 +2941,27 @@ function restoreActiveViewScroll() {
   window.scrollTo({ top: saved.windowTop || 0, left: 0, behavior: 'auto' });
   const scroller = workspaceScroller();
   if (scroller) scroller.scrollTo?.({ top: saved.workspaceTop || 0, left: 0, behavior: 'auto' });
+}
+
+function shellScrollTargets() {
+  return {
+    sidebar: document.querySelector('.sidebar'),
+    nav: document.querySelector('.sidebar > .nav-list'),
+  };
+}
+
+function saveShellScroll() {
+  const { sidebar, nav } = shellScrollTargets();
+  state.shellScroll = {
+    sidebarTop: sidebar?.scrollTop || 0,
+    navTop: nav?.scrollTop || 0,
+  };
+}
+
+function restoreShellScroll() {
+  const { sidebar, nav } = shellScrollTargets();
+  if (sidebar) sidebar.scrollTop = state.shellScroll.sidebarTop || 0;
+  if (nav) nav.scrollTop = state.shellScroll.navTop || 0;
 }
 
 function accessName(level) {
@@ -3012,17 +3076,17 @@ function startRefreshLoop() {
   state.consoleFastTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh || state.activeView !== 'console') return;
     renderConsole().catch(() => {});
-  }, 650);
+  }, 250);
   state.refreshTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
-    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy || state.activeView === 'console' ? 1200 : 2500);
+    const dueStatus = Date.now() - state.statusRefreshAt > (liveBusy || state.activeView === 'console' ? 500 : 1800);
     if (dueStatus || liveBusy) {
       state.statusRefreshAt = Date.now();
       refreshServerStatusOnly().catch(() => {});
     }
     if (state.activeView === 'files') renderUploadSessions().catch(() => {});
-  }, 900);
+  }, 500);
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
