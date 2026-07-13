@@ -259,6 +259,10 @@ class BedrockWorldAdapter {
       if (!info) return null;
       return normalizePaletteBlock(info.palette[info.storage.get(x, y & 0xf, z)]);
     };
+    const isSolidAt = (x, y, z) => {
+      if (x < 0 || x > 15 || z < 0 || z > 15 || y < minY || y > maxY) return false;
+      return Boolean(readFast(x, y, z)?.color);
+    };
 
     const addBlock = (x, y, z, normalized) => {
       if (!normalized?.color) return;
@@ -281,87 +285,41 @@ class BedrockWorldAdapter {
       });
     };
 
-    for (let x = 0; x < 16; x += 1) {
-      for (let z = 0; z < 16; z += 1) {
-        let top = null;
-        for (const section of sections) {
-          const sectionTop = Math.min(maxY, section.y * 16 + 15);
-          const sectionBottom = Math.max(minY, section.y * 16);
-          for (let y = sectionTop; y >= sectionBottom; y -= 1) {
+    for (const section of sections) {
+      const sectionTop = Math.min(maxY, section.y * 16 + 15);
+      const sectionBottom = Math.max(minY, section.y * 16);
+      for (let y = sectionTop; y >= sectionBottom; y -= 1) {
+        for (let x = 0; x < 16; x += 1) {
+          for (let z = 0; z < 16; z += 1) {
             const normalized = normalizePaletteBlock(section.palette[section.storage.get(x, y & 0xf, z)]);
             if (!normalized.color) continue;
-            top = { y, block: normalized };
-            heights[x][z] = y;
-            columns.push({
-              x: coords.x * 16 + x,
-              y,
-              z: coords.z * 16 + z,
-              h: 1,
-              d: 1,
-              real: true,
-              name: normalized.name,
-              stateId: normalized.stateId,
-              color: normalized.color,
-            });
-            break;
-          }
-          if (top) break;
-        }
-        if (!top) continue;
-
-        let addedDepth = 0;
-        for (let y = top.y; y >= minY && addedDepth < 8; y -= 1) {
-          const normalized = readFast(x, y, z);
-          if (!normalized?.color) {
-            if (addedDepth > 0) break;
-            continue;
-          }
-          addBlock(x, y, z, normalized);
-          addedDepth += 1;
-        }
-      }
-    }
-
-    for (let x = 0; x < 16; x += 1) {
-      for (let z = 0; z < 16; z += 1) {
-        const topY = heights[x][z];
-        if (topY < minY) continue;
-        for (const [nx, nz] of [[x - 1, z], [x + 1, z], [x, z - 1], [x, z + 1]]) {
-          const neighborHeight = nx >= 0 && nx < 16 && nz >= 0 && nz < 16 ? heights[nx][nz] : minY - 1;
-          if (topY - neighborHeight < 2) continue;
-          const lowest = Math.max(neighborHeight + 1, topY - 12, minY);
-          for (let y = topY; y >= lowest; y -= 1) {
-            const normalized = readFast(x, y, z);
-            if (normalized?.color) addBlock(x, y, z, normalized);
-          }
-        }
-      }
-    }
-
-    if (!blocks.length && !sections.length) {
-      for (let x = 0; x < 16; x += 1) {
-        for (let z = 0; z < 16; z += 1) {
-          for (let y = maxY; y >= minY; y -= 1) {
-            const normalized = getBlockSafe(chunk, x, y, z);
-            if (!normalized?.color) continue;
+            let faces = 0;
+            if (!isSolidAt(x + 1, y, z)) faces |= FACE_BITS.px;
+            if (!isSolidAt(x - 1, y, z)) faces |= FACE_BITS.nx;
+            if (!isSolidAt(x, y + 1, z)) faces |= FACE_BITS.py;
+            if (!isSolidAt(x, y - 1, z)) faces |= FACE_BITS.ny;
+            if (!isSolidAt(x, y, z + 1)) faces |= FACE_BITS.pz;
+            if (!isSolidAt(x, y, z - 1)) faces |= FACE_BITS.nz;
+            if (!faces) continue;
             addBlock(x, y, z, normalized);
-            break;
+            blocks[blocks.length - 1].faces = faces;
+            if (y > heights[x][z]) {
+              heights[x][z] = y;
+              columns.push({
+                x: coords.x * 16 + x,
+                y,
+                z: coords.z * 16 + z,
+                h: 1,
+                d: 1,
+                real: true,
+                name: normalized.name,
+                stateId: normalized.stateId,
+                color: normalized.color,
+              });
+            }
           }
         }
       }
-    }
-
-    for (const block of blocks) {
-      const lx = ((block.x % 16) + 16) % 16;
-      const lz = ((block.z % 16) + 16) % 16;
-      let faces = 0;
-      if (lx === 15 || !readFast(lx + 1, block.y, lz)?.color) faces |= FACE_BITS.px;
-      if (lx === 0 || !readFast(lx - 1, block.y, lz)?.color) faces |= FACE_BITS.nx;
-      if (!readFast(lx, block.y + 1, lz)?.color) faces |= FACE_BITS.py;
-      if (!readFast(lx, block.y - 1, lz)?.color) faces |= FACE_BITS.ny;
-      if (lz === 15 || !readFast(lx, block.y, lz + 1)?.color) faces |= FACE_BITS.pz;
-      if (lz === 0 || !readFast(lx, block.y, lz - 1)?.color) faces |= FACE_BITS.nz;
-      block.faces = faces;
     }
 
     blocks.sort((a, b) => (a.y - b.y) || (a.x - b.x) || (a.z - b.z));
@@ -374,7 +332,7 @@ class BedrockWorldAdapter {
       geometry: {
         bytesRead: size,
         columns,
-        blocks: blocks.filter((block) => block.faces).slice(-4096),
+        blocks: blocks.filter((block) => block.faces).slice(-8192),
       },
       palette: [...names.entries()]
         .sort((a, b) => b[1] - a[1])

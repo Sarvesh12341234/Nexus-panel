@@ -321,6 +321,7 @@ canvas{display:block;touch-action:none}
   const entityMeshes = new Map();
   const materialCache = new Map();
   const textureCache = new Map();
+  const terrainHeights = new Map();
   let blockCount = 0;
   let faceCount = 0;
   let worldSignature = '';
@@ -384,6 +385,7 @@ canvas{display:block;touch-action:none}
       materialCache.set(key, new THREE.MeshLambertMaterial({
         color: 0xffffff,
         map: textureFor(color, column.name),
+        side: THREE.DoubleSide,
       }));
     }
     return materialCache.get(key);
@@ -404,7 +406,7 @@ canvas{display:block;touch-action:none}
       const columns = Array.isArray(chunk.geometry?.columns) ? chunk.geometry.columns : [];
       for (const block of blocks.length ? blocks : columns) rows.push(block);
     }
-    return rows.slice(-52000);
+    return rows.slice(-80000);
   };
   const geometryForBlocks = (blocks) => {
     const positions = [];
@@ -448,8 +450,13 @@ canvas{display:block;touch-action:none}
       mesh.geometry.dispose();
     }
     terrainMeshes.clear();
+    terrainHeights.clear();
     const buckets = new Map();
     for (const block of rows) {
+      const hx = Math.floor(Number(block.x || 0));
+      const hz = Math.floor(Number(block.z || 0));
+      const hkey = hx + ':' + hz;
+      terrainHeights.set(hkey, Math.max(terrainHeights.get(hkey) ?? -9999, Number(block.y || 0)));
       const key = materialKeyFor(block);
       if (!buckets.has(key)) buckets.set(key, []);
       buckets.get(key).push(block);
@@ -539,7 +546,8 @@ canvas{display:block;touch-action:none}
   const animate = () => {
     const focus = focusEntity();
     const fx = Number(focus.x || 0);
-    const fy = Number(focus.y || 64) + 1.4;
+    const terrainY = terrainHeights.get(Math.floor(fx) + ':' + Math.floor(Number(focus.z || 0)));
+    const fy = Math.max(Number(focus.y || 64) + 1.4, Number.isFinite(terrainY) ? terrainY + 2.2 : -9999);
     const fz = Number(focus.z || 0);
     const baseYaw = Number(focus.yaw || 0) * Math.PI / 180;
     const yaw = baseYaw + lookYawOffset;

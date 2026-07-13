@@ -517,7 +517,7 @@ function sanitizeSpectateWorld(world) {
       const blocks = Array.isArray(chunk?.geometry?.blocks)
         ? chunk.geometry.blocks
           .map(sanitizeBlock)
-          .slice(0, 4096)
+          .slice(0, 8192)
         : [];
       return {
         x: Number.isFinite(Number(chunk?.x)) ? Math.trunc(Number(chunk.x)) : 0,
