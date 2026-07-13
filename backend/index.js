@@ -2821,10 +2821,16 @@ function parseNgrokRemote(tunnel) {
   }
 }
 
+function processRunning(state) {
+  return Boolean(state?.child && !state.exited && state.child.exitCode === null && !state.child.killed);
+}
+
 async function ngrokStatus(server = null) {
   const tunnels = (await readNgrokApi())?.tunnels || [];
   const port = Number(server?.port || 0);
-  const matched = tunnels.find((item) => String(item.config?.addr || '').endsWith(`:${port}`) || String(item.config?.addr || '') === String(port)) || tunnels[0];
+  const matched = port
+    ? tunnels.find((item) => String(item.config?.addr || '').endsWith(`:${port}`) || String(item.config?.addr || '') === String(port))
+    : tunnels[0];
   const parsed = parseNgrokRemote(matched);
   const key = tunnelKey('ngrok', server?.id || 0);
   const processInfo = tunnelProcesses.get(key);
@@ -2832,12 +2838,12 @@ async function ngrokStatus(server = null) {
   return {
     installed,
     binary: installed ? resolveCommand('ngrok') : '',
-    running: Boolean(matched || (processInfo?.child && !processInfo.child.killed)),
+    running: Boolean(matched || processRunning(processInfo)),
     pid: processInfo?.child?.pid || 0,
     publicUrl: parsed.publicUrl,
     remoteHost: parsed.remoteHost,
     protocol: matched?.proto || processInfo?.protocol || tunnelProtocolForServer(server),
-    message: matched ? `ngrok tunnel is live at ${parsed.remoteHost}` : (processInfo?.message || ''),
+    message: matched ? `ngrok tunnel is live at ${parsed.remoteHost}` : (processInfo?.message || 'ngrok is not running.'),
   };
 }
 
@@ -2850,7 +2856,7 @@ async function startNgrokTunnel(server, requestedProtocol = '') {
   const protocol = tunnelProtocolForServer(server, requestedProtocol);
   const key = tunnelKey('ngrok', server.id);
   const existing = tunnelProcesses.get(key);
-  if (existing?.child && !existing.child.killed) return ngrokStatus(server);
+  if (processRunning(existing)) return ngrokStatus(server);
   const env = commandEnv();
   const auth = spawnSync(ngrokCommand, ['config', 'add-authtoken', token], { encoding: 'utf8', windowsHide: true, env });
   if (auth.error || auth.status !== 0) throw new Error(`ngrok auth setup failed: ${(auth.stderr || auth.stdout || auth.error?.message || '').slice(-400)}`);
@@ -2860,19 +2866,24 @@ async function startNgrokTunnel(server, requestedProtocol = '') {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  const state = { child, protocol, message: `Starting ngrok ${protocol} tunnel for ${server.name}...` };
+  const state = { child, protocol, message: `Starting ngrok ${protocol} tunnel for ${server.name}...`, output: '', exited: false };
   tunnelProcesses.set(key, state);
-  child.stdout.on('data', (chunk) => {
-    state.message = String(chunk).trim().slice(-500) || state.message;
-  });
-  child.stderr.on('data', (chunk) => {
-    state.message = String(chunk).trim().slice(-500) || state.message;
-  });
+  const capture = (chunk) => {
+    const text = String(chunk);
+    state.output = `${state.output}${text}`.slice(-4000);
+    state.message = text.trim().slice(-900) || state.message;
+  };
+  child.stdout.on('data', capture);
+  child.stderr.on('data', capture);
   child.on('exit', (code, signal) => {
-    state.message = `ngrok exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
+    state.exited = true;
+    state.message = `ngrok exited code=${code ?? 'none'} signal=${signal ?? 'none'}.${state.output.trim() ? ` ${state.output.trim().slice(-1200)}` : ''}`;
   });
   await wait(1800);
   const status = await ngrokStatus(server);
+  if (!status.running && !status.remoteHost) {
+    throw new Error(status.message || `ngrok ${protocol} tunnel exited before it returned a public address.`);
+  }
   appendLog(server.id, `[NexusPanel] ngrok ${protocol} tunnel ${status.remoteHost ? `ready: ${status.remoteHost}` : 'started; waiting for remote address'}.`);
   return status;
 }
@@ -2881,7 +2892,7 @@ function stopTunnelProcess(provider, serverId = 0) {
   const state = tunnelProcesses.get(tunnelKey(provider, serverId));
   if (!state) return false;
   try {
-    if (state.child && !state.child.killed) state.child.kill();
+    if (processRunning(state)) state.child.kill();
   } catch {}
   tunnelProcesses.delete(tunnelKey(provider, serverId));
   return true;
@@ -2924,6 +2935,30 @@ async function installNgrokAgent() {
   return { installed: commandExists('ngrok'), message: 'ngrok agent installed on the VPS.' };
 }
 
+function extractPlayitLinks(text) {
+  const links = [...String(text || '').matchAll(/https?:\/\/[^\s"'<>]+/gi)]
+    .map((match) => match[0].replace(/[),.;]+$/, ''))
+    .filter((url) => /playit\.gg/i.test(url));
+  return [...new Set(links)].slice(0, 6);
+}
+
+function readPlayitOutput() {
+  let output = '';
+  const state = tunnelProcesses.get(tunnelKey('playit', 0));
+  if (state?.output) output = `${output}\n${state.output}`;
+  if (process.platform === 'linux' && commandExists('journalctl')) {
+    const journalctl = resolveCommand('journalctl');
+    const logs = spawnSync(journalctl, ['-u', 'playit', '-n', '120', '--no-pager'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: commandEnv(),
+      maxBuffer: 1024 * 1024,
+    });
+    output = `${output}\n${logs.stdout || ''}\n${logs.stderr || ''}`;
+  }
+  return output.slice(-12000);
+}
+
 function playitStatus() {
   const installed = commandExists('playit');
   let service = { active: false, enabled: false, detail: '' };
@@ -2937,13 +2972,19 @@ function playitStatus() {
       detail: `${String(active.stdout || active.stderr || '').trim()} ${String(enabled.stdout || enabled.stderr || '').trim()}`.trim(),
     };
   }
+  const output = readPlayitOutput();
+  const setupLinks = extractPlayitLinks(output);
+  const setupUrl = setupLinks.find((url) => /claim|setup|account\/agents|agent/i.test(url)) || setupLinks[0] || 'https://playit.gg/account/agents';
+  const setupHint = setupLinks.length ? ` Claim/setup link: ${setupUrl}` : '';
   return {
     installed,
     binary: installed ? resolveCommand('playit') : '',
     running: service.active,
     enabled: service.enabled,
+    setupUrl,
+    setupLinks,
     message: installed
-      ? service.active ? 'Playit agent is running on the VPS.' : 'Playit is installed. Start it, then claim/setup tunnels in the Playit dashboard if prompted.'
+      ? service.active ? `Playit agent is running on the VPS.${setupHint}` : `Playit is installed. Start it, then claim/setup tunnels in the Playit dashboard if prompted.${setupHint}`
       : 'Playit is not installed on the VPS.',
   };
 }
@@ -2954,21 +2995,31 @@ async function startPlayitAgent() {
   if (process.platform === 'linux' && commandExists('systemctl')) {
     const sudo = sudoPrefix();
     await runShellCommand(`${sudo}systemctl enable playit && ${sudo}systemctl start playit`, path.join(__dirname, '..'));
+    await wait(1200);
     return playitStatus();
   }
   const key = tunnelKey('playit', 0);
   const existing = tunnelProcesses.get(key);
-  if (existing?.child && !existing.child.killed) return { ...playitStatus(), running: true, pid: existing.child.pid };
+  if (processRunning(existing)) return { ...playitStatus(), running: true, pid: existing.child.pid };
   const child = spawn(playitCommand, [], {
     cwd: path.join(__dirname, '..'),
     env: commandEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  const state = { child, protocol: 'playit', message: 'Playit agent started.' };
+  const state = { child, protocol: 'playit', message: 'Playit agent started.', output: '', exited: false };
   tunnelProcesses.set(key, state);
-  child.stdout.on('data', (chunk) => { state.message = String(chunk).trim().slice(-600) || state.message; });
-  child.stderr.on('data', (chunk) => { state.message = String(chunk).trim().slice(-600) || state.message; });
+  const capture = (chunk) => {
+    const text = String(chunk);
+    state.output = `${state.output}${text}`.slice(-12000);
+    state.message = text.trim().slice(-900) || state.message;
+  };
+  child.stdout.on('data', capture);
+  child.stderr.on('data', capture);
+  child.on('exit', (code, signal) => {
+    state.exited = true;
+    state.message = `Playit exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
+  });
   return { ...playitStatus(), running: true, pid: child.pid, message: state.message };
 }
 
@@ -3729,7 +3780,9 @@ app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAG
       publicUrl: ngrok.publicUrl,
       remoteHost: ngrok.remoteHost,
       command: `ngrok ${protocol} ${port}`,
-      note: protocol === 'udp'
+      note: server?.type === 'bedrock' && protocol === 'tcp'
+        ? 'This server is Bedrock, so public gameplay needs UDP. TCP ngrok can start but Bedrock clients will not connect through it.'
+        : protocol === 'udp'
         ? 'Bedrock uses UDP. ngrok UDP requires an ngrok plan/account that supports UDP endpoints; Playit is usually easier for Bedrock.'
         : 'Java normally uses TCP. Save the ngrok token, then start the tunnel from this panel.',
     },
@@ -3739,7 +3792,8 @@ app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAG
       binary: playit.binary,
       running: playit.running,
       serviceEnabled: playit.enabled,
-      setupUrl: 'https://playit.gg/account/agents',
+      setupUrl: playit.setupUrl || 'https://playit.gg/account/agents',
+      setupLinks: playit.setupLinks || [],
       command: 'playit',
       note: playit.message,
     },

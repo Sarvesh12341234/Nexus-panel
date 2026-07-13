@@ -2058,7 +2058,7 @@ function renderSettings() {
           <button class="secondary" type="button" data-action="install-playit-agent">Install Playit</button>
           <button class="secondary" type="button" data-action="start-playit-agent">Start Playit</button>
           <button class="danger" type="button" data-action="stop-playit-agent">Stop Playit</button>
-          <a class="button-like secondary" href="${escapeHtml(settings.playitSetupUrl || 'https://playit.gg/account/agents')}" target="_blank" rel="noreferrer">Playit dashboard</a>
+          <a id="playitSetupLink" class="button-like secondary" href="${escapeHtml(settings.playitSetupUrl || 'https://playit.gg/account/agents')}" target="_blank" rel="noreferrer">Playit setup</a>
         </div>
         <pre class="tunnel-output" id="normalTunnelOutput">Select a server, choose TCP or UDP, then click Show tunnel status.</pre>
       </div>`}` : ''}
@@ -2176,6 +2176,7 @@ function tunnelStatusText(plan) {
     `ngrok note: ${plan.ngrok?.note || ''}`,
     `Playit: ${plan.playit?.running ? 'running' : 'stopped'} | ${plan.playit?.installed ? 'installed' : 'not installed'}`,
     `Playit binary: ${plan.playit?.binary || 'not found in service PATH'}`,
+    `Playit setup: ${plan.playit?.setupUrl || 'not reported yet'}`,
     `Playit note: ${plan.playit?.note || ''}`,
     `Quick tunnel: ${plan.quick?.command || ''}`,
   ].join('\n');
@@ -2196,6 +2197,11 @@ async function fetchTunnelPlan() {
 
 async function refreshTunnelOutput(prefix = '') {
   const plan = await fetchTunnelPlan();
+  const playitLink = document.querySelector('#playitSetupLink');
+  if (playitLink && plan.playit?.setupUrl) {
+    playitLink.href = plan.playit.setupUrl;
+    playitLink.textContent = /claim|setup|agent/i.test(plan.playit.setupUrl) ? 'Open Playit setup' : 'Playit dashboard';
+  }
   setTunnelOutput(`${prefix ? `${prefix}\n\n` : ''}${tunnelStatusText(plan)}`);
   return plan;
 }
