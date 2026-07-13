@@ -83,7 +83,10 @@ async function fetchJson(url) {
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const response = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'NexusPanel/1.0' } });
+      const response = await fetch(url, {
+        redirect: 'follow',
+        headers: { 'User-Agent': 'NexusPanel/2.0 (+https://github.com/Sarvesh12341234/Nexus-panel)' },
+      });
       if (response.status === 404) throw new Error(`Upstream file not found: ${url}`);
       if (!response.ok) throw new Error(`Upstream request failed: ${response.status}`);
       return response.json();
@@ -114,8 +117,14 @@ async function softwareVersions(key) {
   if (!software) throw new Error('Unknown software.');
 
   if (software.versionMode === 'papermc') {
-    const project = await cached('papermc-paper', () => fetchJson('https://api.papermc.io/v2/projects/paper'));
-    return [...project.versions].reverse();
+    const project = await cached('papermc-paper-v3', () => fetchJson('https://fill.papermc.io/v3/projects/paper'));
+    const groupedVersions = project.versions && typeof project.versions === 'object' && !Array.isArray(project.versions)
+      ? Object.values(project.versions).flat()
+      : project.versions;
+    const versions = [...new Set((Array.isArray(groupedVersions) ? groupedVersions : [])
+      .map((version) => String(version || '').trim())
+      .filter(Boolean))];
+    return versions.length ? versions : ['latest'];
   }
 
   if (software.versionMode === 'purpur') {
@@ -194,13 +203,19 @@ async function resolveDownload(software, requestedVersion = 'latest') {
   }
 
   if (software.versionMode === 'papermc') {
-    const builds = await fetchJson(`https://api.papermc.io/v2/projects/paper/versions/${encodeURIComponent(version)}/builds`);
-    const build = builds.builds.at(-1);
+    const builds = await fetchJson(`https://fill.papermc.io/v3/projects/paper/versions/${encodeURIComponent(version)}/builds`);
+    const rows = Array.isArray(builds) ? builds : (builds.builds || []);
+    const build = rows.find((item) => item.channel === 'RECOMMENDED')
+      || rows.find((item) => item.channel === 'STABLE')
+      || rows[0];
     if (!build) throw new Error('No Paper build is available for this version.');
-    const file = build.downloads.application.name;
+    const downloadUrl = build.downloads?.['server:default']?.url
+      || build.downloads?.application?.url
+      || '';
+    if (!downloadUrl) throw new Error('No Paper server download is available for this version.');
     return {
       version,
-      url: `https://api.papermc.io/v2/projects/paper/versions/${encodeURIComponent(version)}/builds/${build.build}/downloads/${file}`,
+      url: downloadUrl,
       fileName: software.executable,
     };
   }

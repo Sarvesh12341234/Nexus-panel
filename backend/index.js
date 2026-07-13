@@ -752,7 +752,7 @@ async function fileSha256Hex(filePath) {
 function runShellCommand(command, cwd, onOutput) {
   return new Promise((resolve, reject) => {
     const shell = shellForPlatform(command);
-    const child = spawn(shell.command, shell.args, { cwd, env: process.env, windowsHide: true });
+    const child = spawn(shell.command, shell.args, { cwd, env: commandEnv(), windowsHide: true });
     let output = '';
     child.stdout.on('data', (chunk) => {
       output = `${output}${chunk}`.slice(-4000);
@@ -2744,8 +2744,51 @@ async function installPocketMineRuntime(root, serverId, onProgress) {
 }
 
 function commandWorks(command, args = ['--version']) {
-  const result = spawnSync(command, args, { encoding: 'utf8', windowsHide: true });
+  const resolved = resolveCommand(command);
+  if (!resolved) return false;
+  const result = spawnSync(resolved, args, { encoding: 'utf8', windowsHide: true, env: commandEnv() });
   return !result.error && result.status === 0;
+}
+
+function commandEnv() {
+  const serviceHome = path.join(dataRoot, 'service-home');
+  try {
+    fs.mkdirSync(serviceHome, { recursive: true, mode: 0o700 });
+  } catch {}
+  const extraPath = process.platform === 'win32'
+    ? []
+    : ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin', '/snap/bin'];
+  return {
+    ...process.env,
+    HOME: process.env.HOME || serviceHome,
+    USERPROFILE: process.env.USERPROFILE || serviceHome,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME || path.join(serviceHome, '.config'),
+    PATH: [...extraPath, process.env.PATH || ''].filter(Boolean).join(path.delimiter),
+  };
+}
+
+function resolveCommand(command) {
+  if (path.isAbsolute(command) && fs.existsSync(command)) return command;
+  const extensions = process.platform === 'win32' ? ['.cmd', '.exe', '.bat', ''] : [''];
+  const searchPath = commandEnv().PATH.split(path.delimiter).filter(Boolean);
+  for (const directory of searchPath) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${command}${extension}`);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return command;
+}
+
+function commandExists(command) {
+  const resolved = resolveCommand(command);
+  if (!resolved || resolved === command) {
+    const check = process.platform === 'win32'
+      ? spawnSync('where.exe', [command], { encoding: 'utf8', windowsHide: true, env: commandEnv() })
+      : spawnSync('/bin/sh', ['-lc', `command -v ${command}`], { encoding: 'utf8', windowsHide: true, env: commandEnv() });
+    return !check.error && check.status === 0;
+  }
+  return true;
 }
 
 function tunnelKey(provider, serverId = 0) {
@@ -2785,8 +2828,10 @@ async function ngrokStatus(server = null) {
   const parsed = parseNgrokRemote(matched);
   const key = tunnelKey('ngrok', server?.id || 0);
   const processInfo = tunnelProcesses.get(key);
+  const installed = commandExists('ngrok');
   return {
-    installed: commandWorks('ngrok', ['version']),
+    installed,
+    binary: installed ? resolveCommand('ngrok') : '',
     running: Boolean(matched || (processInfo?.child && !processInfo.child.killed)),
     pid: processInfo?.child?.pid || 0,
     publicUrl: parsed.publicUrl,
@@ -2798,18 +2843,20 @@ async function ngrokStatus(server = null) {
 
 async function startNgrokTunnel(server, requestedProtocol = '') {
   if (isHostEdition()) throw new Error('Normal-edition tunnels are not available in host edition.');
-  if (!commandWorks('ngrok', ['version'])) throw new Error('ngrok is not installed on the VPS. Install ngrok first, then retry from the panel.');
+  const ngrokCommand = resolveCommand('ngrok');
+  if (!commandExists('ngrok')) throw new Error('ngrok is not installed on the VPS. Install ngrok first, then retry from the panel.');
   const token = settingValue('ngrok_auth_token', '');
   if (!token) throw new Error('Save your ngrok auth token in Settings first.');
   const protocol = tunnelProtocolForServer(server, requestedProtocol);
   const key = tunnelKey('ngrok', server.id);
   const existing = tunnelProcesses.get(key);
   if (existing?.child && !existing.child.killed) return ngrokStatus(server);
-  const auth = spawnSync('ngrok', ['config', 'add-authtoken', token], { encoding: 'utf8', windowsHide: true });
+  const env = commandEnv();
+  const auth = spawnSync(ngrokCommand, ['config', 'add-authtoken', token], { encoding: 'utf8', windowsHide: true, env });
   if (auth.error || auth.status !== 0) throw new Error(`ngrok auth setup failed: ${(auth.stderr || auth.stdout || auth.error?.message || '').slice(-400)}`);
-  const child = spawn('ngrok', [protocol, String(server.port)], {
+  const child = spawn(ngrokCommand, [protocol, String(server.port)], {
     cwd: path.join(__dirname, '..'),
-    env: process.env,
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -2846,7 +2893,7 @@ function sudoPrefix() {
 
 async function installPlayitAgent() {
   if (process.platform !== 'linux') throw new Error('Playit one-click install is only supported on Linux VPS hosts.');
-  if (!commandWorks('apt-get', ['--version'])) throw new Error('Playit one-click install currently supports Ubuntu/Debian apt hosts.');
+  if (!commandExists('apt-get')) throw new Error('Playit one-click install currently supports Ubuntu/Debian apt hosts.');
   const sudo = sudoPrefix();
   const command = [
     `${sudo}apt-get update`,
@@ -2863,7 +2910,7 @@ async function installPlayitAgent() {
 
 async function installNgrokAgent() {
   if (process.platform !== 'linux') throw new Error('ngrok one-click install is only supported on Linux VPS hosts.');
-  if (!commandWorks('apt-get', ['--version'])) throw new Error('ngrok one-click install currently supports Ubuntu/Debian apt hosts.');
+  if (!commandExists('apt-get')) throw new Error('ngrok one-click install currently supports Ubuntu/Debian apt hosts.');
   const sudo = sudoPrefix();
   const command = [
     `${sudo}apt-get update`,
@@ -2874,15 +2921,16 @@ async function installNgrokAgent() {
     `${sudo}apt-get install -y ngrok`,
   ].join(' && ');
   await runShellCommand(command, path.join(__dirname, '..'));
-  return { installed: commandWorks('ngrok', ['version']), message: 'ngrok agent installed on the VPS.' };
+  return { installed: commandExists('ngrok'), message: 'ngrok agent installed on the VPS.' };
 }
 
 function playitStatus() {
-  const installed = commandWorks('playit', ['--version']);
+  const installed = commandExists('playit');
   let service = { active: false, enabled: false, detail: '' };
-  if (process.platform === 'linux' && commandWorks('systemctl', ['--version'])) {
-    const active = spawnSync('systemctl', ['is-active', 'playit'], { encoding: 'utf8', windowsHide: true });
-    const enabled = spawnSync('systemctl', ['is-enabled', 'playit'], { encoding: 'utf8', windowsHide: true });
+  if (process.platform === 'linux' && commandExists('systemctl')) {
+    const systemctl = resolveCommand('systemctl');
+    const active = spawnSync(systemctl, ['is-active', 'playit'], { encoding: 'utf8', windowsHide: true, env: commandEnv() });
+    const enabled = spawnSync(systemctl, ['is-enabled', 'playit'], { encoding: 'utf8', windowsHide: true, env: commandEnv() });
     service = {
       active: active.status === 0,
       enabled: enabled.status === 0,
@@ -2891,6 +2939,7 @@ function playitStatus() {
   }
   return {
     installed,
+    binary: installed ? resolveCommand('playit') : '',
     running: service.active,
     enabled: service.enabled,
     message: installed
@@ -2900,8 +2949,9 @@ function playitStatus() {
 }
 
 async function startPlayitAgent() {
-  if (!commandWorks('playit', ['--version'])) throw new Error('Playit is not installed on the VPS. Click Install Playit first.');
-  if (process.platform === 'linux' && commandWorks('systemctl', ['--version'])) {
+  const playitCommand = resolveCommand('playit');
+  if (!commandExists('playit')) throw new Error('Playit is not installed on the VPS. Click Install Playit first.');
+  if (process.platform === 'linux' && commandExists('systemctl')) {
     const sudo = sudoPrefix();
     await runShellCommand(`${sudo}systemctl enable playit && ${sudo}systemctl start playit`, path.join(__dirname, '..'));
     return playitStatus();
@@ -2909,9 +2959,9 @@ async function startPlayitAgent() {
   const key = tunnelKey('playit', 0);
   const existing = tunnelProcesses.get(key);
   if (existing?.child && !existing.child.killed) return { ...playitStatus(), running: true, pid: existing.child.pid };
-  const child = spawn('playit', [], {
+  const child = spawn(playitCommand, [], {
     cwd: path.join(__dirname, '..'),
-    env: process.env,
+    env: commandEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -2924,7 +2974,7 @@ async function startPlayitAgent() {
 
 async function stopPlayitAgent() {
   stopTunnelProcess('playit', 0);
-  if (process.platform === 'linux' && commandWorks('systemctl', ['--version'])) {
+  if (process.platform === 'linux' && commandExists('systemctl')) {
     const sudo = sudoPrefix();
     await runShellCommand(`${sudo}systemctl stop playit`, path.join(__dirname, '..')).catch(() => {});
   }
@@ -2932,9 +2982,11 @@ async function stopPlayitAgent() {
 }
 
 function runRequirementCommand(command, args) {
-  const result = spawnSync(command, args, {
+  const executable = resolveCommand(command);
+  const result = spawnSync(executable, args, {
     encoding: 'utf8',
     windowsHide: true,
+    env: commandEnv(),
     maxBuffer: 1024 * 1024 * 4,
   });
   if (result.error || result.status !== 0) {
@@ -3664,13 +3716,14 @@ app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAG
   const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
   const port = Number(server?.port || 25565);
   const protocol = tunnelProtocolForServer(server, req.query.protocol);
-  const ngrok = server ? await ngrokStatus(server) : { installed: commandWorks('ngrok', ['version']), running: false, publicUrl: '', remoteHost: '', protocol };
+  const ngrok = server ? await ngrokStatus(server) : { installed: commandExists('ngrok'), binary: commandExists('ngrok') ? resolveCommand('ngrok') : '', running: false, publicUrl: '', remoteHost: '', protocol };
   const playit = playitStatus();
   res.json({
     server: server ? { id: server.id, name: server.name, type: server.type, port } : null,
     ngrok: {
       configured: Boolean(settingValue('ngrok_auth_token', '')),
       installed: ngrok.installed,
+      binary: ngrok.binary,
       running: ngrok.running,
       protocol,
       publicUrl: ngrok.publicUrl,
@@ -3683,6 +3736,7 @@ app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAG
     playit: {
       enabled: settingValue('playit_enabled', '0') === '1',
       installed: playit.installed,
+      binary: playit.binary,
       running: playit.running,
       serviceEnabled: playit.enabled,
       setupUrl: 'https://playit.gg/account/agents',

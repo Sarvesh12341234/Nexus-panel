@@ -590,13 +590,15 @@ code {
 
 .tunnel-settings > .row-actions {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   align-items: stretch;
+  gap: 0.55rem;
 }
 
 .tunnel-settings > .row-actions > * {
   width: 100%;
   min-height: 42px;
+  padding-inline: 0.72rem;
 }
 
 .tunnel-output {
@@ -2191,6 +2193,35 @@ body[data-ui-editing="true"][data-ui-move-mode="free"] [data-ui-region] {
 }
 
 @media (max-width: 760px) {
+  .alpha-control-grid,
+  .alpha-lab .backup-settings,
+  .alpha-lab .row-actions,
+  .tunnel-settings,
+  .tunnel-settings > .row-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .alpha-lab summary {
+    min-height: 44px;
+  }
+
+  .alpha-control-grid {
+    gap: 0.55rem;
+  }
+
+  .alpha-lab button,
+  .alpha-lab .button-like,
+  .tunnel-settings button,
+  .tunnel-settings .button-like {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .tunnel-output {
+    max-height: 220px;
+    font-size: 0.78rem;
+  }
+
   .layout-editor-bar {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));

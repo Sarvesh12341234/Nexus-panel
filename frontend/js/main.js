@@ -2051,13 +2051,13 @@ function renderSettings() {
         <label class="switch"><input name="playitEnabled" type="checkbox" ${settings.playitEnabled ? 'checked' : ''}><span></span>Enable playit.gg helper</label>
         <label class="switch"><input name="quickTunnelEnabled" type="checkbox" ${settings.quickTunnelEnabled ? 'checked' : ''}><span></span>Enable no-login quick tunnel helper</label>
         <div class="row-actions">
-          <button class="secondary" type="button" data-action="show-normal-tunnel-plan">Show tunnel status</button>
-          <button class="secondary" type="button" data-action="install-ngrok-agent">Install ngrok on VPS</button>
+          <button class="secondary" type="button" data-action="show-normal-tunnel-plan">Status</button>
+          <button class="secondary" type="button" data-action="install-ngrok-agent">Install ngrok</button>
           <button class="secondary" type="button" data-action="start-ngrok-tunnel">Start ngrok</button>
-          <button class="secondary" type="button" data-action="stop-ngrok-tunnel">Stop ngrok</button>
-          <button class="secondary" type="button" data-action="install-playit-agent">Install Playit on VPS</button>
+          <button class="danger" type="button" data-action="stop-ngrok-tunnel">Stop ngrok</button>
+          <button class="secondary" type="button" data-action="install-playit-agent">Install Playit</button>
           <button class="secondary" type="button" data-action="start-playit-agent">Start Playit</button>
-          <button class="secondary" type="button" data-action="stop-playit-agent">Stop Playit</button>
+          <button class="danger" type="button" data-action="stop-playit-agent">Stop Playit</button>
           <a class="button-like secondary" href="${escapeHtml(settings.playitSetupUrl || 'https://playit.gg/account/agents')}" target="_blank" rel="noreferrer">Playit dashboard</a>
         </div>
         <pre class="tunnel-output" id="normalTunnelOutput">Select a server, choose TCP or UDP, then click Show tunnel status.</pre>
@@ -2089,7 +2089,7 @@ function renderSettings() {
       <summary>Example Template JSON</summary>
       <pre>${escapeHtml(JSON.stringify(settings.nexuExample || {}, null, 2))}</pre>
     </details>` : ''}` : ''}
-    <details class="nexu-details alpha-lab" open>
+    <details class="nexu-details alpha-lab">
       <summary>Alpha UI studio</summary>
       <p class="help-text">Boxes and Buttons choose what to edit. Free mode gives bounded X/Y placement, 1px arrow-key nudging, snap control, and independent desktop/mobile coordinates; Flow mode reorders the responsive layout.</p>
       <form id="alphaUiForm">
@@ -2170,10 +2170,12 @@ function tunnelStatusText(plan) {
   return [
     `Server: ${plan.server ? `${plan.server.name} (${plan.server.type}:${plan.server.port})` : 'No server selected'}`,
     `ngrok: ${plan.ngrok?.running ? 'running' : 'stopped'} | ${plan.ngrok?.installed ? 'installed' : 'not installed'} | ${plan.ngrok?.protocol || 'auto'}`,
+    `ngrok binary: ${plan.ngrok?.binary || 'not found in service PATH'}`,
     `ngrok address: ${plan.ngrok?.remoteHost || plan.ngrok?.publicUrl || 'not assigned yet'}`,
     `ngrok command: ${plan.ngrok?.command || ''}`,
     `ngrok note: ${plan.ngrok?.note || ''}`,
     `Playit: ${plan.playit?.running ? 'running' : 'stopped'} | ${plan.playit?.installed ? 'installed' : 'not installed'}`,
+    `Playit binary: ${plan.playit?.binary || 'not found in service PATH'}`,
     `Playit note: ${plan.playit?.note || ''}`,
     `Quick tunnel: ${plan.quick?.command || ''}`,
   ].join('\n');
