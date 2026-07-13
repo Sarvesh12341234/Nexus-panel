@@ -71,6 +71,7 @@ function clearSoftwareVersionCache() {
       key.startsWith('papermc-')
       || key.startsWith('purpur-')
       || key.startsWith('mojang-')
+      || key.startsWith('github-')
       || key.startsWith('vexyhost-')
     ) {
       cache.delete(key);
@@ -129,6 +130,15 @@ async function softwareVersions(key) {
       .filter((url) => !url.includes('preview'))
       .map((url) => url.match(/bedrock-server-([0-9.]+)\.zip/i)?.[1])
       .filter(Boolean))];
+    return versions.length ? versions : ['latest'];
+  }
+  if (software.key === 'pocketmine') {
+    const releases = await cached('github-pocketmine-releases', () => fetchJson('https://api.github.com/repos/pmmp/PocketMine-MP/releases?per_page=80'));
+    const versions = releases
+      .filter((release) => !release.draft && !release.prerelease)
+      .filter((release) => (release.assets || []).some((asset) => asset.name === 'PocketMine-MP.phar'))
+      .map((release) => String(release.tag_name || '').replace(/^v/i, ''))
+      .filter(Boolean);
     return versions.length ? versions : ['latest'];
   }
   if (software.versionMode === 'github-latest') return ['latest'];
@@ -217,6 +227,17 @@ async function resolveDownload(software, requestedVersion = 'latest') {
   }
 
   if (software.key === 'pocketmine') {
+    if (version !== 'latest') {
+      const releases = await cached('github-pocketmine-releases', () => fetchJson('https://api.github.com/repos/pmmp/PocketMine-MP/releases?per_page=80'));
+      const release = releases.find((item) => String(item.tag_name || '').replace(/^v/i, '') === version);
+      const asset = release && (release.assets || []).find((item) => item.name === 'PocketMine-MP.phar');
+      if (!asset) throw new Error(`PocketMine-MP ${version} does not have a downloadable phar asset.`);
+      return {
+        version,
+        url: asset.browser_download_url,
+        fileName: software.executable,
+      };
+    }
     return {
       version: 'latest',
       url: 'https://github.com/pmmp/PocketMine-MP/releases/latest/download/PocketMine-MP.phar',

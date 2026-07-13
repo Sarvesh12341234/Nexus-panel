@@ -3,7 +3,6 @@ const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const dns = require('node:dns').promises;
 const fs = require('node:fs');
-const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
@@ -56,8 +55,7 @@ const healthPath = path.join(dataRoot, 'panel_health.json');
 const editionPath = path.join(dataRoot, 'edition');
 const terminalSessions = new Map();
 const wakeWatchers = new Map();
-const spectateSessions = new Map();
-const spectateFrameFeeds = new Map();
+const tunnelProcesses = new Map();
 const passwordResetRequests = new Map();
 const keyedOperations = new Map();
 const crashHistory = new Map();
@@ -84,7 +82,6 @@ app.set('trust proxy', true);
 app.use('/api/servers/:id/files/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/servers/:id/files/upload', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/network/upload-test', express.raw({ type: 'application/octet-stream', limit: '64mb' }));
-app.use('/api/servers/:id/spectate/frame-push', express.raw({ type: '*/*', limit: '8mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(authMiddleware);
 app.use((req, res, next) => {
@@ -227,7 +224,6 @@ const repairAgentModelFreshness = ensureRepairAgentModelFresh();
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
-  const framePushToken = spectateFramePushToken();
   const defaultTag = edition === 'host' ? 'host-v2.0.0' : 'normal-v2.0.0';
   const configuredTag = settingValue('update_target_tag', defaultTag);
   return {
@@ -246,12 +242,6 @@ function panelSettingsPayload(user = null) {
     repairAgentLiveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
     repairAgentFullAccessEnabled: repairFullAccessEnabled(),
     repairAgentFullAccessUntil: repairFullAccessUntil(),
-    liveSpectateEnabled: settingValue('live_spectate_enabled', '0') === '1',
-    spectateJavaAuth: settingValue('spectate_java_auth', process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline'),
-    spectateBedrockAuth: settingValue('spectate_bedrock_auth', process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline'),
-    spectateClientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
-    spectateFramePushTokenPreview: `${framePushToken.slice(0, 8)}....${framePushToken.slice(-6)}`,
-    spectateFramePushToken: user?.role === 'owner' ? framePushToken : '',
     normalTunnelsEnabled: edition === 'normal',
     ngrokConfigured: edition === 'normal' && Boolean(settingValue('ngrok_auth_token', '')),
     ngrokAuthtokenPreview: edition === 'normal' && settingValue('ngrok_auth_token', '') ? `${settingValue('ngrok_auth_token', '').slice(0, 6)}....${settingValue('ngrok_auth_token', '').slice(-4)}` : '',
@@ -266,769 +256,6 @@ function panelSettingsPayload(user = null) {
     hostMaintenanceMode: edition === 'host' && settingValue('host_maintenance_mode', '0') === '1',
     hostServerQuota: edition === 'host' ? clampNumber(settingValue('host_server_quota', '10'), 1, 500, 10) : 0,
   };
-}
-
-function spectateBotPackage(server) {
-  return server.type === 'java'
-    ? { name: 'mineflayer', engine: 'Mineflayer Java bot' }
-    : { name: 'bedrock-protocol', engine: 'Bedrock protocol bot' };
-}
-
-function spectateBotName(server) {
-  return server.type === 'java' ? 'live_update' : 'live-update';
-}
-
-function spectateAuthMode(server) {
-  return server.type === 'java'
-    ? settingValue('spectate_java_auth', process.env.NEXUSPANEL_SPECTATE_JAVA_AUTH || 'offline')
-    : settingValue('spectate_bedrock_auth', process.env.NEXUSPANEL_SPECTATE_BEDROCK_AUTH || 'offline');
-}
-
-function spectateFramePushToken() {
-  return ensureSettingValue('spectate_frame_push_token', () => crypto.randomBytes(32).toString('base64url'));
-}
-
-function validateSpectateFrameToken(req) {
-  const token = String(req.query.token || req.headers['x-nexuspanel-stream-token'] || '').trim();
-  const expected = spectateFramePushToken();
-  const left = Buffer.from(token);
-  const right = Buffer.from(expected);
-  return Boolean(token && left.length === right.length && crypto.timingSafeEqual(left, right));
-}
-
-function spectateFeedFor(serverId) {
-  const id = Number(serverId);
-  if (!spectateFrameFeeds.has(id)) {
-    spectateFrameFeeds.set(id, {
-      frame: null,
-      contentType: 'image/jpeg',
-      updatedAt: 0,
-      clients: new Set(),
-    });
-  }
-  return spectateFrameFeeds.get(id);
-}
-
-function writeSpectateFrame(res, feed) {
-  if (!feed.frame || res.destroyed || res.writableEnded) return;
-  res.write(`--nexuspanel-spectate\r\n`);
-  res.write(`Content-Type: ${feed.contentType}\r\n`);
-  res.write(`Content-Length: ${feed.frame.length}\r\n`);
-  res.write(`X-NexusPanel-Frame-Time: ${feed.updatedAt}\r\n\r\n`);
-  res.write(feed.frame);
-  res.write('\r\n');
-}
-
-function pushSpectateFrame(serverId, frame, contentType) {
-  const feed = spectateFeedFor(serverId);
-  feed.frame = Buffer.from(frame);
-  feed.contentType = contentType;
-  feed.updatedAt = Date.now();
-  for (const client of [...feed.clients]) {
-    try {
-      writeSpectateFrame(client, feed);
-    } catch {
-      feed.clients.delete(client);
-    }
-  }
-  return feed;
-}
-
-function clearSpectateFeed(serverId) {
-  const feed = spectateFrameFeeds.get(Number(serverId));
-  if (!feed) return;
-  feed.frame = null;
-  feed.updatedAt = 0;
-}
-
-function localFramePushPython() {
-  const configured = String(process.env.NEXUSPANEL_PYTHON || '').trim();
-  if (configured) return { command: configured, prefixArgs: [] };
-  return process.platform === 'win32'
-    ? { command: 'py', prefixArgs: ['-3'] }
-    : { command: 'python3', prefixArgs: [] };
-}
-
-function localFramePushReadiness() {
-  const scriptPath = path.join(__dirname, '..', 'tools', 'spectate_frame_push.py');
-  if (!fs.existsSync(scriptPath)) {
-    return { ok: false, scriptPath, message: 'Frame push helper is missing from tools/spectate_frame_push.py.' };
-  }
-  if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    return {
-      ok: false,
-      scriptPath,
-      message: 'VPS local capture cannot start because no graphical DISPLAY/WAYLAND_DISPLAY is available. A Bedrock server/bot has no video output by itself.',
-    };
-  }
-  const python = localFramePushPython();
-  const importCheck = spawnSync(python.command, [...python.prefixArgs, '-c', 'import mss, PIL, requests'], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
-  if (importCheck.error || importCheck.status !== 0) {
-    return {
-      ok: false,
-      scriptPath,
-      message: `Install frame capture dependencies on the panel machine: ${process.platform === 'win32' ? 'py -3' : 'python3'} -m pip install mss pillow requests`,
-    };
-  }
-  return { ok: true, scriptPath, python };
-}
-
-function stopLocalFramePush(session) {
-  if (!session?.framePushChild) return;
-  try {
-    if (!session.framePushChild.killed) session.framePushChild.kill();
-  } catch {}
-  session.framePushChild = null;
-}
-
-function startLocalFramePush(server, session) {
-  if (server.type !== 'bedrock') return;
-  if (process.env.NEXUSPANEL_SPECTATE_AUTO_CAPTURE === '0') {
-    session.rendererMessage = 'Automatic VPS frame capture is disabled by NEXUSPANEL_SPECTATE_AUTO_CAPTURE=0.';
-    return;
-  }
-  if (session.framePushChild && !session.framePushChild.killed) return;
-  const readiness = localFramePushReadiness();
-  if (!readiness.ok) {
-    session.rendererMode = 'bedrock-adapter';
-    session.rendererStatus = 'packet-renderer';
-    session.rendererMessage = `${readiness.message} Bedrock adapter is waiting for real chunk decode instead.`;
-    session.message = `${session.message || 'Live spectate started.'} Bedrock adapter is active.`;
-    appendLog(server.id, `[NexusPanel] Live Spectate local video capture unavailable: ${readiness.message}`);
-    return;
-  }
-  const fps = clampNumber(process.env.NEXUSPANEL_SPECTATE_CAPTURE_FPS, 1, 30, 12);
-  const quality = clampNumber(process.env.NEXUSPANEL_SPECTATE_CAPTURE_QUALITY, 35, 95, 72);
-  const monitor = clampNumber(process.env.NEXUSPANEL_SPECTATE_CAPTURE_MONITOR, 1, 16, 1);
-  const url = `http://127.0.0.1:${port}/api/servers/${server.id}/spectate/frame-push`;
-  const args = [
-    ...readiness.python.prefixArgs,
-    readiness.scriptPath,
-    '--url', url,
-    '--token', spectateFramePushToken(),
-    '--fps', String(fps),
-    '--quality', String(quality),
-    '--monitor', String(monitor),
-  ];
-  const region = String(process.env.NEXUSPANEL_SPECTATE_CAPTURE_REGION || '').trim();
-  if (region) args.push('--region', region);
-  const child = spawn(readiness.python.command, args, {
-    cwd: path.join(__dirname, '..'),
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-  session.framePushChild = child;
-  session.rendererStatus = 'capture-starting';
-  session.rendererMessage = 'Starting automatic VPS client capture for Bedrock Live Spectate...';
-  appendLog(server.id, `[NexusPanel] Live Spectate automatic frame capture starting on monitor ${monitor} at ${fps} FPS.`);
-  child.stdout.on('data', (chunk) => {
-    const text = String(chunk).trim().slice(-1200);
-    if (text) appendLog(server.id, `[NexusPanel FramePush] ${text}`);
-    if (/Live frames sent:/i.test(text)) {
-      session.rendererStatus = 'capture-running';
-      session.rendererMessage = 'Automatic VPS frame capture is pushing real client frames.';
-      session.updatedAt = Date.now();
-    }
-  });
-  child.stderr.on('data', (chunk) => {
-    const text = String(chunk).trim().slice(-1200);
-    if (text) {
-      session.rendererStatus = 'capture-error';
-      session.rendererMessage = text;
-      session.updatedAt = Date.now();
-      appendLog(server.id, `[NexusPanel FramePush] ${text}`);
-    }
-  });
-  child.on('error', (error) => {
-    if (session.framePushChild === child) session.framePushChild = null;
-    session.rendererStatus = 'capture-error';
-    session.rendererMessage = `Automatic VPS frame capture failed: ${error.message}`;
-    session.updatedAt = Date.now();
-    appendLog(server.id, `[NexusPanel] Live Spectate automatic frame capture failed: ${error.message}`);
-  });
-  child.on('exit', (code, signal) => {
-    if (session.framePushChild === child) session.framePushChild = null;
-    session.rendererStatus = code === 0 ? 'capture-stopped' : 'capture-error';
-    session.rendererMessage = `Automatic VPS frame capture exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
-    session.updatedAt = Date.now();
-    appendLog(server.id, `[NexusPanel] Live Spectate automatic frame capture exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`);
-  });
-}
-
-function spectateRendererPort(server) {
-  const base = clampNumber(process.env.NEXUSPANEL_SPECTATE_VIEWER_PORT_BASE, 20000, 60000, 33000);
-  return Math.min(65535, base + (Number(server.id) % 20000));
-}
-
-function spectateRendererUrl(server, session, req = null) {
-  if (session?.rendererStatus !== 'ready' || !session?.rendererPort) return '';
-  if (server.type === 'bedrock') return `/api/servers/${server.id}/spectate/renderer/`;
-  const host = req ? requestPublicHost(req) : '127.0.0.1';
-  return `http://${host}:${Number(session.rendererPort)}`;
-}
-
-function sanitizeSpectateEntities(entities) {
-  return (Array.isArray(entities) ? entities : [])
-    .map((entity) => {
-      const name = String(entity?.name || entity?.id || '').replace(/[^A-Za-z0-9_ -]/g, '').slice(0, 32);
-      if (!name) return null;
-      return {
-        id: String(entity.id || name).slice(0, 80),
-        name,
-        x: Number.isFinite(Number(entity.x)) ? Number(entity.x) : 0,
-        y: Number.isFinite(Number(entity.y)) ? Number(entity.y) : 0,
-        z: Number.isFinite(Number(entity.z)) ? Number(entity.z) : 0,
-        yaw: Number.isFinite(Number(entity.yaw)) ? Number(entity.yaw) : 0,
-        pitch: Number.isFinite(Number(entity.pitch)) ? Number(entity.pitch) : 0,
-        self: Boolean(entity.self),
-        updatedAt: Number.isFinite(Number(entity.updatedAt)) ? Number(entity.updatedAt) : Date.now(),
-      };
-    })
-    .filter(Boolean)
-    .slice(0, 80);
-}
-
-function sanitizeSpectateWorld(world) {
-  const sanitizeBlock = (block) => ({
-    x: Number.isFinite(Number(block?.x)) ? Math.trunc(Number(block.x)) : 0,
-    y: Number.isFinite(Number(block?.y)) ? Math.trunc(Number(block.y)) : 64,
-    z: Number.isFinite(Number(block?.z)) ? Math.trunc(Number(block.z)) : 0,
-    h: Number.isFinite(Number(block?.h)) ? Math.max(1, Math.min(24, Math.trunc(Number(block.h)))) : 1,
-    d: Number.isFinite(Number(block?.d)) ? Math.max(0, Math.min(1, Number(block.d))) : 1,
-    real: Boolean(block?.real),
-    name: String(block?.name || '').slice(0, 80),
-    stateId: Number.isFinite(Number(block?.stateId)) ? Math.trunc(Number(block.stateId)) : 0,
-    faces: Number.isFinite(Number(block?.faces)) ? Math.max(0, Math.min(63, Math.trunc(Number(block.faces)))) : 63,
-    color: /^#[0-9a-f]{6}$/i.test(String(block?.color || '')) || /^hsl\(/i.test(String(block?.color || ''))
-      ? String(block.color).slice(0, 40)
-      : '',
-  });
-  const chunks = (Array.isArray(world?.chunks) ? world.chunks : [])
-    .map((chunk) => {
-      const columns = Array.isArray(chunk?.geometry?.columns)
-        ? chunk.geometry.columns
-          .map(sanitizeBlock)
-          .slice(0, 512)
-        : [];
-      const blocks = Array.isArray(chunk?.geometry?.blocks)
-        ? chunk.geometry.blocks
-          .map(sanitizeBlock)
-          .slice(0, 8192)
-        : [];
-      return {
-        x: Number.isFinite(Number(chunk?.x)) ? Math.trunc(Number(chunk.x)) : 0,
-        z: Number.isFinite(Number(chunk?.z)) ? Math.trunc(Number(chunk.z)) : 0,
-        pseudo: Boolean(chunk?.pseudo),
-        source: String(chunk?.source || '').slice(0, 50),
-        palette: (Array.isArray(chunk?.palette) ? chunk.palette : [])
-          .map((entry) => ({
-            name: String(entry?.name || '').slice(0, 80),
-            count: Number.isFinite(Number(entry?.count)) ? Math.trunc(Number(entry.count)) : 0,
-          }))
-          .slice(0, 12),
-        size: Number.isFinite(Number(chunk?.size)) ? Math.max(0, Math.trunc(Number(chunk.size))) : 0,
-        digest: Number.isFinite(Number(chunk?.digest ?? chunk?.geometry?.digest)) ? Math.trunc(Number(chunk.digest ?? chunk.geometry.digest)) : 0,
-        geometry: {
-          bytesRead: Number.isFinite(Number(chunk?.geometry?.bytesRead)) ? Math.max(0, Math.trunc(Number(chunk.geometry.bytesRead))) : 0,
-          columns,
-          blocks,
-        },
-        updatedAt: Number.isFinite(Number(chunk?.updatedAt)) ? Number(chunk.updatedAt) : Date.now(),
-      };
-    })
-    .slice(-64);
-  const blockUpdates = (Array.isArray(world?.blockUpdates) ? world.blockUpdates : [])
-    .map((block) => ({
-      x: Number.isFinite(Number(block?.x)) ? Math.trunc(Number(block.x)) : 0,
-      y: Number.isFinite(Number(block?.y)) ? Math.trunc(Number(block.y)) : 0,
-      z: Number.isFinite(Number(block?.z)) ? Math.trunc(Number(block.z)) : 0,
-      runtimeId: Number.isFinite(Number(block?.runtimeId)) ? Math.trunc(Number(block.runtimeId)) : 0,
-      updatedAt: Number.isFinite(Number(block?.updatedAt)) ? Number(block.updatedAt) : Date.now(),
-    }))
-    .slice(-256);
-  const rawStats = world?.packetStats && typeof world.packetStats === 'object' ? world.packetStats : {};
-  const packetStats = {
-    total: Number.isFinite(Number(rawStats.total)) ? Math.trunc(Number(rawStats.total)) : 0,
-    levelChunk: Number.isFinite(Number(rawStats.levelChunk)) ? Math.trunc(Number(rawStats.levelChunk)) : 0,
-    updateBlock: Number.isFinite(Number(rawStats.updateBlock)) ? Math.trunc(Number(rawStats.updateBlock)) : 0,
-    geometryColumns: Number.isFinite(Number(rawStats.geometryColumns)) ? Math.trunc(Number(rawStats.geometryColumns)) : 0,
-    geometryBlocks: Number.isFinite(Number(rawStats.geometryBlocks)) ? Math.trunc(Number(rawStats.geometryBlocks)) : 0,
-    bytesTotal: Number.isFinite(Number(rawStats.bytesTotal)) ? Math.trunc(Number(rawStats.bytesTotal)) : 0,
-    renderPackets: Number.isFinite(Number(rawStats.renderPackets)) ? Math.trunc(Number(rawStats.renderPackets)) : 0,
-    cacheBlobs: Number.isFinite(Number(rawStats.cacheBlobs)) ? Math.trunc(Number(rawStats.cacheBlobs)) : 0,
-    movePlayer: Number.isFinite(Number(rawStats.movePlayer)) ? Math.trunc(Number(rawStats.movePlayer)) : 0,
-    moveEntity: Number.isFinite(Number(rawStats.moveEntity)) ? Math.trunc(Number(rawStats.moveEntity)) : 0,
-    addPlayer: Number.isFinite(Number(rawStats.addPlayer)) ? Math.trunc(Number(rawStats.addPlayer)) : 0,
-    playerList: Number.isFinite(Number(rawStats.playerList)) ? Math.trunc(Number(rawStats.playerList)) : 0,
-    lastPacketAt: Number.isFinite(Number(rawStats.lastPacketAt)) ? Number(rawStats.lastPacketAt) : 0,
-    lastPacket: String(rawStats.lastPacket || '').slice(0, 60),
-    adapterError: String(rawStats.adapterError || '').slice(0, 220),
-    adapter: rawStats.adapter && typeof rawStats.adapter === 'object' ? {
-      ready: Boolean(rawStats.adapter.ready),
-      version: String(rawStats.adapter.version || '').slice(0, 60),
-      chunks: Number.isFinite(Number(rawStats.adapter.chunks)) ? Math.trunc(Number(rawStats.adapter.chunks)) : 0,
-      error: String(rawStats.adapter.error || '').slice(0, 220),
-    } : { ready: false, version: '', chunks: 0, error: '' },
-    samples: (Array.isArray(rawStats.samples) ? rawStats.samples : [])
-      .map((sample) => ({
-        name: String(sample?.name || '').slice(0, 50),
-        keys: (Array.isArray(sample?.keys) ? sample.keys : []).map((key) => String(key).slice(0, 30)).slice(0, 8),
-        bytes: Number.isFinite(Number(sample?.bytes)) ? Math.trunc(Number(sample.bytes)) : 0,
-        hasChunkKey: Boolean(sample?.hasChunkKey),
-      }))
-      .slice(0, 8),
-  };
-  return {
-    mode: String(world?.mode || 'bedrock-prismarine-adapter').slice(0, 60),
-    chunks,
-    blockUpdates,
-    packetStats,
-    updatedAt: Number.isFinite(Number(world?.updatedAt)) ? Number(world.updatedAt) : Date.now(),
-  };
-}
-
-function minecraftCommandTarget(name) {
-  const clean = String(name || '').replace(/[\r\n"]/g, '').slice(0, 64);
-  return clean ? `"${clean}"` : '';
-}
-
-function sendSpectateModeCommand(server, botName) {
-  const session = spectateSessions.get(Number(server.id));
-  if (!session || session.gamemodeSent || runtimeStatus(server.id) !== 'online') return;
-  const target = minecraftCommandTarget(botName);
-  if (!target) return;
-  session.gamemodeSent = true;
-  setTimeout(() => {
-    try {
-      sendCommand(server.id, `gamemode spectator ${target}`);
-      appendLog(server.id, `[NexusPanel] Live Spectate set ${botName} to spectator mode.`);
-    } catch (error) {
-      appendLog(server.id, `[NexusPanel] Live Spectate spectator command failed: ${error.message}`);
-    }
-  }, server.type === 'bedrock' ? 1800 : 500).unref();
-}
-
-function moveSpectateBot(server, session, action, yaw) {
-  if (!session || server.type !== 'bedrock' || runtimeStatus(server.id) !== 'online') return null;
-  const cleanAction = String(action || '').toLowerCase();
-  if (!['forward', 'back', 'left', 'right', 'up', 'down'].includes(cleanAction)) return null;
-  const botName = session.botName || spectateBotName(server);
-  const target = minecraftCommandTarget(botName);
-  if (!target) return null;
-  const self = (session.entities || []).find((entity) => entity.self)
-    || (session.entities || []).find((entity) => entity.name === botName)
-    || { x: 0, y: 64, z: 0, yaw: 0, pitch: 0, self: true, name: botName, id: botName };
-  const angle = Number.isFinite(Number(yaw)) ? Number(yaw) : (Number(self.yaw || 0) * Math.PI / 180);
-  const step = 2.2;
-  let dx = 0;
-  let dy = 0;
-  let dz = 0;
-  if (cleanAction === 'forward') {
-    dx = Math.sin(angle) * step;
-    dz = Math.cos(angle) * step;
-  } else if (cleanAction === 'back') {
-    dx = -Math.sin(angle) * step;
-    dz = -Math.cos(angle) * step;
-  } else if (cleanAction === 'left') {
-    dx = Math.sin(angle - Math.PI / 2) * step;
-    dz = Math.cos(angle - Math.PI / 2) * step;
-  } else if (cleanAction === 'right') {
-    dx = Math.sin(angle + Math.PI / 2) * step;
-    dz = Math.cos(angle + Math.PI / 2) * step;
-  } else if (cleanAction === 'up') {
-    dy = 1.6;
-  } else if (cleanAction === 'down') {
-    dy = -1.6;
-  }
-  const next = {
-    ...self,
-    id: self.id || botName,
-    name: botName,
-    x: Math.round((Number(self.x || 0) + dx) * 100) / 100,
-    y: Math.round(Math.max(-64, Math.min(512, Number(self.y || 64) + dy)) * 100) / 100,
-    z: Math.round((Number(self.z || 0) + dz) * 100) / 100,
-    yaw: Math.round((angle * 180) / Math.PI),
-    self: true,
-    updatedAt: Date.now(),
-  };
-  const others = (session.entities || []).filter((entity) => entity.id !== next.id && entity.name !== botName);
-  session.entities = sanitizeSpectateEntities([next, ...others]);
-  session.updatedAt = Date.now();
-  try {
-    sendCommand(server.id, `tp ${target} ${next.x} ${next.y} ${next.z}`);
-  } catch (error) {
-    appendLog(server.id, `[NexusPanel] Live Spectate movement failed: ${error.message}`);
-  }
-  return next;
-}
-
-function latestSpectateLogEvent(server, botName) {
-  const recentLines = consoleLogs(server.id)
-    .filter((line) => String(line).includes(botName))
-    .slice(-30);
-  if (!recentLines.length) return null;
-  const line = [...recentLines].reverse().find((entry) => /Player (?:connected|Spawned|disconnected):\s*/i.test(String(entry)));
-  if (!line) return null;
-  const nameMatch = String(line).match(/Player (?:connected|Spawned):\s*([^,\s]+(?:\(\d+\))?)/i);
-  return {
-    line,
-    playerName: nameMatch ? nameMatch[1] : botName,
-    connected: /Player (?:connected|Spawned):\s*/i.test(line),
-    disconnected: /Player disconnected:\s*/i.test(line),
-  };
-}
-
-function inferSpectateFromServerLogs(server, session) {
-  if (!session) return session;
-  const childAlive = Boolean(session.child && !session.child.killed);
-  if (!childAlive && Date.now() - Number(session.updatedAt || session.startedAt || 0) > 2 * 60 * 1000) return session;
-  if (Date.now() - Number(session.startedAt || 0) > 10 * 60 * 1000) return session;
-  const botName = session.botName || spectateBotName(server);
-  const latestEvent = latestSpectateLogEvent(server, botName);
-  if (!latestEvent) return session;
-  if (latestEvent.connected) {
-    const liveName = latestEvent.playerName || botName;
-    const players = new Set([...(session.players || []), liveName]);
-    session.players = [...players];
-    session.target = session.target || liveName;
-    session.botName = liveName;
-    session.status = 'connected';
-    session.message = server.type === 'bedrock'
-      ? `${liveName} is connected. Bedrock adapter is decoding real chunks.`
-      : `${liveName} is connected and spawned. Live feed is following the bot perspective.`;
-    session.updatedAt = Date.now();
-    if (session.timeout) {
-      clearTimeout(session.timeout);
-      session.timeout = null;
-    }
-    sendSpectateModeCommand(server, liveName);
-  }
-  if (latestEvent.disconnected) {
-    session.status = 'stopped';
-    session.updatedAt = Date.now();
-    session.message = `${botName} disconnected from the server.`;
-  }
-  return session;
-}
-
-function spectateSessionPayload(server, req = null) {
-  const session = inferSpectateFromServerLogs(server, spectateSessions.get(Number(server.id)));
-  const bot = spectateBotPackage(server);
-  const sessionActive = Boolean(session && session.status !== 'stopped' && session.status !== 'error' && (!session.child || !session.child.killed));
-  const players = sessionActive && session?.players?.length ? session.players : [];
-  const frameFeed = spectateFrameFeeds.get(Number(server.id));
-  const framePushActive = Boolean(frameFeed?.frame && Date.now() - Number(frameFeed.updatedAt || 0) < 15000);
-  const installed = (() => {
-    try {
-      require.resolve(bot.name);
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  return {
-    enabled: settingValue('live_spectate_enabled', '0') === '1',
-    serverId: server.id,
-    serverName: server.name,
-    serverType: server.type,
-    serverStatus: runtimeStatus(server.id),
-    host: server.host && server.host !== '127.0.0.1' ? server.host : (req ? requestPublicHost(req) : server.host || '127.0.0.1'),
-    port: Number(server.port || (server.type === 'bedrock' ? 19132 : 25565)),
-    engine: bot.engine,
-    packageName: bot.name,
-    packageInstalled: installed,
-    installCommand: `cd /opt/nexuspanel && npm install ${bot.name}`,
-    status: session?.status || 'stopped',
-    startedAt: session?.startedAt || 0,
-    updatedAt: session?.updatedAt || 0,
-    pid: session?.child?.pid || 0,
-    botName: session?.botName || spectateBotName(server),
-    authMode: session?.authMode || spectateAuthMode(server),
-    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-threejs-viewer'),
-    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'waiting'),
-    rendererPort: session?.rendererPort || spectateRendererPort(server),
-    rendererUrl: spectateRendererUrl(server, session, req),
-    rendererMessage: session?.rendererMessage || (server.type === 'java'
-      ? 'Java screenshare renderer starts after the bot spawns. Install prismarine-viewer if it stays unavailable.'
-      : 'Bedrock browser renderer starts with the bot and renders decoded chunk data on your device.'),
-    clientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
-    framePushActive,
-    framePushUpdatedAt: frameFeed?.updatedAt || 0,
-    framePushUrl: `/api/servers/${server.id}/spectate/frame-stream.mjpg`,
-    target: session?.target || players[0] || '',
-    players,
-    entities: sessionActive ? sanitizeSpectateEntities(session?.entities || []) : [],
-    world: sessionActive ? sanitizeSpectateWorld(session?.world || {}) : sanitizeSpectateWorld({}),
-    visualSeed: crypto.createHash('sha1').update(`${server.id}:${server.name}:${server.port}`).digest('hex').slice(0, 12),
-    recentEvents: consoleLogs(server.id)
-      .filter((line) => /Player |Live Spectate|Spawned|connected|disconnected/i.test(String(line)))
-      .slice(-6),
-    frameUrl: `/api/servers/${server.id}/spectate/frame.svg`,
-    message: session?.message || (installed ? 'Ready to start a spectate bot.' : `Install ${bot.name} to enable a real spectate bot for this server type.`),
-  };
-}
-
-function startSpectateSession(server, req = null) {
-  if (settingValue('live_spectate_enabled', '0') !== '1') throw new Error('Live spectate is disabled in Settings.');
-  if (runtimeStatus(server.id) !== 'online') throw new Error('Start the server before opening a live spectate session.');
-  const bot = spectateBotPackage(server);
-  const existing = spectateSessions.get(Number(server.id));
-  if (existing?.child && !existing.child.killed) {
-    return spectateSessionPayload(server, req);
-  }
-  if (existing) {
-    if (existing.timeout) clearTimeout(existing.timeout);
-    stopLocalFramePush(existing);
-    spectateSessions.delete(Number(server.id));
-  }
-  try {
-    require.resolve(bot.name);
-  } catch {
-    const payload = {
-      status: 'missing-engine',
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
-      target: '',
-      message: `${bot.engine} package is not installed in the panel folder. Run: cd /opt/nexuspanel && npm install ${bot.name}`,
-    };
-    spectateSessions.set(Number(server.id), payload);
-    appendLog(server.id, `[NexusPanel] Live Spectate waiting for bot engine: npm install ${bot.name}`);
-    return spectateSessionPayload(server, req);
-  }
-  const players = runtimeDetails(server.id).players || [];
-  const serverRoot = ensureServerDirs(server);
-  const runtimeDir = assertInside(serverRoot, path.join(serverRoot, 'runtime', 'spectate'));
-  fs.mkdirSync(runtimeDir, { recursive: true });
-  const textureRoots = [
-    path.join(serverRoot, 'resource_packs'),
-    path.join(serverRoot, 'resourcepacks'),
-    path.join(dataRoot, 'spectate-textures'),
-    process.env.APPDATA ? path.join(process.env.APPDATA, '.minecraft') : '',
-    process.env.HOME ? path.join(process.env.HOME, '.minecraft') : '',
-    ...(process.env.NEXUSPANEL_SPECTATE_TEXTURE_ROOT ? String(process.env.NEXUSPANEL_SPECTATE_TEXTURE_ROOT).split(path.delimiter) : []),
-  ].filter(Boolean);
-  const config = {
-    type: server.type === 'java' ? 'java' : 'bedrock',
-    host: '127.0.0.1',
-    port: Number(server.port || (server.type === 'bedrock' ? 19132 : 25565)),
-    username: spectateBotName(server),
-    auth: spectateAuthMode(server),
-    rendererPort: spectateRendererPort(server),
-    runtimeDir,
-    textureRoots,
-    serverName: server.name,
-    target: players[0] || '',
-  };
-  const encoded = Buffer.from(JSON.stringify(config), 'utf8').toString('base64url');
-  const child = spawn(process.execPath, [path.join(__dirname, 'spectate_bot.js'), encoded], {
-    cwd: path.join(__dirname, '..'),
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-    windowsHide: true,
-  });
-  const payload = {
-    child,
-    timeout: null,
-    status: 'connecting',
-    startedAt: Date.now(),
-    updatedAt: Date.now(),
-    botName: config.username,
-    authMode: config.auth,
-    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-threejs-viewer',
-    rendererStatus: 'starting',
-    rendererPort: config.rendererPort,
-    rendererMessage: server.type === 'java'
-      ? `Starting Java first-person renderer on port ${config.rendererPort}...`
-      : `Starting Bedrock browser renderer on port ${config.rendererPort}...`,
-    target: players[0] || '',
-    players,
-    entities: [],
-    world: sanitizeSpectateWorld({}),
-    message: `${bot.engine} detected. Connecting bot to 127.0.0.1:${config.port}...`,
-  };
-  spectateSessions.set(Number(server.id), payload);
-  startLocalFramePush(server, payload);
-  payload.timeout = setTimeout(() => {
-    const session = spectateSessions.get(Number(server.id));
-    if (!session || session.status !== 'connecting') return;
-    session.status = 'error';
-    session.updatedAt = Date.now();
-    session.message = server.type === 'bedrock'
-      ? 'Bedrock bot reached the server but did not finish joining within 30 seconds. If server.properties has online-mode=true, use Microsoft auth (NEXUSPANEL_SPECTATE_BEDROCK_AUTH=microsoft) or turn online-mode=false for this spectate account.'
-      : 'Java bot did not finish joining within 30 seconds. Check whitelist, online-mode, and player limit.';
-    appendLog(server.id, `[NexusPanel] Live Spectate timeout: ${session.message}`);
-    try { child.kill(); } catch {}
-  }, 30 * 1000);
-  payload.timeout.unref();
-  child.on('message', (message) => {
-    const session = spectateSessions.get(Number(server.id));
-    if (!session) return;
-    if (message.type === 'players' && Array.isArray(message.players)) session.players = message.players;
-    if (message.type === 'entities' && Array.isArray(message.entities)) {
-      session.entities = sanitizeSpectateEntities(message.entities);
-      const entityNames = session.entities.map((entity) => entity.name).filter(Boolean);
-      if (entityNames.length) session.players = [...new Set([...(session.players || []), ...entityNames])];
-    }
-    if (message.type === 'renderer') {
-      session.rendererStatus = message.status || session.rendererStatus;
-      session.rendererMode = message.mode || session.rendererMode;
-      session.rendererPort = Number(message.port || session.rendererPort || 0);
-      session.rendererMessage = message.message || session.rendererMessage;
-      if (message.status !== 'ready' && message.message) appendLog(server.id, `[NexusPanel] Live Spectate renderer: ${message.message}`);
-    }
-    if (message.type === 'world') {
-      const previous = session.world || {};
-      session.world = sanitizeSpectateWorld({
-        mode: message.mode || previous.mode || 'bedrock-prismarine-adapter',
-        chunks: message.chunks || previous.chunks || [],
-        blockUpdates: [...(previous.blockUpdates || []), ...(message.blockUpdates || [])].slice(-256),
-        packetStats: message.packetStats || previous.packetStats || {},
-        updatedAt: Date.now(),
-      });
-    }
-    if (message.type === 'control') {
-      const moved = moveSpectateBot(server, session, message.action, message.yaw);
-      if (moved) {
-        try { child.send({ type: 'local-move', entity: moved }); } catch {}
-      }
-    }
-    if (message.type === 'status') {
-      session.status = message.status || session.status;
-      session.message = message.message || session.message;
-      if (message.target !== undefined) session.target = message.target;
-      if (session.status === 'connected' && session.timeout) {
-        clearTimeout(session.timeout);
-        session.timeout = null;
-      }
-      if (session.status === 'connected') sendSpectateModeCommand(server, session.botName || config.username);
-    }
-    if (message.type === 'error') {
-      session.status = 'error';
-      session.message = message.message || 'Spectate bot error.';
-      appendLog(server.id, `[NexusPanel] Live Spectate error: ${session.message}`);
-    }
-    session.updatedAt = Date.now();
-  });
-  child.stdout.on('data', (chunk) => {
-    const text = String(chunk).trim().slice(-1200);
-    if (text) appendLog(server.id, `[NexusPanel Spectate] ${text}`);
-  });
-  child.stderr.on('data', (chunk) => {
-    const text = String(chunk).trim().slice(-1200);
-    if (text) appendLog(server.id, `[NexusPanel Spectate] ${text}`);
-  });
-  child.on('exit', (code, signal) => {
-    const session = spectateSessions.get(Number(server.id));
-    if (!session) return;
-    if (session.timeout) clearTimeout(session.timeout);
-    stopLocalFramePush(session);
-    session.status = 'stopped';
-    session.updatedAt = Date.now();
-    session.message = `Spectate bot exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
-  });
-  appendLog(server.id, `[NexusPanel] Live Spectate launched ${bot.engine} as ${config.username} (${config.auth} auth), pid=${child.pid || 'pending'}.`);
-  return spectateSessionPayload(server, req);
-}
-
-function stopSpectateSession(server) {
-  const session = spectateSessions.get(Number(server.id));
-  if (session?.child) {
-    if (session.timeout) clearTimeout(session.timeout);
-    try { session.child.send({ type: 'stop' }); } catch {}
-    setTimeout(() => {
-      try {
-        if (!session.child.killed) session.child.kill();
-      } catch {}
-    }, 1500).unref();
-  }
-  stopLocalFramePush(session);
-  spectateSessions.delete(Number(server.id));
-  clearSpectateFeed(server.id);
-  appendLog(server.id, '[NexusPanel] Live Spectate session stopped.');
-}
-
-function stopAllSpectateSessions(reason = 'Live Spectate was disabled.') {
-  for (const serverId of [...spectateSessions.keys()]) {
-    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(serverId));
-    if (!server) {
-      const session = spectateSessions.get(Number(serverId));
-      if (session?.timeout) clearTimeout(session.timeout);
-      stopLocalFramePush(session);
-      try { session?.child?.kill(); } catch {}
-      spectateSessions.delete(Number(serverId));
-      continue;
-    }
-    stopSpectateSession(server);
-    appendLog(server.id, `[NexusPanel] ${reason}`);
-  }
-  for (const serverId of [...spectateFrameFeeds.keys()]) clearSpectateFeed(serverId);
-}
-
-function pruneSpectateSessions() {
-  if (settingValue('live_spectate_enabled', '0') !== '1') {
-    stopAllSpectateSessions('Live Spectate is disabled; background bot stopped.');
-    return;
-  }
-  for (const serverId of [...spectateSessions.keys()]) {
-    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(serverId));
-    if (!server || runtimeStatus(server.id) !== 'online') {
-      if (server) stopSpectateSession(server);
-      else {
-        const session = spectateSessions.get(Number(serverId));
-        if (session?.timeout) clearTimeout(session.timeout);
-        stopLocalFramePush(session);
-        try { session?.child?.kill(); } catch {}
-        spectateSessions.delete(Number(serverId));
-      }
-    }
-  }
-}
-
-function spectateFrameSvg(payload) {
-  const players = payload.players || [];
-  const target = payload.target || players[0] || 'Overview';
-  const status = ['ready', 'connected'].includes(payload.status) ? 'LIVE' : payload.status.toUpperCase();
-  const stamp = new Date().toLocaleTimeString('en-US', { hour12: true });
-  const rows = players.slice(0, 8).map((player, index) => {
-    const y = 285 + index * 35;
-    const active = player === target;
-    return `<rect x="880" y="${y - 22}" width="300" height="28" rx="8" fill="${active ? '#34d399' : '#172033'}" opacity="${active ? '0.9' : '0.74'}"/><text x="895" y="${y}" font-size="16" fill="${active ? '#06110c' : '#dbeafe'}">${escapeXml(String(player))}</text>`;
-  }).join('');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-label="NexusPanel live spectate frame">
-  <defs>
-    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#07111f"/><stop offset="0.55" stop-color="#0f2a2f"/><stop offset="1" stop-color="#161024"/></linearGradient>
-    <radialGradient id="pulse" cx="38%" cy="44%" r="55%"><stop offset="0" stop-color="#34d399" stop-opacity="0.38"/><stop offset="1" stop-color="#34d399" stop-opacity="0"/></radialGradient>
-  </defs>
-  <rect width="1200" height="675" fill="url(#bg)"/>
-  <rect width="1200" height="675" fill="url(#pulse)"/>
-  <g opacity="0.35" stroke="#8ce7c8" stroke-width="1">${Array.from({ length: 18 }, (_, i) => `<path d="M0 ${i * 42} H1200"/>`).join('')}${Array.from({ length: 24 }, (_, i) => `<path d="M${i * 52} 0 V675"/>`).join('')}</g>
-  <rect x="42" y="38" width="1116" height="599" rx="26" fill="#050b14" opacity="0.55" stroke="#93c5fd" stroke-opacity="0.25"/>
-  <text x="72" y="92" font-family="Inter,Segoe UI,Arial" font-size="22" fill="#bfdbfe">NexusPanel Live Spectate</text>
-  <text x="72" y="145" font-family="Inter,Segoe UI,Arial" font-size="58" font-weight="700" fill="#ecfeff">${escapeXml(String(target))}</text>
-  <text x="72" y="188" font-family="Inter,Segoe UI,Arial" font-size="18" fill="#a7f3d0">${escapeXml(payload.serverName)} - ${escapeXml(payload.engine)} - ${escapeXml(status)}</text>
-  <circle cx="115" cy="362" r="96" fill="#22c55e" opacity="0.18"/><circle cx="115" cy="362" r="36" fill="#34d399" opacity="0.86"/>
-  <path d="M210 520 C330 350 440 350 550 520 S775 690 870 450" fill="none" stroke="#60a5fa" stroke-width="16" stroke-linecap="round" opacity="0.65"/>
-  <rect x="850" y="220" width="340" height="380" rx="18" fill="#08111f" opacity="0.78" stroke="#60a5fa" stroke-opacity="0.32"/>
-  <text x="880" y="260" font-family="Inter,Segoe UI,Arial" font-size="20" fill="#f8fafc">Players</text>
-  ${rows || '<text x="880" y="306" font-family="Inter,Segoe UI,Arial" font-size="16" fill="#94a3b8">No players detected yet.</text>'}
-  <text x="72" y="605" font-family="Inter,Segoe UI,Arial" font-size="15" fill="#cbd5e1">${escapeXml(payload.message || '')}</text>
-  <text x="1060" y="605" text-anchor="end" font-family="Inter,Segoe UI,Arial" font-size="15" fill="#a7f3d0">${escapeXml(stamp)}</text>
-</svg>`;
-}
-
-function escapeXml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&apos;',
-  }[char]));
 }
 
 function serverTombstoneKey(serverId) {
@@ -3521,6 +2748,172 @@ function commandWorks(command, args = ['--version']) {
   return !result.error && result.status === 0;
 }
 
+function tunnelKey(provider, serverId = 0) {
+  return `${provider}:${Number(serverId || 0)}`;
+}
+
+function tunnelProtocolForServer(server, requested = '') {
+  const protocol = String(requested || '').toLowerCase();
+  if (['tcp', 'udp'].includes(protocol)) return protocol;
+  return server?.type === 'bedrock' ? 'udp' : 'tcp';
+}
+
+async function readNgrokApi() {
+  if (!globalThis.fetch) return null;
+  const response = await fetch('http://127.0.0.1:4040/api/tunnels', {
+    signal: AbortSignal.timeout(1200),
+  }).catch(() => null);
+  if (!response?.ok) return null;
+  return response.json().catch(() => null);
+}
+
+function parseNgrokRemote(tunnel) {
+  const url = String(tunnel?.public_url || '');
+  if (!url) return { publicUrl: '', remoteHost: '' };
+  try {
+    const parsed = new URL(url);
+    return { publicUrl: url, remoteHost: parsed.host || url };
+  } catch {
+    return { publicUrl: url, remoteHost: url.replace(/^[a-z]+:\/\//i, '') };
+  }
+}
+
+async function ngrokStatus(server = null) {
+  const tunnels = (await readNgrokApi())?.tunnels || [];
+  const port = Number(server?.port || 0);
+  const matched = tunnels.find((item) => String(item.config?.addr || '').endsWith(`:${port}`) || String(item.config?.addr || '') === String(port)) || tunnels[0];
+  const parsed = parseNgrokRemote(matched);
+  const key = tunnelKey('ngrok', server?.id || 0);
+  const processInfo = tunnelProcesses.get(key);
+  return {
+    installed: commandWorks('ngrok', ['version']),
+    running: Boolean(matched || (processInfo?.child && !processInfo.child.killed)),
+    pid: processInfo?.child?.pid || 0,
+    publicUrl: parsed.publicUrl,
+    remoteHost: parsed.remoteHost,
+    protocol: matched?.proto || processInfo?.protocol || tunnelProtocolForServer(server),
+    message: matched ? `ngrok tunnel is live at ${parsed.remoteHost}` : (processInfo?.message || ''),
+  };
+}
+
+async function startNgrokTunnel(server, requestedProtocol = '') {
+  if (isHostEdition()) throw new Error('Normal-edition tunnels are not available in host edition.');
+  if (!commandWorks('ngrok', ['version'])) throw new Error('ngrok is not installed on the VPS. Install ngrok first, then retry from the panel.');
+  const token = settingValue('ngrok_auth_token', '');
+  if (!token) throw new Error('Save your ngrok auth token in Settings first.');
+  const protocol = tunnelProtocolForServer(server, requestedProtocol);
+  const key = tunnelKey('ngrok', server.id);
+  const existing = tunnelProcesses.get(key);
+  if (existing?.child && !existing.child.killed) return ngrokStatus(server);
+  const auth = spawnSync('ngrok', ['config', 'add-authtoken', token], { encoding: 'utf8', windowsHide: true });
+  if (auth.error || auth.status !== 0) throw new Error(`ngrok auth setup failed: ${(auth.stderr || auth.stdout || auth.error?.message || '').slice(-400)}`);
+  const child = spawn('ngrok', [protocol, String(server.port)], {
+    cwd: path.join(__dirname, '..'),
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  const state = { child, protocol, message: `Starting ngrok ${protocol} tunnel for ${server.name}...` };
+  tunnelProcesses.set(key, state);
+  child.stdout.on('data', (chunk) => {
+    state.message = String(chunk).trim().slice(-500) || state.message;
+  });
+  child.stderr.on('data', (chunk) => {
+    state.message = String(chunk).trim().slice(-500) || state.message;
+  });
+  child.on('exit', (code, signal) => {
+    state.message = `ngrok exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
+  });
+  await wait(1800);
+  const status = await ngrokStatus(server);
+  appendLog(server.id, `[NexusPanel] ngrok ${protocol} tunnel ${status.remoteHost ? `ready: ${status.remoteHost}` : 'started; waiting for remote address'}.`);
+  return status;
+}
+
+function stopTunnelProcess(provider, serverId = 0) {
+  const state = tunnelProcesses.get(tunnelKey(provider, serverId));
+  if (!state) return false;
+  try {
+    if (state.child && !state.child.killed) state.child.kill();
+  } catch {}
+  tunnelProcesses.delete(tunnelKey(provider, serverId));
+  return true;
+}
+
+function sudoPrefix() {
+  return process.platform !== 'win32' && typeof process.getuid === 'function' && process.getuid() !== 0 ? 'sudo -n ' : '';
+}
+
+async function installPlayitAgent() {
+  if (process.platform !== 'linux') throw new Error('Playit one-click install is only supported on Linux VPS hosts.');
+  if (!commandWorks('apt-get', ['--version'])) throw new Error('Playit one-click install currently supports Ubuntu/Debian apt hosts.');
+  const sudo = sudoPrefix();
+  const command = [
+    `${sudo}apt-get update`,
+    `${sudo}apt-get install -y ca-certificates curl gnupg`,
+    `curl -SsL https://playit-cloud.github.io/ppa/key.gpg | ${sudo}gpg --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg`,
+    `echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | ${sudo}tee /etc/apt/sources.list.d/playit-cloud.list >/dev/null`,
+    `${sudo}apt-get update`,
+    `${sudo}apt-get install -y playit`,
+  ].join(' && ');
+  await runShellCommand(command, path.join(__dirname, '..'));
+  return playitStatus();
+}
+
+function playitStatus() {
+  const installed = commandWorks('playit', ['--version']);
+  let service = { active: false, enabled: false, detail: '' };
+  if (process.platform === 'linux' && commandWorks('systemctl', ['--version'])) {
+    const active = spawnSync('systemctl', ['is-active', 'playit'], { encoding: 'utf8', windowsHide: true });
+    const enabled = spawnSync('systemctl', ['is-enabled', 'playit'], { encoding: 'utf8', windowsHide: true });
+    service = {
+      active: active.status === 0,
+      enabled: enabled.status === 0,
+      detail: `${String(active.stdout || active.stderr || '').trim()} ${String(enabled.stdout || enabled.stderr || '').trim()}`.trim(),
+    };
+  }
+  return {
+    installed,
+    running: service.active,
+    enabled: service.enabled,
+    message: installed
+      ? service.active ? 'Playit agent is running on the VPS.' : 'Playit is installed. Start it, then claim/setup tunnels in the Playit dashboard if prompted.'
+      : 'Playit is not installed on the VPS.',
+  };
+}
+
+async function startPlayitAgent() {
+  if (!commandWorks('playit', ['--version'])) throw new Error('Playit is not installed on the VPS. Click Install Playit first.');
+  if (process.platform === 'linux' && commandWorks('systemctl', ['--version'])) {
+    const sudo = sudoPrefix();
+    await runShellCommand(`${sudo}systemctl enable playit && ${sudo}systemctl start playit`, path.join(__dirname, '..'));
+    return playitStatus();
+  }
+  const key = tunnelKey('playit', 0);
+  const existing = tunnelProcesses.get(key);
+  if (existing?.child && !existing.child.killed) return { ...playitStatus(), running: true, pid: existing.child.pid };
+  const child = spawn('playit', [], {
+    cwd: path.join(__dirname, '..'),
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  const state = { child, protocol: 'playit', message: 'Playit agent started.' };
+  tunnelProcesses.set(key, state);
+  child.stdout.on('data', (chunk) => { state.message = String(chunk).trim().slice(-600) || state.message; });
+  child.stderr.on('data', (chunk) => { state.message = String(chunk).trim().slice(-600) || state.message; });
+  return { ...playitStatus(), running: true, pid: child.pid, message: state.message };
+}
+
+async function stopPlayitAgent() {
+  stopTunnelProcess('playit', 0);
+  if (process.platform === 'linux' && commandWorks('systemctl', ['--version'])) {
+    const sudo = sudoPrefix();
+    await runShellCommand(`${sudo}systemctl stop playit`, path.join(__dirname, '..')).catch(() => {});
+  }
+  return playitStatus();
+}
+
 function runRequirementCommand(command, args) {
   const result = spawnSync(command, args, {
     encoding: 'utf8',
@@ -4249,24 +3642,35 @@ app.get('/api/settings/update-status', requirePermission(capabilities.SETTINGS_M
   res.json({ update: updateStatus });
 });
 
-app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   if (isHostEdition()) return res.status(404).json({ error: 'Normal-edition tunnel setup is not available in host edition.' });
   const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
   const port = Number(server?.port || 25565);
-  const isBedrock = String(server?.type || '').toLowerCase() === 'bedrock';
+  const protocol = tunnelProtocolForServer(server, req.query.protocol);
+  const ngrok = server ? await ngrokStatus(server) : { installed: commandWorks('ngrok', ['version']), running: false, publicUrl: '', remoteHost: '', protocol };
+  const playit = playitStatus();
   res.json({
     server: server ? { id: server.id, name: server.name, type: server.type, port } : null,
     ngrok: {
       configured: Boolean(settingValue('ngrok_auth_token', '')),
-      protocol: isBedrock ? 'udp-required' : 'tcp',
-      command: isBedrock ? '' : `ngrok tcp ${port}`,
-      note: isBedrock ? 'Bedrock uses UDP. Use playit.gg or a UDP-capable tunnel for best results.' : 'Run this on the VPS after saving your ngrok token.',
+      installed: ngrok.installed,
+      running: ngrok.running,
+      protocol,
+      publicUrl: ngrok.publicUrl,
+      remoteHost: ngrok.remoteHost,
+      command: `ngrok ${protocol} ${port}`,
+      note: protocol === 'udp'
+        ? 'Bedrock uses UDP. ngrok UDP requires an ngrok plan/account that supports UDP endpoints; Playit is usually easier for Bedrock.'
+        : 'Java normally uses TCP. Save the ngrok token, then start the tunnel from this panel.',
     },
     playit: {
       enabled: settingValue('playit_enabled', '0') === '1',
+      installed: playit.installed,
+      running: playit.running,
+      serviceEnabled: playit.enabled,
       setupUrl: 'https://playit.gg/account/agents',
       command: 'playit',
-      note: 'Open the link, create an agent, then run playit on the VPS to claim the tunnel.',
+      note: playit.message,
     },
     quick: {
       enabled: settingValue('quick_tunnel_enabled', '0') === '1',
@@ -4274,6 +3678,39 @@ app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAG
       note: 'No-login temporary TCP tunnel. Best for Java testing, not permanent hosting.',
     },
   });
+}));
+
+app.post('/api/tunnels/ngrok/start', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.body.serverId || req.query.serverId);
+  res.json({ ngrok: await startNgrokTunnel(server, req.body.protocol || req.query.protocol) });
+}));
+
+app.post('/api/tunnels/ngrok/stop', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.body.serverId || req.query.serverId);
+  stopTunnelProcess('ngrok', server.id);
+  res.json({ ngrok: await ngrokStatus(server) });
+}));
+
+app.get('/api/tunnels/ngrok/status', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
+  res.json({ ngrok: await ngrokStatus(server) });
+}));
+
+app.post('/api/tunnels/playit/install', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {
+  if (!ownerOnly(_req)) return res.status(403).json({ error: 'Only the owner can install VPS tunnel software.' });
+  res.json({ playit: await installPlayitAgent() });
+}));
+
+app.post('/api/tunnels/playit/start', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
+  res.json({ playit: await startPlayitAgent() });
+}));
+
+app.post('/api/tunnels/playit/stop', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
+  res.json({ playit: await stopPlayitAgent() });
+}));
+
+app.get('/api/tunnels/playit/status', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
+  res.json({ playit: playitStatus() });
 });
 
 app.get('/api/servers/:id/nexus-mark', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
@@ -4287,21 +3724,6 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
   setSettingValue('repair_web_enabled', toBool(req.body.repairWebEnabled, true) ? '1' : '0');
   setSettingValue('repair_agent_terminal_enabled', toBool(req.body.repairAgentTerminalEnabled, true) ? '1' : '0');
-  const liveSpectateEnabled = toBool(req.body.liveSpectateEnabled);
-  setSettingValue('live_spectate_enabled', liveSpectateEnabled ? '1' : '0');
-  if (!liveSpectateEnabled) stopAllSpectateSessions('Live Spectate was disabled in Settings; background bot stopped.');
-  const spectateJavaAuth = String(req.body.spectateJavaAuth || settingValue('spectate_java_auth', 'offline')).trim().toLowerCase();
-  const spectateBedrockAuth = String(req.body.spectateBedrockAuth || settingValue('spectate_bedrock_auth', 'offline')).trim().toLowerCase();
-  if (['offline', 'microsoft'].includes(spectateJavaAuth)) setSettingValue('spectate_java_auth', spectateJavaAuth);
-  if (['offline', 'microsoft'].includes(spectateBedrockAuth)) setSettingValue('spectate_bedrock_auth', spectateBedrockAuth);
-  const spectateClientVideoUrl = String(req.body.spectateClientVideoUrl || '').trim();
-  if (spectateClientVideoUrl) {
-    const parsed = new URL(spectateClientVideoUrl);
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
-      return res.status(400).json({ error: 'Client video URL must be HTTP or HTTPS without embedded credentials.' });
-    }
-  }
-  setSettingValue('spectate_client_video_url', spectateClientVideoUrl);
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
   if (publicBaseUrl) {
@@ -5202,139 +4624,6 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
     load: Number(load.toFixed(2)),
     cores: hostCpuCount(),
   });
-});
-
-app.get('/api/servers/:id/spectate', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  res.json(spectateSessionPayload(server, req));
-});
-
-app.get('/api/servers/:id/spectate/stream', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders?.();
-  const writePayload = () => {
-    try {
-      res.write(`event: spectate\n`);
-      res.write(`data: ${JSON.stringify(spectateSessionPayload(server, req))}\n\n`);
-    } catch {}
-  };
-  writePayload();
-  const timer = setInterval(writePayload, server.type === 'bedrock' ? 180 : 500);
-  timer.unref();
-  req.on('close', () => clearInterval(timer));
-});
-
-app.post('/api/servers/:id/spectate/control', requirePermission(capabilities.CONSOLE_COMMAND, permissions.SEND_COMMANDS), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  const session = spectateSessions.get(Number(server.id));
-  if (!session || session.status === 'stopped') return res.status(409).json({ error: 'Start the spectate bot first.' });
-  const moved = moveSpectateBot(server, session, req.body.action, req.body.yaw);
-  if (!moved) return res.status(400).json({ error: 'Movement command could not be applied.' });
-  try { session.child?.send?.({ type: 'local-move', entity: moved }); } catch {}
-  res.json({ ok: true, entity: moved });
-});
-
-app.get(['/api/servers/:id/spectate/renderer', '/api/servers/:id/spectate/renderer/*'], requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  const session = spectateSessions.get(Number(server.id));
-  if (!session || session.rendererStatus !== 'ready' || !session.rendererPort) {
-    return res.status(404).send('Spectate renderer is not ready.');
-  }
-  const marker = `/api/servers/${server.id}/spectate/renderer`;
-  const markerIndex = req.originalUrl.indexOf(marker);
-  const suffix = markerIndex >= 0 ? req.originalUrl.slice(markerIndex + marker.length) : '/';
-  const targetPath = suffix && suffix !== '' ? suffix : '/';
-  const upstream = http.request({
-    hostname: '127.0.0.1',
-    port: Number(session.rendererPort),
-    path: targetPath,
-    method: 'GET',
-    headers: {
-      Accept: req.headers.accept || '*/*',
-      'User-Agent': 'NexusPanel-renderer-proxy',
-      Connection: 'close',
-    },
-  }, (upstreamRes) => {
-    res.status(upstreamRes.statusCode || 502);
-    for (const [key, value] of Object.entries(upstreamRes.headers)) {
-      if (['connection', 'content-length', 'keep-alive', 'transfer-encoding'].includes(key.toLowerCase())) continue;
-      if (value !== undefined) res.setHeader(key, value);
-    }
-    upstreamRes.pipe(res);
-  });
-  upstream.on('error', (error) => {
-    if (!res.headersSent) res.status(502).send(`Spectate renderer proxy failed: ${error.message}`);
-    else res.destroy(error);
-  });
-  req.on('close', () => upstream.destroy());
-  upstream.end();
-});
-
-app.post('/api/servers/:id/spectate/frame-push', (req, res) => {
-  const server = getServerOr404(req.params.id);
-  if (settingValue('live_spectate_enabled', '0') !== '1') return res.status(403).json({ error: 'Live spectate is disabled.' });
-  if (!validateSpectateFrameToken(req)) return res.status(401).json({ error: 'Invalid spectate frame token.' });
-  if (!Buffer.isBuffer(req.body) || req.body.length < 64) return res.status(400).json({ error: 'Frame body is required.' });
-  const contentType = String(req.headers['content-type'] || 'image/jpeg').split(';')[0].trim().toLowerCase();
-  if (!['image/jpeg', 'image/png', 'image/webp', 'application/octet-stream'].includes(contentType)) {
-    return res.status(415).json({ error: 'Use JPEG, PNG, or WebP frames.' });
-  }
-  const feed = pushSpectateFrame(server.id, req.body, contentType === 'application/octet-stream' ? 'image/jpeg' : contentType);
-  res.json({ ok: true, bytes: req.body.length, updatedAt: feed.updatedAt, viewers: feed.clients.size });
-});
-
-app.get('/api/servers/:id/spectate/frame-stream.mjpg', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  const feed = spectateFeedFor(server.id);
-  res.setHeader('Content-Type', 'multipart/x-mixed-replace; boundary=nexuspanel-spectate');
-  res.setHeader('Cache-Control', 'no-store, no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders?.();
-  feed.clients.add(res);
-  writeSpectateFrame(res, feed);
-  const heartbeat = setInterval(() => writeSpectateFrame(res, feed), 5000);
-  heartbeat.unref();
-  req.on('close', () => {
-    clearInterval(heartbeat);
-    feed.clients.delete(res);
-  });
-});
-
-app.post('/api/servers/:id/spectate/start', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  res.json(startSpectateSession(server, req));
-});
-
-app.post('/api/servers/:id/spectate/stop', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  stopSpectateSession(server);
-  res.json(spectateSessionPayload(server, req));
-});
-
-app.post('/api/servers/:id/spectate/target', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  const session = spectateSessions.get(Number(server.id));
-  if (!session || session.status === 'stopped' || session.status === 'error') {
-    return res.status(409).json({ error: 'Start the spectate bot before switching targets.' });
-  }
-  session.target = String(req.body.target || '').slice(0, 80);
-  session.updatedAt = Date.now();
-  if (session.child) {
-    try { session.child.send({ type: 'target', target: session.target }); } catch {}
-  }
-  spectateSessions.set(Number(server.id), session);
-  res.json(spectateSessionPayload(server, req));
-});
-
-app.get('/api/servers/:id/spectate/frame.svg', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const server = getServerOr404(req.params.id);
-  const payload = spectateSessionPayload(server, req);
-  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store');
-  res.send(spectateFrameSvg(payload));
 });
 
 app.use('/api/servers/:id/timeline', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
@@ -6292,11 +5581,9 @@ async function runLiveAgentSweep() {
 
 function startSchedulers() {
   setInterval(runAutoBackups, 30 * 1000).unref();
-  setInterval(pruneSpectateSessions, 10 * 1000).unref();
   setInterval(() => runAdaptiveMaintenance().catch(() => {}), 2 * 60 * 1000).unref();
   setInterval(() => runHealthCheck(false).catch(() => {}), 24 * 60 * 60 * 1000).unref();
   runAutoBackups().catch(() => {});
-  pruneSpectateSessions();
   runAdaptiveMaintenance().catch(() => {});
   runHealthCheck(false).catch(() => {});
 }

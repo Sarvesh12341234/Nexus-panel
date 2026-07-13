@@ -84,7 +84,7 @@ Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the ex
 - Live collaborators show when another owner/admin is viewing the same server.
 - DDoS Guard adds a bounded 999,999-parameter defensive classifier for TCP SYN pressure, UDP/Bedrock floods, connection fanout, bandwidth drops, conntrack pressure, and firewall misconfiguration signals.
 - DDoS Guard uses local VPS telemetry and presents owner-reviewed mitigation commands instead of silently changing firewall rules.
-- Normal edition settings include ngrok token storage, playit.gg setup guidance, and no-login quick tunnel command generation for temporary Java testing.
+- Normal edition settings include ngrok TCP/UDP helpers with remote-address status, Playit VPS install/start controls, and no-login quick tunnel command generation for temporary Java testing.
 - Repair & Diagnose quarantines incompatible Bedrock packs when recent logs show `min_engine_version` is higher than the installed server supports.
 - Console metrics now read Nexus-Mark cgroups or full process trees, so Java/Bedrock child memory is counted instead of only the wrapper process.
 - Console logs and metrics load together and refresh with shorter throttles to reduce the slow first-open delay.

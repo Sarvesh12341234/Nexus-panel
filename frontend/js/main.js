@@ -21,10 +21,6 @@ const state = {
   statusRefreshAt: 0,
   consolePollAt: {},
   consoleMetricsAt: {},
-  spectatePollAt: 0,
-  spectateData: null,
-  spectateStream: null,
-  spectateStreamServerId: 0,
   presenceAt: 0,
   serverStatusSignature: '',
 };
@@ -77,7 +73,6 @@ const elements = {
   consoleBox: document.querySelector('#consoleBox'),
   consoleMetrics: document.querySelector('#consoleMetrics'),
   presencePanel: document.querySelector('#presencePanel'),
-  spectatePanel: document.querySelector('#spectatePanel'),
   commandForm: document.querySelector('#commandForm'),
   serverConfigForm: document.querySelector('#serverConfigForm'),
   adminServerAssign: document.querySelector('#adminServerAssign'),
@@ -104,7 +99,6 @@ let currentUpload = { path: '', size: 0, paused: false, canceled: false };
 let consoleStickToBottom = true;
 let consoleRenderToken = 0;
 let terminalSession = { id: '', cursor: 0, timer: 0 };
-let spectateAnimation = { id: 0, serverId: 0, startedAt: 0 };
 const versionCache = new Map();
 const publicBackupLinks = new Map();
 const UI_PREFERENCES_KEY = 'nexusUiPreferences';
@@ -219,7 +213,6 @@ const viewTitles = {
   dashboard: ['Dashboard', 'Servers'],
   servers: ['Servers', 'Specific Servers'],
   console: ['Server', 'Console'],
-  spectate: ['Live', 'Spectate'],
   files: ['Server', 'File Manager'],
   templates: ['Templates', 'One-click Setup'],
   software: ['Server', 'Software Installer'],
@@ -239,7 +232,6 @@ const viewAccess = {
   dashboard: { keys: [], level: 'VIEW_ONLY' },
   servers: { keys: [CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART, CAPABILITIES.SERVER_KILL, CAPABILITIES.SERVER_MANAGE], level: 'POWER_SERVERS' },
   console: { keys: [CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.CONSOLE_COMMAND], level: 'VIEW_CONSOLE' },
-  spectate: { keys: [CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.NETWORK_MANAGE], level: 'VIEW_CONSOLE' },
   files: { keys: [CAPABILITIES.FILES_MANAGE], level: 'MANAGE_FILES' },
   templates: { keys: [CAPABILITIES.SERVER_MANAGE], level: 'MANAGE_SERVERS' },
   software: { keys: [CAPABILITIES.SOFTWARE_MANAGE], level: 'MANAGE_SERVERS' },
@@ -1191,7 +1183,6 @@ function canView(view) {
   if (!state.user || !Object.hasOwn(viewAccess, view)) return false;
   if (view === 'templates' && state.settings?.edition !== 'host') return false;
   if (view === 'terminal') return state.user.role === 'owner';
-  if (view === 'spectate' && !state.settings?.liveSpectateEnabled) return false;
   const access = viewAccess[view];
   if (!access.keys.length) return true;
   return can(access.keys, Number(state.permissions[access.level] || 0));
@@ -1742,7 +1733,6 @@ async function renderActiveView() {
   if (state.activeView === 'whitelist') await renderWhitelist();
   if (state.activeView === 'plugins') renderPlugins();
   if (state.activeView === 'console') await renderConsole();
-  if (state.activeView === 'spectate') await renderSpectate();
   if (state.activeView === 'files') {
     await renderFiles();
     await renderUploadSessions();
@@ -1879,781 +1869,6 @@ async function renderPresence(server) {
   elements.presencePanel.innerHTML = users.length
     ? users.map((user) => `<div class="plugin-row"><div><strong>${escapeHtml(user.name || user.email)}</strong><div class="muted">Viewing ${escapeHtml(user.view || 'panel')} now</div></div><span class="badge is-on">Live</span></div>`).join('')
     : '<div class="plugin-row"><div><strong>Live collaborators</strong><div class="muted">No other owner/admin is viewing this server right now.</div></div><span class="badge">Solo</span></div>';
-}
-
-async function renderSpectate() {
-  if (!elements.spectatePanel) return;
-  const server = activeServer();
-  if (!state.settings?.liveSpectateEnabled) {
-    stopSpectateVideo();
-    closeSpectateStream();
-    elements.spectatePanel.innerHTML = '<div class="section-head"><div><p class="eyebrow">Live Spectate</p><h2>Disabled</h2></div></div><p class="empty-state">Enable Live spectate section in Settings.</p>';
-    return;
-  }
-  if (!server) {
-    stopSpectateVideo();
-    closeSpectateStream();
-    elements.spectatePanel.innerHTML = '<div class="section-head"><div><p class="eyebrow">Live Spectate</p><h2>No server</h2></div></div><p class="empty-state">Create a server before opening a live spectate session.</p>';
-    return;
-  }
-  const data = await api(`/api/servers/${server.id}/spectate`).catch((error) => ({ error: error.message, players: [] }));
-  state.spectateData = data;
-  state.spectatePlayerSignature = (data.players || []).join('|');
-  const authHint = data.authMode === 'microsoft'
-    ? 'Microsoft mode uses device/browser login and token cache. Watch the server console for the login prompt.'
-    : 'Offline mode joins without a Microsoft account when the server allows it.';
-  const playerButtons = (data.players || []).map((player) => `
-    <button class="secondary spectate-player-button" type="button" data-action="spectate-target" data-player-name="${escapeHtml(player)}">${escapeHtml(player)}</button>
-  `).join('');
-  const running = ['connecting', 'connected', 'ready'].includes(data.status);
-  const framePushUrl = `${state.settings?.publicBaseUrl || window.location.origin}/api/servers/${server.id}/spectate/frame-push`;
-  const framePushToken = state.settings?.spectateFramePushToken || state.settings?.spectateFramePushTokenPreview || '';
-  elements.spectatePanel.innerHTML = `
-    <div class="section-head spectate-head">
-      <div><p class="eyebrow">Live Spectate</p><h2>${escapeHtml(server.name)}</h2></div>
-      <div class="row-actions">
-        <button type="button" data-action="spectate-start" ${data.serverStatus === 'online' && !running ? '' : 'disabled'}>${running ? 'Bot Running' : 'Start Bot'}</button>
-        <button class="secondary" type="button" data-action="spectate-refresh">Refresh</button>
-        <button class="danger" type="button" data-action="spectate-stop" ${data.status === 'stopped' ? 'disabled' : ''}>Stop</button>
-      </div>
-    </div>
-    <div class="metric-grid">
-      <div><strong data-spectate-status>${escapeHtml(data.status || 'stopped')}</strong><span>Session</span></div>
-      <div><strong data-spectate-server>${escapeHtml(data.serverStatus || server.status)}</strong><span>Server</span></div>
-      <div><strong data-spectate-engine>${escapeHtml(data.serverType === 'bedrock' ? 'Bedrock viewer' : data.engine || 'Bot engine')}</strong><span>${data.serverType === 'bedrock' ? 'Browser 3D renderer' : data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
-      <div><strong data-spectate-bot>${escapeHtml(data.botName || 'live-update')}</strong><span>${escapeHtml(data.authMode || 'offline')} auth</span></div>
-      <div><strong data-spectate-target>${escapeHtml(data.target || 'Overview')}</strong><span>Target</span></div>
-      <div><strong data-spectate-pid>${data.pid ? Number(data.pid) : '-'}</strong><span>Bot PID</span></div>
-    </div>
-    <div class="spectate-frame-wrap" data-spectate-surface>
-      ${renderSpectateSurface(data)}
-    </div>
-    <div class="plugin-row">
-      <div><strong data-spectate-message>${escapeHtml(data.error || data.message || 'Live spectate ready.')}</strong><div class="muted" data-spectate-detail>${data.packageInstalled ? `${escapeHtml(data.host || '127.0.0.1')}:${Number(data.port || server.port)} - ${escapeHtml(data.botName || 'live-update')} - ${escapeHtml(authHint)}` : `Install inside /opt/nexuspanel: ${escapeHtml(data.installCommand || 'npm install mineflayer')}`}</div></div>
-      <span class="badge ${data.packageInstalled && data.status !== 'missing-engine' ? 'is-on' : ''}" data-spectate-badge>${data.packageInstalled ? 'Engine ready' : 'Needs engine'}</span>
-    </div>
-    <div class="settings-group">
-      <strong>Switch Player</strong>
-      <div class="row-actions" data-spectate-players>${playerButtons || '<span class="muted">No players detected from console telemetry yet.</span>'}</div>
-    </div>
-    <div class="settings-group">
-      <strong>Real Bedrock Client Stream</strong>
-      <label>Frame push endpoint <input readonly value="${escapeHtml(framePushUrl)}"></label>
-      <label>Frame push token <input readonly value="${escapeHtml(framePushToken)}"></label>
-      <div class="muted">Run a real Minecraft Bedrock client on a capture machine, then push that client window/monitor into this endpoint.</div>
-    </div>
-  `;
-  startSpectateVideo(server.id);
-  ensureSpectateStream(server.id);
-}
-
-function renderSpectateSurface(data) {
-  if (data.framePushActive && data.framePushUrl) {
-    return `<img class="spectate-video spectate-client-video" data-spectate-frame-push src="${escapeHtml(data.framePushUrl)}" alt="Live spectator client frame stream">`;
-  }
-  if (data.clientVideoUrl) {
-    return renderClientVideoUrl(data.clientVideoUrl);
-  }
-  if (data.rendererUrl) {
-    return `
-      <iframe class="spectate-frame" src="${escapeHtml(data.rendererUrl)}" title="Live Minecraft renderer" loading="eager" allow="fullscreen"></iframe>
-    `;
-  }
-  if (data.serverType === 'bedrock') {
-    return '<div class="spectate-empty-video"><div><strong>Bedrock renderer starting</strong><span>Only real decoded chunk/entity data will be shown here.</span></div></div>';
-  }
-  return '<canvas class="spectate-video" id="spectateVideo" width="1280" height="720" aria-label="Live spectate video"></canvas>';
-}
-
-function isDirectVideoUrl(url) {
-  return /\.(?:mp4|webm|ogg|ogv|mov)(?:[?#].*)?$/i.test(String(url || ''));
-}
-
-function renderClientVideoUrl(url) {
-  if (isDirectVideoUrl(url)) {
-    return `<video class="spectate-video spectate-client-video" src="${escapeHtml(url)}" autoplay muted playsinline controls></video>`;
-  }
-  return `<iframe class="spectate-frame" src="${escapeHtml(url)}" title="Watch-only Minecraft client stream" loading="eager" allow="autoplay; fullscreen; encrypted-media; picture-in-picture"></iframe>`;
-}
-
-function syncSpectateSurface(data) {
-  const surface = elements.spectatePanel?.querySelector('[data-spectate-surface]');
-  if (!surface) return;
-  const iframe = surface.querySelector('iframe');
-  const canvas = surface.querySelector('canvas');
-  const video = surface.querySelector('video');
-  const framePush = surface.querySelector('[data-spectate-frame-push]');
-  if (data.framePushActive && data.framePushUrl) {
-    if (!framePush || framePush.getAttribute('src') !== data.framePushUrl) {
-      stopSpectateVideo();
-      surface.innerHTML = renderSpectateSurface(data);
-    }
-    return;
-  }
-  if (data.clientVideoUrl) {
-    const directVideo = isDirectVideoUrl(data.clientVideoUrl);
-    const expectedSource = directVideo ? video?.getAttribute('src') : iframe?.getAttribute('src');
-    if (expectedSource !== data.clientVideoUrl) {
-      stopSpectateVideo();
-      surface.innerHTML = renderClientVideoUrl(data.clientVideoUrl);
-    }
-    return;
-  }
-  if (data.rendererUrl) {
-    if (!iframe || iframe.getAttribute('src') !== data.rendererUrl) {
-      stopSpectateVideo();
-      surface.innerHTML = renderSpectateSurface(data);
-    }
-    return;
-  }
-  if (!canvas) {
-    surface.innerHTML = renderSpectateSurface(data);
-    const server = activeServer();
-    if (server) startSpectateVideo(server.id);
-  }
-}
-
-function renderSpectatePlayerButtons(data) {
-  return (data.players || []).map((player) => `
-    <button class="secondary spectate-player-button" type="button" data-action="spectate-target" data-player-name="${escapeHtml(player)}">${escapeHtml(player)}</button>
-  `).join('') || '<span class="muted">No players detected from console telemetry yet.</span>';
-}
-
-function updateSpectateLiveDom(data) {
-  const panel = elements.spectatePanel;
-  if (!panel || state.activeView !== 'spectate') return;
-  const setText = (selector, value) => {
-    const node = panel.querySelector(selector);
-    if (node) node.textContent = value;
-  };
-  setText('[data-spectate-status]', data.status || 'stopped');
-  setText('[data-spectate-server]', data.serverStatus || '');
-  setText('[data-spectate-engine]', data.serverType === 'bedrock' ? 'Bedrock viewer' : data.engine || 'Bot engine');
-  setText('[data-spectate-bot]', data.botName || 'live-update');
-  setText('[data-spectate-target]', data.target || 'Overview');
-  setText('[data-spectate-pid]', data.pid ? String(Number(data.pid)) : '-');
-  setText('[data-spectate-message]', data.error || (data.framePushActive ? 'Real spectator-client frame stream is active.' : data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.serverType === 'bedrock' && data.rendererUrl ? 'Bedrock browser 3D renderer is active.' : data.serverType === 'bedrock' ? 'Bedrock chunk adapter is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
-  const detail = panel.querySelector('[data-spectate-detail]');
-  if (detail) {
-    detail.textContent = data.framePushActive
-      ? `Frame stream updated ${data.framePushUpdatedAt ? new Date(data.framePushUpdatedAt).toLocaleTimeString() : 'now'}`
-      : data.serverType === 'bedrock'
-      ? (data.rendererMessage || 'Rendering live bot packets in your browser. A real client capture will replace this automatically when available.')
-      : data.packageInstalled
-      ? `${data.host || '127.0.0.1'}:${Number(data.port || 0)} - ${data.botName || 'live-update'} - ${(data.authMode || 'offline')} auth`
-      : `Install inside /opt/nexuspanel: ${data.installCommand || 'npm install mineflayer'}`;
-  }
-  const badge = panel.querySelector('[data-spectate-badge]');
-  if (badge) {
-    badge.textContent = data.serverType === 'bedrock' ? (data.rendererUrl ? 'Viewer ready' : 'Adapter ready') : data.packageInstalled ? 'Engine ready' : 'Needs engine';
-    badge.classList.toggle('is-on', Boolean(data.packageInstalled && data.status !== 'missing-engine'));
-  }
-  const signature = (data.players || []).join('|');
-  if (signature !== state.spectatePlayerSignature) {
-    state.spectatePlayerSignature = signature;
-    const players = panel.querySelector('[data-spectate-players]');
-    if (players) players.innerHTML = renderSpectatePlayerButtons(data);
-  }
-  syncSpectateSurface(data);
-  const canvas = panel.querySelector('#spectateVideo');
-  if (canvas && state.activeServerId) {
-    startSpectateVideo(state.activeServerId);
-  }
-}
-
-function closeSpectateStream() {
-  if (state.spectateStream) {
-    state.spectateStream.close();
-    state.spectateStream = null;
-  }
-  state.spectateStreamServerId = 0;
-}
-
-function ensureSpectateStream(serverId) {
-  if (!window.EventSource || !serverId || state.spectateStreamServerId === serverId) return;
-  closeSpectateStream();
-  const stream = new EventSource(`/api/servers/${serverId}/spectate/stream`);
-  state.spectateStream = stream;
-  state.spectateStreamServerId = serverId;
-  stream.addEventListener('spectate', (event) => {
-    try {
-      const data = JSON.parse(event.data || '{}');
-      state.spectateData = data;
-      state.spectatePollAt = Date.now();
-      updateSpectateLiveDom(data);
-    } catch {}
-  });
-  stream.onerror = () => {
-    closeSpectateStream();
-  };
-}
-
-async function pollSpectateData() {
-  const server = activeServer();
-  if (!server || !state.settings?.liveSpectateEnabled) return;
-  const data = await api(`/api/servers/${server.id}/spectate`);
-  state.spectateData = data;
-  updateSpectateLiveDom(data);
-}
-
-function stopSpectateVideo() {
-  if (spectateAnimation.id) window.cancelAnimationFrame(spectateAnimation.id);
-  spectateAnimation = { id: 0, serverId: 0, startedAt: 0 };
-}
-
-function spectateHash(value) {
-  let hash = 2166136261;
-  for (const char of String(value || '')) {
-    hash ^= char.charCodeAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
-}
-
-function terrainHeightAt(x, z, seed) {
-  const h = spectateHash(`${Math.floor(x / 4)}:${Math.floor(z / 4)}:${seed}`);
-  return 61 + (h % 9) + Math.sin((x + seed % 31) / 9) * 2 + Math.cos((z - seed % 17) / 11) * 2;
-}
-
-function drawVoxelCube(ctx, x, y, size, height, palette) {
-  const half = size / 2;
-  const top = [
-    [x, y - height],
-    [x + half, y - height + half * 0.45],
-    [x, y - height + half * 0.9],
-    [x - half, y - height + half * 0.45],
-  ];
-  const left = [top[3], top[2], [x, y + half * 0.9], [x - half, y + half * 0.45]];
-  const right = [top[1], top[2], [x, y + half * 0.9], [x + half, y + half * 0.45]];
-  const poly = (points, color) => {
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    points.forEach((point, index) => {
-      if (index) ctx.lineTo(point[0], point[1]);
-      else ctx.moveTo(point[0], point[1]);
-    });
-    ctx.closePath();
-    ctx.fill();
-  };
-  poly(left, palette.left);
-  poly(right, palette.right);
-  poly(top, palette.top);
-}
-
-function colorChannel(value, amount) {
-  return Math.max(0, Math.min(255, Math.round(value * amount)));
-}
-
-function rgbShade(color, amount) {
-  return `rgb(${colorChannel(color[0], amount)}, ${colorChannel(color[1], amount)}, ${colorChannel(color[2], amount)})`;
-}
-
-function adapterBlockColor(column, seed) {
-  if (typeof column.color === 'string' && /^#[0-9a-f]{6}$/i.test(column.color)) {
-    return [
-      parseInt(column.color.slice(1, 3), 16),
-      parseInt(column.color.slice(3, 5), 16),
-      parseInt(column.color.slice(5, 7), 16),
-    ];
-  }
-  const density = Math.max(0, Math.min(1, Number(column.d || 0)));
-  const y = Number(column.y || 64);
-  const hash = spectateHash(`${column.x}:${column.z}:${Math.round(y)}:${seed}`);
-  const band = hash % 9;
-  if (y < 55) return [42, 93 + band * 3, 151 + band * 2];
-  if (density > 0.78) return [111 + band * 3, 116 + band * 2, 120 + band * 2];
-  if (density > 0.58) return [105 + band * 4, 82 + band * 2, 55 + band];
-  if (y > 94) return [213, 226, 229];
-  if (band < 3) return [74 + band * 7, 151 + band * 8, 75 + band * 4];
-  if (band < 6) return [120 + band * 3, 171 + band * 5, 79 + band * 2];
-  return [151 + band * 2, 122 + band * 2, 82 + band];
-}
-
-function drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed) {
-  const world = data.world || {};
-  const chunks = Array.isArray(world.chunks) ? world.chunks : [];
-  const blockUpdates = Array.isArray(world.blockUpdates) ? world.blockUpdates : [];
-  const packetStats = world.packetStats || {};
-  const tile = Math.max(10, Math.min(18, width / 90));
-  const originX = width * 0.5;
-  const originY = height * 0.58;
-  const yaw = (Number(focus.yaw || 0) * Math.PI) / 180;
-  const cameraSway = Math.sin(elapsed / 1100) * 5;
-  const project = (x, y, z) => {
-    const rawDx = Number(x || 0) - Number(focus.x || 0);
-    const rawDz = Number(z || 0) - Number(focus.z || 0);
-    const dx = rawDx * Math.cos(yaw) - rawDz * Math.sin(yaw);
-    const dz = rawDx * Math.sin(yaw) + rawDz * Math.cos(yaw);
-    const dy = Number(y || 0) - Number(focus.y || 64);
-    return {
-      x: originX + (dx - dz) * tile * 0.58 + cameraSway,
-      y: originY + (dx + dz) * tile * 0.31 - dy * tile * 0.38,
-    };
-  };
-
-  ctx.save();
-  ctx.globalAlpha = 0.85;
-  ctx.strokeStyle = 'rgba(226, 232, 240, 0.18)';
-  ctx.lineWidth = 1;
-  for (let i = 0; i < 11; i += 1) {
-    const y = height * (0.22 + i * 0.055);
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y + Math.sin(elapsed / 900 + i) * 2);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  const drawPacketDiamond = (cx, cz, alpha = 0.82) => {
-    const corners = [
-      project(cx * 16, 64, cz * 16),
-      project(cx * 16 + 16, 64, cz * 16),
-      project(cx * 16 + 16, 64, cz * 16 + 16),
-      project(cx * 16, 64, cz * 16 + 16),
-    ];
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.strokeStyle = 'rgba(236, 254, 255, 0.72)';
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    corners.forEach((point, index) => {
-      if (index) ctx.lineTo(point.x, point.y);
-      else ctx.moveTo(point.x, point.y);
-    });
-    ctx.closePath();
-    ctx.stroke();
-    ctx.globalAlpha = alpha * 0.28;
-    ctx.fillStyle = '#e5e7eb';
-    ctx.fill();
-    ctx.restore();
-  };
-
-  const drawSolidColumn = (column) => {
-    const baseY = Number(column.y || 64);
-    const heightY = Number(column.h || 4);
-    const x = Number(column.x || 0);
-    const z = Number(column.z || 0);
-    const size = 1.18;
-    const bottom = [
-      project(x, baseY, z),
-      project(x + size, baseY, z),
-      project(x + size, baseY, z + size),
-      project(x, baseY, z + size),
-    ];
-    const top = [
-      project(x, baseY + heightY, z),
-      project(x + size, baseY + heightY, z),
-      project(x + size, baseY + heightY, z + size),
-      project(x, baseY + heightY, z + size),
-    ];
-    const density = Number(column.d || 0);
-    const baseColor = adapterBlockColor(column, seed);
-    const distance = Math.hypot(x - Number(focus.x || 0), z - Number(focus.z || 0));
-    const fog = Math.max(0.34, Math.min(1, 1 - distance / 170));
-    const alpha = Math.max(0.68, Math.min(0.98, 0.74 + density * 0.22)) * fog;
-    const poly = (points, color) => {
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      points.forEach((point, index) => {
-        if (index) ctx.lineTo(point.x, point.y);
-        else ctx.moveTo(point.x, point.y);
-      });
-      ctx.closePath();
-      ctx.fill();
-    };
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    const left = [top[3], top[2], bottom[2], bottom[3]];
-    const right = [top[1], top[2], bottom[2], bottom[1]];
-    const front = [top[0], top[1], bottom[1], bottom[0]];
-    poly(left, rgbShade(baseColor, 0.62));
-    poly(right, rgbShade(baseColor, 0.78));
-    poly(front, rgbShade(baseColor, 0.7));
-    poly(top, rgbShade(baseColor, 1.18));
-    ctx.globalAlpha = Math.min(0.38, alpha * 0.45);
-    ctx.strokeStyle = rgbShade(baseColor, 1.55);
-    ctx.lineWidth = 0.8;
-    ctx.beginPath();
-    top.forEach((point, index) => {
-      if (index) ctx.lineTo(point.x, point.y);
-      else ctx.moveTo(point.x, point.y);
-    });
-    ctx.closePath();
-    ctx.stroke();
-    ctx.restore();
-  };
-
-  for (const chunk of chunks.slice(-64)) {
-    drawPacketDiamond(chunk.x, chunk.z, 0.68);
-  }
-
-  const geometryColumns = chunks
-    .flatMap((chunk) => Array.isArray(chunk.geometry?.columns) ? chunk.geometry.columns : [])
-    .slice(-8192);
-  if (geometryColumns.length) {
-    const sortedColumns = [...geometryColumns].sort((left, right) => {
-      const leftDepth = (Number(left.x || 0) - Number(focus.x || 0)) + (Number(left.z || 0) - Number(focus.z || 0));
-      const rightDepth = (Number(right.x || 0) - Number(focus.x || 0)) + (Number(right.z || 0) - Number(focus.z || 0));
-      return leftDepth - rightDepth;
-    });
-    for (const column of sortedColumns) {
-      const point = project(column.x, column.y, column.z);
-      if (point.x < -100 || point.x > width + 100 || point.y < height * 0.08 || point.y > height + 120) continue;
-      drawSolidColumn(column);
-    }
-  }
-
-  for (const update of blockUpdates.slice(-40)) {
-    const point = project(update.x, update.y || terrainHeightAt(update.x, update.z, seed) + 1, update.z);
-    const age = Math.max(0, Math.min(1, 1 - ((Date.now() - Number(update.updatedAt || 0)) / 5000)));
-    ctx.save();
-    ctx.globalAlpha = 0.28 + age * 0.72;
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(point.x, point.y - 8, 5 + age * 9, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(point.x - 12, point.y - 8);
-    ctx.lineTo(point.x + 12, point.y - 8);
-    ctx.moveTo(point.x, point.y - 20);
-    ctx.lineTo(point.x, point.y + 4);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  ctx.fillStyle = 'rgba(4, 10, 18, 0.58)';
-  roundRect(ctx, width - 420, 28, 364, 112, 14);
-  ctx.fill();
-  ctx.fillStyle = '#f8fafc';
-  ctx.font = '700 13px Inter, Segoe UI, Arial';
-  ctx.textAlign = 'left';
-  ctx.fillText('Bedrock real chunk adapter', width - 398, 56);
-  ctx.fillStyle = '#cbd5e1';
-  ctx.font = '13px Inter, Segoe UI, Arial';
-  const adapter = packetStats.adapter || {};
-  ctx.fillText(`chunks ${chunks.length}  columns ${geometryColumns.length}  packets ${Number(packetStats.total || 0)}`, width - 398, 80);
-  ctx.fillText(`decoded ${Number(packetStats.renderPackets || 0)}  blobs ${Number(packetStats.cacheBlobs || 0)}  level_chunk ${Number(packetStats.levelChunk || 0)}`, width - 398, 102);
-  ctx.fillText(`last ${packetStats.lastPacket || 'waiting'}  yaw ${Math.round(Number(focus.yaw || 0))}`, width - 398, 124);
-  if (!chunks.length) {
-    const samples = Array.isArray(packetStats.samples) ? packetStats.samples : [];
-    const adapterError = packetStats.adapterError || adapter.error || '';
-    ctx.fillStyle = 'rgba(4, 10, 18, 0.72)';
-    roundRect(ctx, width / 2 - 330, height * 0.25, 660, samples.length || adapterError ? 132 : 58, 10);
-    ctx.fill();
-    ctx.fillStyle = '#f8fafc';
-    ctx.font = '700 14px Inter, Segoe UI, Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText(Number(packetStats.total || 0) > 0
-      ? `Receiving ${packetStats.lastPacket || 'packets'}, waiting for real decoded Bedrock chunks`
-      : 'Connected, waiting for Bedrock world packets', width / 2, height * 0.25 + 30);
-    if (adapterError) {
-      ctx.font = '12px Inter, Segoe UI, Arial';
-      ctx.fillStyle = '#fecaca';
-      ctx.fillText(adapterError.slice(0, 96), width / 2, height * 0.25 + 54);
-    }
-    if (samples.length) {
-      ctx.font = '12px Inter, Segoe UI, Arial';
-      ctx.fillStyle = '#cbd5e1';
-      samples.slice(-3).forEach((sample, index) => {
-        const keys = (sample.keys || []).slice(0, 4).join(',');
-        ctx.fillText(`${sample.name || 'packet'} bytes=${sample.bytes || 0} keys=${keys}`, width / 2, height * 0.25 + 76 + index * 18);
-      });
-    }
-  }
-  return { project, tile };
-}
-
-function drawSpectateVideo(canvas, data, elapsed) {
-  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
-  if (!ctx) return;
-  const width = canvas.width;
-  const height = canvas.height;
-  const seed = spectateHash(data.visualSeed || data.serverName || 'nexus');
-  const live = data.status === 'connected';
-  const target = data.target || data.botName || 'Overview';
-  const players = data.players || [];
-  const entities = (data.entities || []).filter((entity) => Number.isFinite(Number(entity.x)) && Number.isFinite(Number(entity.z)));
-  const bedrockVoxel = data.serverType === 'bedrock' && !data.rendererUrl;
-  const focus = entities.find((entity) => entity.name === target)
-    || entities.find((entity) => entity.self)
-    || entities[0]
-    || { name: target, x: 0, y: 64, z: 0, yaw: 0, pitch: 0 };
-  const pulse = (Math.sin(elapsed / 520) + 1) / 2;
-
-  const sky = ctx.createLinearGradient(0, 0, 0, height);
-  sky.addColorStop(0, live ? '#132f4c' : '#18202e');
-  sky.addColorStop(0.55, live ? '#1f4f45' : '#252638');
-  sky.addColorStop(1, live ? '#162018' : '#141821');
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, width, height);
-
-  let bedrockProjection = null;
-  if (bedrockVoxel) {
-    bedrockProjection = drawBedrockVoxelWorld(ctx, data, width, height, focus, seed, elapsed);
-  } else {
-    ctx.save();
-    ctx.globalAlpha = 0.18;
-    ctx.strokeStyle = live ? '#8fffd2' : '#a4b0c0';
-    ctx.lineWidth = 1;
-    const gridOffsetX = ((Number(focus.x) * 14) % 48 + 48) % 48;
-    const gridOffsetZ = ((Number(focus.z) * 10) % 38 + 38) % 38;
-    for (let x = -48 + gridOffsetX; x < width + 48; x += 48) {
-      ctx.beginPath();
-      ctx.moveTo(x, height * 0.48);
-      ctx.lineTo(width / 2 + (x - width / 2) * 1.8, height);
-      ctx.stroke();
-    }
-    for (let y = height * 0.52; y < height; y += 38) {
-      ctx.beginPath();
-      ctx.moveTo(0, y + gridOffsetZ * 0.3);
-      ctx.lineTo(width, y + gridOffsetZ * 0.3);
-      ctx.stroke();
-    }
-    ctx.restore();
-
-    for (let i = 0; i < 12; i += 1) {
-      const h = 70 + ((seed >> (i % 16)) & 95);
-      const x = i * 118 - ((elapsed / 90 + seed) % 118);
-      ctx.fillStyle = i % 2 ? 'rgba(14, 26, 38, 0.78)' : 'rgba(19, 43, 55, 0.72)';
-      ctx.fillRect(x, height * 0.42 - h, 84, h);
-      ctx.fillStyle = 'rgba(100, 255, 210, 0.18)';
-      for (let wy = height * 0.42 - h + 14; wy < height * 0.42 - 10; wy += 20) {
-        ctx.fillRect(x + 12, wy, 10, 8);
-        ctx.fillRect(x + 40, wy, 10, 8);
-      }
-    }
-  }
-
-  const worldToScreen = (entity) => {
-    if (bedrockProjection?.project) {
-      const point = bedrockProjection.project(entity.x, entity.y, entity.z);
-      return {
-        x: point.x,
-        y: point.y - bedrockProjection.tile * 1.2,
-        scale: Math.max(0.72, Math.min(1.35, 1 + (Number(entity.y || 0) - Number(focus.y || 0)) / 80)),
-      };
-    }
-    const dx = Number(entity.x || 0) - Number(focus.x || 0);
-    const dz = Number(entity.z || 0) - Number(focus.z || 0);
-    const dy = Number(entity.y || 0) - Number(focus.y || 0);
-    return {
-      x: width * 0.5 + dx * 16,
-      y: height * 0.61 + dz * 10 - dy * 2,
-      scale: Math.max(0.72, Math.min(1.35, 1 + (Number(entity.y || 0) - Number(focus.y || 0)) / 80)),
-    };
-  };
-
-  if (!entities.length) {
-    const cx = width * 0.5 + Math.sin(elapsed / 900) * 80;
-    const cy = height * 0.55 + Math.cos(elapsed / 760) * 28;
-    ctx.fillStyle = live ? '#41e69b' : '#8fa3b8';
-    ctx.shadowColor = live ? '#41e69b' : '#64748b';
-    ctx.shadowBlur = live ? 22 + pulse * 18 : 10;
-    ctx.beginPath();
-    ctx.arc(cx, cy, 26 + pulse * 3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = 'rgba(3, 8, 14, 0.72)';
-    roundRect(ctx, cx - 190, cy - 78, 380, 40, 10);
-    ctx.fill();
-    ctx.fillStyle = '#f8fafc';
-    ctx.font = '700 17px Inter, Segoe UI, Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('Waiting for movement packets', cx, cy - 52);
-  } else {
-    const ordered = [...entities].sort((left, right) => {
-      const ly = worldToScreen(left).y;
-      const ry = worldToScreen(right).y;
-      return ly - ry;
-    });
-    for (const entity of ordered) {
-      const screen = worldToScreen(entity);
-      const active = entity.name === target || entity.self;
-      const radius = (active ? 22 : 15) * screen.scale;
-      const yaw = Number(entity.yaw || 0) * (Math.PI / 180);
-      ctx.save();
-      ctx.globalAlpha = screen.x < -80 || screen.x > width + 80 || screen.y < -80 || screen.y > height + 80 ? 0.18 : 1;
-      ctx.fillStyle = active ? 'rgba(65, 230, 155, 0.2)' : 'rgba(96, 165, 250, 0.14)';
-      ctx.beginPath();
-      ctx.ellipse(screen.x, screen.y + radius * 1.2, radius * 1.35, radius * 0.45, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = active ? '#41e69b' : '#60a5fa';
-      ctx.shadowColor = active ? '#41e69b' : '#60a5fa';
-      ctx.shadowBlur = active ? 24 + pulse * 12 : 12;
-      if (bedrockVoxel) {
-        drawVoxelCube(ctx, screen.x, screen.y + radius * 0.6, radius * 1.45, radius * 2.3, {
-          top: active ? '#86efac' : '#93c5fd',
-          left: active ? '#16a34a' : '#2563eb',
-          right: active ? '#22c55e' : '#3b82f6',
-        });
-      } else {
-        ctx.beginPath();
-        ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = '#03111a';
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.moveTo(screen.x, screen.y);
-      ctx.lineTo(screen.x + Math.sin(yaw) * radius * 1.7, screen.y - Math.cos(yaw) * radius * 1.7);
-      ctx.stroke();
-      const label = entity.name;
-      const labelWidth = Math.min(260, Math.max(92, label.length * 10 + 30));
-      ctx.fillStyle = 'rgba(3, 8, 14, 0.78)';
-      ctx.strokeStyle = active ? 'rgba(65, 230, 155, 0.82)' : 'rgba(147, 197, 253, 0.45)';
-      roundRect(ctx, screen.x - labelWidth / 2, screen.y - radius - 44, labelWidth, 30, 9);
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = '#f8fafc';
-      ctx.font = '700 14px Inter, Segoe UI, Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText(label, screen.x, screen.y - radius - 24);
-      ctx.restore();
-    }
-  }
-
-  ctx.fillStyle = 'rgba(4, 10, 18, 0.78)';
-  roundRect(ctx, 28, 28, 420, 116, 14);
-  ctx.fill();
-  ctx.fillStyle = live ? '#41e69b' : '#fbbf24';
-  ctx.font = '800 18px Inter, Segoe UI, Arial';
-  ctx.textAlign = 'left';
-  ctx.fillText(live ? 'LIVE SPECTATE' : String(data.status || 'WAITING').toUpperCase(), 52, 66);
-  ctx.fillStyle = '#dbeafe';
-  ctx.font = '600 24px Inter, Segoe UI, Arial';
-  ctx.fillText(data.serverName || 'Server', 52, 101);
-  ctx.fillStyle = '#9fb3c8';
-  ctx.font = '14px Inter, Segoe UI, Arial';
-  ctx.fillText(`${data.botName || 'live-update'} - ${players.length || 0} player(s) - ${entities.length || 0} tracked - ${new Date().toLocaleTimeString()}`, 52, 128);
-
-  ctx.fillStyle = 'rgba(4, 10, 18, 0.74)';
-  roundRect(ctx, 28, height - 116, 390, 72, 14);
-  ctx.fill();
-  ctx.fillStyle = '#bfdbfe';
-  ctx.font = '700 14px Inter, Segoe UI, Arial';
-  ctx.fillText('Camera follow', 52, height - 84);
-  ctx.fillStyle = '#dbeafe';
-  ctx.font = '600 18px Inter, Segoe UI, Arial';
-  ctx.fillText(`${focus.name || target}  x:${Math.round(Number(focus.x || 0))} y:${Math.round(Number(focus.y || 0))} z:${Math.round(Number(focus.z || 0))}`, 52, height - 56);
-
-  const events = (data.recentEvents || []).slice(-4);
-  ctx.fillStyle = 'rgba(4, 10, 18, 0.68)';
-  roundRect(ctx, width - 470, height - 170, 430, 126, 14);
-  ctx.fill();
-  ctx.fillStyle = '#bfdbfe';
-  ctx.font = '700 15px Inter, Segoe UI, Arial';
-  ctx.fillText('Recent server events', width - 445, height - 138);
-  ctx.font = '13px Inter, Segoe UI, Arial';
-  ctx.fillStyle = '#cbd5e1';
-  events.forEach((event, index) => {
-    const text = String(event).replace(/^\[[^\]]+\]\s*/, '').slice(-70);
-    ctx.fillText(text, width - 445, height - 112 + index * 22);
-  });
-
-  ctx.fillStyle = live ? 'rgba(65, 230, 155, 0.95)' : 'rgba(251, 191, 36, 0.95)';
-  ctx.beginPath();
-  ctx.arc(width - 54, 52, 8 + pulse * 3, 0, Math.PI * 2);
-  ctx.fill();
-
-  if (bedrockVoxel) {
-    ctx.save();
-    ctx.strokeStyle = 'rgba(236, 254, 255, 0.7)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(width / 2 - 16, height / 2);
-    ctx.lineTo(width / 2 - 5, height / 2);
-    ctx.moveTo(width / 2 + 5, height / 2);
-    ctx.lineTo(width / 2 + 16, height / 2);
-    ctx.moveTo(width / 2, height / 2 - 16);
-    ctx.lineTo(width / 2, height / 2 - 5);
-    ctx.moveTo(width / 2, height / 2 + 5);
-    ctx.lineTo(width / 2, height / 2 + 16);
-    ctx.stroke();
-    ctx.fillStyle = 'rgba(4, 10, 18, 0.52)';
-    roundRect(ctx, width / 2 - 145, height - 38, 290, 24, 8);
-    ctx.fill();
-    ctx.fillStyle = '#bfdbfe';
-    ctx.font = '700 12px Inter, Segoe UI, Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('Bedrock adapter renders only decoded real chunk data', width / 2, height - 22);
-    ctx.restore();
-  }
-}
-
-function roundRect(ctx, x, y, width, height, radius) {
-  const r = Math.min(radius, width / 2, height / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + width, y, x + width, y + height, r);
-  ctx.arcTo(x + width, y + height, x, y + height, r);
-  ctx.arcTo(x, y + height, x, y, r);
-  ctx.arcTo(x, y, x + width, y, r);
-  ctx.closePath();
-}
-
-function prepareSpectateCanvas(canvas) {
-  const rect = canvas.getBoundingClientRect();
-  const targetWidth = Math.max(640, Math.round(rect.width || 1280));
-  const targetHeight = Math.max(360, Math.round(targetWidth * 9 / 16));
-  if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
-  }
-}
-
-function drawSpectateFailure(canvas, error) {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  prepareSpectateCanvas(canvas);
-  const width = canvas.width;
-  const height = canvas.height;
-  ctx.fillStyle = '#020617';
-  ctx.fillRect(0, 0, width, height);
-  const glow = ctx.createRadialGradient(width / 2, height / 2, 10, width / 2, height / 2, width * 0.58);
-  glow.addColorStop(0, 'rgba(65, 230, 155, 0.22)');
-  glow.addColorStop(1, 'rgba(65, 230, 155, 0)');
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = '#41e69b';
-  ctx.font = '800 22px Inter, Segoe UI, Arial';
-  ctx.textAlign = 'center';
-  ctx.fillText('Bedrock adapter renderer fault', width / 2, height / 2 - 24);
-  ctx.fillStyle = '#cbd5e1';
-  ctx.font = '600 14px Inter, Segoe UI, Arial';
-  ctx.fillText(String(error?.message || error || 'Unknown render error').slice(0, 120), width / 2, height / 2 + 8);
-}
-
-function drawSpectateFrame(canvas, data, elapsed) {
-  prepareSpectateCanvas(canvas);
-  try {
-    drawSpectateVideo(canvas, data, elapsed);
-  } catch (error) {
-    drawSpectateFailure(canvas, error);
-  }
-}
-
-function startSpectateVideo(serverId) {
-  const canvas = document.querySelector('#spectateVideo');
-  if (!canvas) return stopSpectateVideo();
-  if (spectateAnimation.serverId !== serverId) {
-    stopSpectateVideo();
-    spectateAnimation.serverId = serverId;
-    spectateAnimation.startedAt = performance.now();
-  }
-  drawSpectateFrame(canvas, state.spectateData || {}, performance.now() - spectateAnimation.startedAt);
-  if (spectateAnimation.id) return;
-  const tick = (now) => {
-    const liveCanvas = document.querySelector('#spectateVideo');
-    if (state.activeView !== 'spectate' || !liveCanvas) {
-      stopSpectateVideo();
-      return;
-    }
-    drawSpectateFrame(liveCanvas, state.spectateData || {}, now - spectateAnimation.startedAt);
-    spectateAnimation.id = window.requestAnimationFrame(tick);
-  };
-  spectateAnimation.id = window.requestAnimationFrame(tick);
 }
 
 function syncConsoleActionButtons(server, status) {
@@ -2814,12 +2029,6 @@ function renderSettings() {
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
       <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
-      <label class="switch"><input name="liveSpectateEnabled" type="checkbox" ${settings.liveSpectateEnabled ? 'checked' : ''}><span></span>Live spectate section</label>
-      <label>Java spectate auth <select name="spectateJavaAuth"><option value="offline" ${settings.spectateJavaAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateJavaAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
-      <label>Bedrock spectate auth <select name="spectateBedrockAuth"><option value="offline" ${settings.spectateBedrockAuth === 'offline' ? 'selected' : ''}>Offline bot</option><option value="microsoft" ${settings.spectateBedrockAuth === 'microsoft' ? 'selected' : ''}>Microsoft device login</option></select></label>
-      <label>Spectator client stream URL <input name="spectateClientVideoUrl" type="url" value="${escapeHtml(settings.spectateClientVideoUrl || '')}" placeholder="https://your-stream.example/watch"></label>
-      <label>Spectate frame push token <input readonly value="${escapeHtml(settings.spectateFramePushToken || settings.spectateFramePushTokenPreview || '')}"></label>
-      <label>Frame push endpoint <input readonly value="${escapeHtml(`${settings.publicBaseUrl || window.location.origin}/api/servers/<serverId>/spectate/frame-push`)}"></label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '2.0.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v2.0.0"></label>
@@ -2832,9 +2041,18 @@ function renderSettings() {
       <div class="settings-group tunnel-settings">
         <strong>Normal public tunnel setup</strong>
         <label>ngrok auth token <input name="ngrokAuthToken" type="password" placeholder="${settings.ngrokConfigured ? `Saved (${escapeHtml(settings.ngrokAuthtokenPreview || 'configured')})` : 'Paste ngrok token'}"></label>
+        <label>Tunnel packet type <select id="normalTunnelProtocol"><option value="auto">Auto from server type</option><option value="tcp">TCP (Java)</option><option value="udp">UDP (Bedrock)</option></select></label>
         <label class="switch"><input name="playitEnabled" type="checkbox" ${settings.playitEnabled ? 'checked' : ''}><span></span>Enable playit.gg helper</label>
         <label class="switch"><input name="quickTunnelEnabled" type="checkbox" ${settings.quickTunnelEnabled ? 'checked' : ''}><span></span>Enable no-login quick tunnel helper</label>
-        <div class="row-actions"><button class="secondary" type="button" data-action="show-normal-tunnel-plan">Show tunnel commands</button><a class="button-like secondary" href="${escapeHtml(settings.playitSetupUrl || 'https://playit.gg/account/agents')}" target="_blank" rel="noreferrer">playit setup</a></div>
+        <div class="row-actions">
+          <button class="secondary" type="button" data-action="show-normal-tunnel-plan">Show tunnel status</button>
+          <button class="secondary" type="button" data-action="start-ngrok-tunnel">Start ngrok</button>
+          <button class="secondary" type="button" data-action="stop-ngrok-tunnel">Stop ngrok</button>
+          <button class="secondary" type="button" data-action="install-playit-agent">Install Playit on VPS</button>
+          <button class="secondary" type="button" data-action="start-playit-agent">Start Playit</button>
+          <button class="secondary" type="button" data-action="stop-playit-agent">Stop Playit</button>
+          <a class="button-like secondary" href="${escapeHtml(settings.playitSetupUrl || 'https://playit.gg/account/agents')}" target="_blank" rel="noreferrer">Playit dashboard</a>
+        </div>
       </div>`}` : ''}
 
       <!-- Timezone with Save Button -->
@@ -3649,18 +2867,6 @@ function startRefreshLoop() {
     if (state.activeView === 'console') {
       renderConsole().catch(() => {});
       if (!dueStatus) return;
-    }
-    if (state.activeView === 'spectate') {
-      const server = activeServer();
-      if (server) ensureSpectateStream(server.id);
-      const dueSpectate = Date.now() - Number(state.spectatePollAt || 0) > 250;
-      if (dueSpectate && !state.spectateStream) {
-        state.spectatePollAt = Date.now();
-        pollSpectateData().catch(() => {});
-      }
-      if (!dueStatus) return;
-    } else if (state.spectateStream) {
-      closeSpectateStream();
     }
     if (dueStatus || liveBusy) {
       state.statusRefreshAt = Date.now();
@@ -4771,14 +3977,46 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'show-normal-tunnel-plan') {
       const server = activeServer();
-      const plan = await api(`/api/tunnels/normal-plan${server ? `?serverId=${encodeURIComponent(server.id)}` : ''}`);
+      const protocol = document.querySelector('#normalTunnelProtocol')?.value || 'auto';
+      const plan = await api(`/api/tunnels/normal-plan${server ? `?serverId=${encodeURIComponent(server.id)}&protocol=${encodeURIComponent(protocol)}` : ''}`);
       const lines = [
-        `ngrok: ${plan.ngrok?.command || plan.ngrok?.note || 'not available for this server type'}`,
-        `playit.gg: ${plan.playit?.setupUrl || 'https://playit.gg/account/agents'} then run: ${plan.playit?.command || 'playit'}`,
+        `ngrok: ${plan.ngrok?.remoteHost || plan.ngrok?.command || plan.ngrok?.note || 'not available'}`,
+        `ngrok note: ${plan.ngrok?.note || ''}`,
+        `playit.gg: ${plan.playit?.note || ''}`,
+        `playit dashboard: ${plan.playit?.setupUrl || 'https://playit.gg/account/agents'}`,
         `quick tunnel: ${plan.quick?.command || ''}`,
       ].join('\n');
       await navigator.clipboard?.writeText(lines).catch(() => {});
-      prompt('Tunnel commands copied if browser allowed it:', lines);
+      prompt('Tunnel status copied if browser allowed it:', lines);
+      return;
+    }
+    if (action === 'start-ngrok-tunnel' || action === 'stop-ngrok-tunnel') {
+      const server = activeServer();
+      if (!server) return showToast('Create or select a server first.');
+      const protocol = document.querySelector('#normalTunnelProtocol')?.value || 'auto';
+      const endpoint = action === 'start-ngrok-tunnel' ? '/api/tunnels/ngrok/start' : '/api/tunnels/ngrok/stop';
+      const data = await api(endpoint, {
+        method: 'POST',
+        body: JSON.stringify({ serverId: server.id, protocol }),
+      });
+      const remote = data.ngrok?.remoteHost || data.ngrok?.message || 'ngrok status updated.';
+      await navigator.clipboard?.writeText(data.ngrok?.remoteHost || '').catch(() => {});
+      showToast(action === 'start-ngrok-tunnel' ? `ngrok: ${remote}` : 'ngrok stopped.');
+      return;
+    }
+    if (action === 'install-playit-agent' || action === 'start-playit-agent' || action === 'stop-playit-agent') {
+      const endpoint = action === 'install-playit-agent'
+        ? '/api/tunnels/playit/install'
+        : action === 'start-playit-agent'
+          ? '/api/tunnels/playit/start'
+          : '/api/tunnels/playit/stop';
+      actionTarget.disabled = true;
+      try {
+        const data = await api(endpoint, { method: 'POST' });
+        showToast(data.playit?.message || 'Playit status updated.');
+      } finally {
+        actionTarget.disabled = false;
+      }
       return;
     }
     if (action === 'show-nginx-config') {
@@ -5068,39 +4306,6 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       fileClipboard = { mode: action === 'file-copy-selected' ? 'copy' : 'move', paths: selected, serverId: server?.id || null };
       showToast(`${fileClipboard.mode === 'copy' ? 'Copied' : 'Cut'} ${selected.length} item(s).`);
-      return;
-    }
-    if (action === 'spectate-start') {
-      const server = activeServer();
-      if (!server) return showToast('Create a server first.');
-      const data = await api(`/api/servers/${server.id}/spectate/start`, { method: 'POST' });
-      showToast(data.message || 'Live spectate started.');
-      await renderSpectate();
-      ensureSpectateStream(server.id);
-      return;
-    }
-    if (action === 'spectate-stop') {
-      const server = activeServer();
-      if (!server) return showToast('Create a server first.');
-      closeSpectateStream();
-      await api(`/api/servers/${server.id}/spectate/stop`, { method: 'POST' });
-      showToast('Live spectate stopped.');
-      await renderSpectate();
-      return;
-    }
-    if (action === 'spectate-refresh') {
-      closeSpectateStream();
-      await renderSpectate();
-      return;
-    }
-    if (action === 'spectate-target') {
-      const server = activeServer();
-      if (!server) return showToast('Create a server first.');
-      await api(`/api/servers/${server.id}/spectate/target`, {
-        method: 'POST',
-        body: JSON.stringify({ target: actionTarget.dataset.playerName || '' }),
-      });
-      await renderSpectate();
       return;
     }
     if (action === 'fix-server') {

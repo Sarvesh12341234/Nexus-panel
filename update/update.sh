@@ -62,13 +62,6 @@ fi
 
 if [ -f package.json ]; then
   npm install
-  echo "[NexusPanel][80%] Installing Live Spectate bot/viewer dependencies..."
-  npm install --no-save --no-audit --no-fund \
-    bedrock-protocol \
-    mineflayer \
-    prismarine-chunk \
-    prismarine-registry \
-    prismarine-viewer
 fi
 echo "[NexusPanel][85%] Dependencies verified."
 

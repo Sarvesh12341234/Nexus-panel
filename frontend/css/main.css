@@ -613,70 +613,6 @@ code {
   letter-spacing: 0.04em;
 }
 
-.spectate-frame-wrap {
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: rgba(5, 11, 20, 0.72);
-}
-
-.spectate-frame,
-.spectate-video {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  border: 0;
-  object-fit: cover;
-}
-
-.spectate-video {
-  min-height: 260px;
-  transform: translateZ(0);
-  will-change: contents;
-}
-
-.spectate-client-video {
-  background: #020617;
-  object-fit: contain;
-}
-
-.spectate-empty-video {
-  display: grid;
-  place-items: center;
-  min-height: 420px;
-  padding: 2rem;
-  background:
-    linear-gradient(135deg, rgba(65, 230, 155, 0.08), rgba(94, 216, 255, 0.06)),
-    #020617;
-  color: var(--text);
-  text-align: center;
-}
-
-.spectate-empty-video div {
-  display: grid;
-  gap: 0.7rem;
-  max-width: 620px;
-}
-
-.spectate-empty-video strong {
-  font-size: clamp(1.25rem, 2.4vw, 2rem);
-}
-
-.spectate-empty-video span {
-  color: var(--muted);
-  line-height: 1.6;
-}
-
-.spectate-head {
-  align-items: flex-start;
-  gap: 1rem;
-}
-
-.spectate-player-button {
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
 .switch {
   display: flex;
@@ -1419,15 +1355,6 @@ code {
     justify-content: flex-start;
     width: 100%;
   }
-
-  .spectate-head {
-    align-items: stretch;
-  }
-
-  .spectate-head .row-actions {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 620px) {
@@ -1482,27 +1409,6 @@ code {
     display: grid;
     grid-template-columns: 1fr;
     width: 100%;
-  }
-
-  .spectate-head .row-actions,
-  #spectatePanel .row-actions {
-    display: grid;
-    grid-template-columns: 1fr;
-    width: 100%;
-  }
-
-  .spectate-frame-wrap {
-    border-radius: 8px;
-    margin-inline: -2px;
-  }
-
-  .spectate-video {
-    min-height: 190px;
-  }
-
-  .spectate-player-button {
-    width: 100%;
-    max-width: none;
   }
 
   button,
