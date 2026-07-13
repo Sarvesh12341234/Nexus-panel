@@ -41,8 +41,13 @@ const ACTION_LIBRARY = Object.freeze({
   },
   'verify-world-storage': {
     risk: 'read-only',
-    applies: ['world-leveldat', 'world-region', 'leveldb', 'save-failed', 'live-backup-race', 'world-lock'],
+    applies: ['world-leveldat', 'world-region', 'leveldb', 'save-failed', 'live-backup-race', 'world-lock', 'bedrock-missing-pack-reference', 'bedrock-pack-manifest-invalid', 'pack-uuid-conflict'],
     description: 'Inspect world metadata, live-writer state, and verified backup availability without replacing data.',
+  },
+  'repair-support-configs': {
+    risk: 'low',
+    applies: ['support-config-missing', 'json-config', 'bedrock-missing-pack-reference', 'bedrock-pack-manifest-invalid', 'pack-uuid-conflict'],
+    description: 'Rebuild missing support JSON and repair Bedrock world pack references using manifest evidence.',
   },
   'verify-database': {
     risk: 'read-only',
@@ -56,8 +61,8 @@ const ACTION_LIBRARY = Object.freeze({
   },
   'vps-resource-plan': {
     risk: 'read-only',
-    applies: ['native-memory', 'oom-kill', 'process-limit', 'file-descriptors', 'disk-full', 'inode-full', 'disk-io-error'],
-    description: 'Build a VPS resource plan from memory, CPU, pressure, disk, and process telemetry.',
+    applies: ['native-memory', 'oom-kill', 'process-limit', 'file-descriptors', 'disk-full', 'inode-full', 'disk-io-error', 'read-only-fs', 'permission', 'server-root-readonly', 'wrong-working-directory'],
+    description: 'Build a VPS resource and filesystem plan from memory, CPU, pressure, disk, process, and write-access telemetry.',
   },
   'network-plan': {
     risk: 'read-only',
@@ -155,6 +160,22 @@ function serverFileStatus(server, root) {
     viewDistance: Number(property('view-distance') || 0),
     simulationDistance: Number(property('simulation-distance') || property('tick-distance') || 0),
     maxPlayers: Number(property('max-players') || 0),
+    bedrockSupportMissing: server.type === 'bedrock' && ['allowlist.json', 'permissions.json', 'valid_known_packs.json']
+      .some((relative) => !fs.existsSync(path.join(root, relative))),
+    bedrockPackRefsMissing: server.type === 'bedrock' && fs.existsSync(path.join(root, 'worlds'))
+      && (() => {
+        try {
+          return fs.readdirSync(path.join(root, 'worlds'), { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .slice(0, 20)
+            .some((entry) => (
+              !fs.existsSync(path.join(root, 'worlds', entry.name, 'world_behavior_packs.json'))
+              || !fs.existsSync(path.join(root, 'worlds', entry.name, 'world_resource_packs.json'))
+            ));
+        } catch {
+          return false;
+        }
+      })(),
   };
 }
 
@@ -195,6 +216,8 @@ function hostContext(server, root, runtime) {
     viewDistance: files.viewDistance,
     simulationDistance: files.simulationDistance,
     maxPlayers: files.maxPlayers,
+    bedrockSupportMissing: files.bedrockSupportMissing,
+    bedrockPackRefsMissing: files.bedrockPackRefsMissing,
     cpuPressure10: pressureStatus('cpu')?.avg10 ?? -1,
     memoryPressure10: pressureStatus('memory')?.avg10 ?? -1,
     ioPressure10: pressureStatus('io')?.avg10 ?? -1,
@@ -213,6 +236,8 @@ function telemetryEvidence(context) {
   if (!context.executableExists) evidence.push('unable to access jarfile bedrock_server not found');
   if (!context.propertiesExists && ['java', 'bedrock'].includes(context.serverType)) evidence.push('server.properties not found');
   if (!context.worldExists) evidence.push('world data missing');
+  if (context.bedrockSupportMissing) evidence.push('allowlist.json permissions.json valid_known_packs.json missing support config');
+  if (context.bedrockPackRefsMissing) evidence.push('world_behavior_packs.json world_resource_packs.json missing bedrock pack references');
   if (!context.panelIndexExists || !context.panelScriptExists || !context.panelStyleExists) {
     evidence.push('panel ui asset missing frontend script stylesheet not found');
   }

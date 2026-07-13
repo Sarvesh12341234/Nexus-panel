@@ -2423,6 +2423,163 @@ async function repairMissingSupportConfigs(server, root) {
   return { actions, warnings };
 }
 
+function normalizePackUuid(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizePackVersion(value) {
+  return Array.isArray(value) ? value.map((part) => Number(part) || 0).join('.') : String(value || '').trim();
+}
+
+async function bedrockPackManifestIndex(root) {
+  const folders = [
+    path.join(root, 'behavior_packs'),
+    path.join(root, 'resource_packs'),
+    path.join(root, 'packs', 'behavior_packs'),
+    path.join(root, 'packs', 'resource_packs'),
+  ];
+  const manifests = new Map();
+  const invalid = [];
+  for (const folder of folders) {
+    const entries = await fs.promises.readdir(folder, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries.slice(0, 500)) {
+      if (!entry.isDirectory()) continue;
+      const manifestPath = assertInside(root, path.join(folder, entry.name, 'manifest.json'));
+      const raw = await fs.promises.readFile(manifestPath, 'utf8').catch(() => '');
+      if (!raw) continue;
+      try {
+        const manifest = JSON.parse(raw);
+        const uuid = normalizePackUuid(manifest?.header?.uuid);
+        if (!uuid) {
+          invalid.push({ path: manifestPath, reason: 'missing header.uuid' });
+          continue;
+        }
+        const version = normalizePackVersion(manifest?.header?.version);
+        manifests.set(`${uuid}:${version}`, { uuid, version, path: manifestPath });
+        manifests.set(uuid, { uuid, version, path: manifestPath });
+      } catch (error) {
+        invalid.push({ path: manifestPath, reason: error.message });
+      }
+    }
+  }
+  return { manifests, invalid };
+}
+
+async function bedrockWorldDirectories(root) {
+  const worldsRoot = assertInside(root, path.join(root, 'worlds'));
+  const entries = await fs.promises.readdir(worldsRoot, { withFileTypes: true }).catch(() => []);
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .slice(0, 120)
+    .map((entry) => assertInside(root, path.join(worldsRoot, entry.name)));
+}
+
+async function repairBedrockPackReferenceFile(server, root, filePath, manifestIndex) {
+  const relative = path.relative(root, filePath).replaceAll('\\', '/');
+  const exists = fs.existsSync(filePath);
+  if (!exists) {
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.promises.writeFile(filePath, '[]\n', { encoding: 'utf8', mode: 0o644 });
+    appendLog(server.id, `[NexusPanel] Repair agent rebuilt missing ${relative}.`);
+    return { action: `Rebuilt ${relative}`, warning: '' };
+  }
+  const raw = await fs.promises.readFile(filePath, 'utf8').catch(() => '');
+  let rows;
+  try {
+    rows = JSON.parse(raw || '[]');
+    if (!Array.isArray(rows)) throw new Error('root value is not an array');
+  } catch (error) {
+    const recoveryDir = assertInside(root, path.join(root, 'runtime', 'config-recovery'));
+    await fs.promises.mkdir(recoveryDir, { recursive: true });
+    await fs.promises.writeFile(path.join(recoveryDir, `${path.basename(filePath)}.${Date.now()}.broken`), raw, 'utf8').catch(() => {});
+    await fs.promises.writeFile(filePath, '[]\n', { encoding: 'utf8', mode: 0o644 });
+    appendLog(server.id, `[NexusPanel] Repair agent replaced malformed ${relative}: ${error.message}`);
+    return { action: `Rebuilt malformed ${relative}`, warning: '' };
+  }
+  const kept = [];
+  const removed = [];
+  for (const row of rows) {
+    const uuid = normalizePackUuid(row?.pack_id || row?.uuid);
+    const version = normalizePackVersion(row?.version);
+    if (!uuid) {
+      removed.push(row);
+      continue;
+    }
+    if (manifestIndex.has(`${uuid}:${version}`) || manifestIndex.has(uuid)) kept.push(row);
+    else removed.push(row);
+  }
+  if (!removed.length) return { action: '', warning: '' };
+  const recoveryDir = assertInside(root, path.join(root, 'runtime', 'config-recovery'));
+  await fs.promises.mkdir(recoveryDir, { recursive: true });
+  await fs.promises.writeFile(path.join(recoveryDir, `${path.basename(filePath)}.${Date.now()}.bak`), raw, 'utf8');
+  await fs.promises.writeFile(filePath, `${JSON.stringify(kept, null, 2)}\n`, { encoding: 'utf8', mode: 0o644 });
+  appendLog(server.id, `[NexusPanel] Repair agent removed ${removed.length} missing Bedrock pack reference(s) from ${relative}.`);
+  return { action: `Removed ${removed.length} missing pack reference(s) from ${relative}`, warning: '' };
+}
+
+async function repairBedrockPackReferences(server, root) {
+  const actions = [];
+  const warnings = [];
+  if (server.type !== 'bedrock') return { actions, warnings };
+  const { manifests, invalid } = await bedrockPackManifestIndex(root);
+  for (const item of invalid.slice(0, 20)) {
+    warnings.push(`Invalid Bedrock pack manifest ${path.relative(root, item.path).replaceAll('\\', '/')}: ${item.reason}`);
+  }
+  const worlds = await bedrockWorldDirectories(root);
+  for (const worldDir of worlds) {
+    for (const fileName of ['world_behavior_packs.json', 'world_resource_packs.json']) {
+      const result = await repairBedrockPackReferenceFile(server, root, path.join(worldDir, fileName), manifests);
+      if (result.action) actions.push(result.action);
+      if (result.warning) warnings.push(result.warning);
+    }
+  }
+  if (!worlds.length) warnings.push('No Bedrock world folder was found under worlds/.');
+  if (!manifests.size) warnings.push('No installed Bedrock pack manifests were found; missing pack references will be removed from world pack JSON if present.');
+  return { actions, warnings };
+}
+
+async function inspectVpsRepairReadiness(server, root) {
+  const actions = [];
+  const warnings = [];
+  try {
+    const marker = assertInside(root, path.join(root, 'runtime', `.repair-write-test-${process.pid}`));
+    await fs.promises.mkdir(path.dirname(marker), { recursive: true });
+    await fs.promises.writeFile(marker, 'ok', { encoding: 'utf8', mode: 0o600 });
+    await fs.promises.rm(marker, { force: true });
+  } catch (error) {
+    warnings.push(`Server root write test failed: ${error.message}`);
+  }
+  if (server.executable_path && fs.existsSync(server.executable_path)) {
+    try {
+      await fs.promises.access(server.executable_path, fs.constants.R_OK);
+      if (process.platform !== 'win32') {
+        const stats = await fs.promises.stat(server.executable_path);
+        if ((stats.mode & 0o111) === 0 && server.type === 'bedrock') {
+          await fs.promises.chmod(server.executable_path, stats.mode | 0o755);
+          actions.push('Restored executable bit on Bedrock server binary.');
+        }
+      }
+    } catch (error) {
+      warnings.push(`Executable access check failed: ${error.message}`);
+    }
+  }
+  if (typeof fs.statfsSync === 'function') {
+    try {
+      const stats = fs.statfsSync(root);
+      const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+      const freeMb = Math.round(freeBytes / 1024 / 1024);
+      if (freeMb < 1024) warnings.push(`VPS disk reserve is low: ${freeMb} MB free.`);
+      if (Number(stats.favail) >= 0 && Number(stats.files) > 0) {
+        const inodeFreePercent = Math.round((Number(stats.favail) / Math.max(1, Number(stats.files))) * 100);
+        if (inodeFreePercent < 5) warnings.push(`VPS inode reserve is low: ${inodeFreePercent}% free.`);
+      }
+    } catch (error) {
+      warnings.push(`VPS filesystem check failed: ${error.message}`);
+    }
+  }
+  return { actions, warnings };
+}
+
 function compareVersionParts(left, right) {
   const a = Array.isArray(left) ? left.map(Number) : String(left || '').split('.').map(Number);
   const b = Array.isArray(right) ? right.map(Number) : String(right || '').split('.').map(Number);
@@ -2545,10 +2702,15 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   const supportRepair = await repairMissingSupportConfigs(server, root);
   supportRepair.actions.forEach((item) => actions.push(item));
   supportRepair.warnings.forEach((item) => warnings.push(item));
+  const bedrockReferenceRepair = await repairBedrockPackReferences(server, root);
+  bedrockReferenceRepair.actions.forEach((item) => actions.push(item));
+  bedrockReferenceRepair.warnings.forEach((item) => warnings.push(item));
   checks.push({
     name: 'Support config files',
     ok: true,
-    detail: supportRepair.actions.length ? supportRepair.actions.join(', ') : 'Required support config files are present and valid.',
+    detail: [...supportRepair.actions, ...bedrockReferenceRepair.actions].length
+      ? [...supportRepair.actions, ...bedrockReferenceRepair.actions].join(', ')
+      : 'Required support config files and Bedrock pack references are present and valid.',
   });
   if (server.type === 'bedrock' && diagnostics.some((item) => item.id === 'bedrock-pack-version' || item.id === 'bedrock-world-native-crash')) {
     const packRepair = await quarantineIncompatibleBedrockPacks(server, root, consoleLogs(server.id));
@@ -2582,6 +2744,14 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   for (const file of staleTransfers) await fs.promises.rm(file, { force: true });
   actions.push(`Removed ${staleTransfers.length} stale partial transfer(s).`);
   checks.push({ name: 'Path boundary', ok: true, detail: displayPath(root) });
+  const vpsReadiness = await inspectVpsRepairReadiness(server, root);
+  vpsReadiness.actions.forEach((item) => actions.push(item));
+  vpsReadiness.warnings.forEach((item) => warnings.push(item));
+  checks.push({
+    name: 'VPS filesystem readiness',
+    ok: vpsReadiness.warnings.length === 0,
+    detail: vpsReadiness.warnings[0] || vpsReadiness.actions.join(', ') || 'Server root is writable and filesystem reserve was checked.',
+  });
 
   const likelyWorlds = server.type === 'java'
     ? [path.join(root, 'world', 'level.dat')]
