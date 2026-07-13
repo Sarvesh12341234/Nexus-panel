@@ -36,13 +36,13 @@ function packetEntityId(packet) {
 }
 
 function packetPosition(packet) {
-  const position = packet?.position || packet?.pos || packet?.player_position || packet || {};
+  const position = packet?.position || packet?.pos || packet?.player_position || packet?.spawn_position || packet || {};
   if (Array.isArray(position)) {
-    return { x: finiteNumber(position[0]), y: finiteNumber(position[1]), z: finiteNumber(position[2]) };
+    return { x: finiteNumber(position[0]), y: finiteNumber(position[1], 64), z: finiteNumber(position[2]) };
   }
   return {
     x: finiteNumber(position.x ?? position.X ?? packet?.x),
-    y: finiteNumber(position.y ?? position.Y ?? packet?.y),
+    y: finiteNumber(position.y ?? position.Y ?? packet?.y, 64),
     z: finiteNumber(position.z ?? position.Z ?? packet?.z),
   };
 }
@@ -322,6 +322,7 @@ canvas{display:block;touch-action:none}
   const materialCache = new Map();
   const textureCache = new Map();
   const terrainHeights = new Map();
+  let terrainBounds = null;
   let blockCount = 0;
   let faceCount = 0;
   let worldSignature = '';
@@ -451,12 +452,22 @@ canvas{display:block;touch-action:none}
     }
     terrainMeshes.clear();
     terrainHeights.clear();
+    terrainBounds = null;
     const buckets = new Map();
     for (const block of rows) {
       const hx = Math.floor(Number(block.x || 0));
       const hz = Math.floor(Number(block.z || 0));
+      const by = Number(block.y || 0);
       const hkey = hx + ':' + hz;
-      terrainHeights.set(hkey, Math.max(terrainHeights.get(hkey) ?? -9999, Number(block.y || 0)));
+      terrainHeights.set(hkey, Math.max(terrainHeights.get(hkey) ?? -9999, by));
+      terrainBounds = terrainBounds ? {
+        minX: Math.min(terrainBounds.minX, hx),
+        maxX: Math.max(terrainBounds.maxX, hx),
+        minY: Math.min(terrainBounds.minY, by),
+        maxY: Math.max(terrainBounds.maxY, by),
+        minZ: Math.min(terrainBounds.minZ, hz),
+        maxZ: Math.max(terrainBounds.maxZ, hz),
+      } : { minX: hx, maxX: hx, minY: by, maxY: by, minZ: hz, maxZ: hz };
       const key = materialKeyFor(block);
       if (!buckets.has(key)) buckets.set(key, []);
       buckets.get(key).push(block);
@@ -513,7 +524,36 @@ canvas{display:block;touch-action:none}
   };
   const focusEntity = () => {
     const entities = Array.isArray(state.entities) ? state.entities : [];
-    return entities.find((item) => item.name === state.target) || entities.find((item) => item.self) || entities[0] || { x: 0, y: 64, z: 0 };
+    const entity = entities.find((item) => item.name === state.target) || entities.find((item) => item.self) || entities[0];
+    if (!terrainBounds) return entity || { x: 0, y: 64, z: 0 };
+    const overview = () => ({
+      x: (terrainBounds.minX + terrainBounds.maxX) / 2,
+      y: terrainBounds.maxY + 5,
+      z: (terrainBounds.minZ + terrainBounds.maxZ) / 2,
+      yaw: 35,
+      pitch: 25,
+      overview: true,
+    });
+    if (!entity) return overview();
+    const ex = Number(entity.x || 0);
+    const ez = Number(entity.z || 0);
+    const margin = 4;
+    if (ex < terrainBounds.minX - margin || ex > terrainBounds.maxX + margin || ez < terrainBounds.minZ - margin || ez > terrainBounds.maxZ + margin) {
+      return overview();
+    }
+    return entity;
+  };
+  const nearestTerrainY = (x, z, radius = 5) => {
+    const ix = Math.floor(x);
+    const iz = Math.floor(z);
+    let best = -Infinity;
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      for (let dz = -radius; dz <= radius; dz += 1) {
+        const y = terrainHeights.get((ix + dx) + ':' + (iz + dz));
+        if (Number.isFinite(y)) best = Math.max(best, y);
+      }
+    }
+    return best;
   };
   const currentYaw = () => {
     const focus = focusEntity();
@@ -546,9 +586,9 @@ canvas{display:block;touch-action:none}
   const animate = () => {
     const focus = focusEntity();
     const fx = Number(focus.x || 0);
-    const terrainY = terrainHeights.get(Math.floor(fx) + ':' + Math.floor(Number(focus.z || 0)));
-    const fy = Math.max(Number(focus.y || 64) + 1.4, Number.isFinite(terrainY) ? terrainY + 2.2 : -9999);
     const fz = Number(focus.z || 0);
+    const terrainY = nearestTerrainY(fx, fz, focus.overview ? 16 : 5);
+    const fy = Math.max(Number(focus.y || 64) + 1.4, Number.isFinite(terrainY) ? terrainY + (focus.overview ? 8 : 2.2) : -9999);
     const baseYaw = Number(focus.yaw || 0) * Math.PI / 180;
     const yaw = baseYaw + lookYawOffset;
     const pitch = Math.max(-1.18, Math.min(0.92, Number(focus.pitch || 0) * Math.PI / 180 + lookPitchOffset));
