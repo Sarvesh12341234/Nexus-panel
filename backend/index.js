@@ -246,9 +246,7 @@ function panelSettingsPayload(user = null) {
     ngrokConfigured: edition === 'normal' && Boolean(settingValue('ngrok_auth_token', '')),
     ngrokAuthtokenPreview: edition === 'normal' && settingValue('ngrok_auth_token', '') ? `${settingValue('ngrok_auth_token', '').slice(0, 6)}....${settingValue('ngrok_auth_token', '').slice(-4)}` : '',
     playitEnabled: edition === 'normal' && settingValue('playit_enabled', '0') === '1',
-    quickTunnelEnabled: edition === 'normal' && settingValue('quick_tunnel_enabled', '0') === '1',
     playitSetupUrl: 'https://playit.gg/account/agents',
-    quickTunnelCommand: 'ssh -o ServerAliveInterval=30 -R 0:localhost:25565 nokey@localhost.run',
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
     maxCpuCores: hostCpuCount(),
     platform: process.platform,
@@ -3797,11 +3795,6 @@ app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAG
       command: 'playit',
       note: playit.message,
     },
-    quick: {
-      enabled: settingValue('quick_tunnel_enabled', '0') === '1',
-      command: `ssh -o ServerAliveInterval=30 -R 0:localhost:${port} nokey@localhost.run`,
-      note: 'No-login temporary TCP tunnel. Best for Java testing, not permanent hosting.',
-    },
   });
 }));
 
@@ -3867,7 +3860,6 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
     const token = String(req.body.ngrokAuthToken || '').trim();
     if (token) setSettingValue('ngrok_auth_token', token);
     setSettingValue('playit_enabled', toBool(req.body.playitEnabled) ? '1' : '0');
-    setSettingValue('quick_tunnel_enabled', toBool(req.body.quickTunnelEnabled) ? '1' : '0');
   }
   if (isHostEdition()) {
     setSettingValue('host_maintenance_mode', toBool(req.body.hostMaintenanceMode) ? '1' : '0');

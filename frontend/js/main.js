@@ -2049,7 +2049,6 @@ function renderSettings() {
         <label>ngrok auth token <input name="ngrokAuthToken" type="password" placeholder="${settings.ngrokConfigured ? `Saved (${escapeHtml(settings.ngrokAuthtokenPreview || 'configured')})` : 'Paste ngrok token'}"></label>
         <label>Tunnel packet type <select id="normalTunnelProtocol"><option value="auto">Auto from server type</option><option value="tcp">TCP (Java)</option><option value="udp">UDP (Bedrock)</option></select></label>
         <label class="switch"><input name="playitEnabled" type="checkbox" ${settings.playitEnabled ? 'checked' : ''}><span></span>Enable playit.gg helper</label>
-        <label class="switch"><input name="quickTunnelEnabled" type="checkbox" ${settings.quickTunnelEnabled ? 'checked' : ''}><span></span>Enable no-login quick tunnel helper</label>
         <div class="row-actions">
           <button class="secondary" type="button" data-action="show-normal-tunnel-plan">Status</button>
           <button class="secondary" type="button" data-action="install-ngrok-agent">Install ngrok</button>
@@ -2178,7 +2177,6 @@ function tunnelStatusText(plan) {
     `Playit binary: ${plan.playit?.binary || 'not found in service PATH'}`,
     `Playit setup: ${plan.playit?.setupUrl || 'not reported yet'}`,
     `Playit note: ${plan.playit?.note || ''}`,
-    `Quick tunnel: ${plan.quick?.command || ''}`,
   ].join('\n');
 }
 

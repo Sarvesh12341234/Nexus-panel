@@ -7,7 +7,7 @@
 - Live collaborator presence shows when another owner/admin is viewing the same server.
 - DDoS Guard adds a bounded 999,999-parameter defensive classifier for TCP SYN pressure, UDP/Bedrock floods, connection fanout, bandwidth saturation, conntrack pressure, and firewall misconfiguration.
 - DDoS Guard exposes local VPS evidence and owner-reviewed mitigation commands without silently changing firewall rules.
-- Normal edition now includes ngrok token storage, playit.gg setup guidance, no-login quick tunnel command generation, and best-effort installer downloads for ngrok/playit.
+- Normal edition now includes ngrok token storage, playit.gg setup guidance, and best-effort installer downloads for ngrok/playit.
 - Console command echoes redraw immediately, network speed testing uses a bounded quick probe, and scheduled backups pause during crash storms until stable runtime resumes.
 - Repair intelligence now recognizes Bedrock native crashes during world database open and validates learned fixes only after stable runtime.
 - Repair & Diagnose now quarantines incompatible Bedrock packs when `min_engine_version` exceeds the installed Bedrock server version.
