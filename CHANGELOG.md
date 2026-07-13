@@ -21,6 +21,7 @@
 - Server RAM and CPU metrics now read Nexus-Mark cgroup data or the full process tree, so Java/Bedrock child processes are counted instead of only the wrapper PID.
 - Console logs and metrics load in parallel with shorter metric throttling, reducing the slow first-open delay.
 - Updater defaults now point to `normal-v2.0.0` and `host-v2.0.0`.
+- Linux installer and updater now explicitly install Live Spectate bot/viewer modules in `/opt/nexuspanel`, including Bedrock protocol and Prismarine chunk decoding dependencies.
 
 ## 1.2.0 Repair Agent Revision - 2026-07-06
 
