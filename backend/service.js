@@ -94,6 +94,8 @@ Environment=PORT=${Number(process.env.PORT || 3000)}
 Environment=NEXUSPANEL_BACKUP_ROOT=/var/lib/nexuspanel/backups
 Environment=NEXUSPANEL_X_ACCEL_ROOT=
 Environment=NEXUSPANEL_X_ACCEL_PREFIX=
+Environment=NEXUSPANEL_REDIS_URL=${process.env.NEXUSPANEL_REDIS_URL || 'redis://127.0.0.1:6379'}
+Environment=NEXUSPANEL_REDIS_ENABLED=${process.env.NEXUSPANEL_REDIS_ENABLED || '1'}
 ${user === 'root' ? '' : `User=${user}\nGroup=${group}\n`}
 
 [Install]

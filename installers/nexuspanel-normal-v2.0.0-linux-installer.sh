@@ -29,7 +29,7 @@ install_packages() {
 
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    apt-get install -y curl ca-certificates git unzip tar xz-utils build-essential systemd
+    apt-get install -y curl ca-certificates git unzip tar xz-utils build-essential systemd redis-server
     if ! command -v node >/dev/null 2>&1 || ! node -e "process.exit(Number(process.versions.node.split('.')[0]) >= 22 ? 0 : 1)" >/dev/null 2>&1; then
       echo "Installing Node.js 22..."
       curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
@@ -40,18 +40,29 @@ install_packages() {
 
   if command -v dnf >/dev/null 2>&1; then
     dnf makecache
-    dnf install -y curl ca-certificates git unzip tar xz gcc gcc-c++ make nodejs npm systemd
+    dnf install -y curl ca-certificates git unzip tar xz gcc gcc-c++ make nodejs npm systemd redis
     return
   fi
 
   if command -v yum >/dev/null 2>&1; then
     yum makecache
-    yum install -y curl ca-certificates git unzip tar xz gcc gcc-c++ make nodejs npm systemd
+    yum install -y curl ca-certificates git unzip tar xz gcc gcc-c++ make nodejs npm systemd redis
     return
   fi
 
   echo "Unsupported Linux package manager. Install Node.js 22+, git, unzip, tar, and systemd."
   exit 1
+}
+
+setup_redis() {
+  echo "[1c/7] Preparing Redis hot cache..."
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl list-unit-files | grep -Eq '^redis-server\.service'; then
+      systemctl enable --now redis-server || true
+    elif systemctl list-unit-files | grep -Eq '^redis\.service'; then
+      systemctl enable --now redis || true
+    fi
+  fi
 }
 
 install_tunnel_tools() {
@@ -169,6 +180,7 @@ main() {
   need_root
   require_service_user
   install_packages
+  setup_redis
   if [ "$EDITION" = "normal" ]; then
     install_tunnel_tools
   fi

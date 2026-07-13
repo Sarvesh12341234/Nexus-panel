@@ -15,6 +15,7 @@ const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
 const { AdaptiveEngine } = require('./adaptive_engine');
 const { MODEL_VERSION: REPAIR_AGENT_MODEL_VERSION, PARAMETER_COUNT: REPAIR_AGENT_PARAMETER_COUNT, RepairAgent } = require('./repair_agent');
 const { RepairWebResearch } = require('./repair_web');
+const hybridCache = require('./hybrid_cache');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
 const { assertInside, backupsRoot, displayPath, ensureServerDirs, findServerRoot, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
@@ -274,6 +275,7 @@ function panelSettingsPayload(user = null) {
     maxAllocatableMemoryMb: hostMemoryLimitMb(),
     maxCpuCores: hostCpuCount(),
     platform: process.platform,
+    dataEngine: hybridCache.status(),
     nexuExample: edition === 'host' ? nexuExample() : null,
     hostMaintenanceMode: edition === 'host' && settingValue('host_maintenance_mode', '0') === '1',
     hostServerQuota: edition === 'host' ? clampNumber(settingValue('host_server_quota', '10'), 1, 500, 10) : 0,
@@ -3573,6 +3575,10 @@ app.get('/api/optimizer/status', requirePermission(capabilities.OPTIMIZER_MANAGE
   res.json(optimizerStatus());
 });
 
+app.get('/api/cache/status', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ cache: hybridCache.status() });
+});
+
 app.post('/api/adaptive/heal', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {
   res.json(await runAdaptiveMaintenance());
 }));
@@ -4973,11 +4979,13 @@ app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
     index: 'downloads',
     facets: JSON.stringify(facets),
   });
-  const response = await fetch(`https://api.modrinth.com/v2/search?${params}`, {
-    headers: { 'User-Agent': 'NexusPanel/1.0' },
-  });
-  if (!response.ok) throw new Error(`Modrinth search failed: ${response.status}`);
-  const data = await response.json();
+  const data = await hybridCache.cachedJson(`market:modrinth:${params.toString()}`, async () => {
+    const response = await fetch(`https://api.modrinth.com/v2/search?${params}`, {
+      headers: { 'User-Agent': 'NexusPanel/2.0 (+https://github.com/Sarvesh12341234/Nexus-panel)' },
+    });
+    if (!response.ok) throw new Error(`Modrinth search failed: ${response.status}`);
+    return response.json();
+  }, 15 * 60);
   res.json({
     source: 'modrinth',
     hits: (data.hits || []).map((project) => ({
@@ -4995,11 +5003,13 @@ app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
 }));
 
 async function poggitReleases() {
-  const response = await fetch('https://poggit.pmmp.io/releases.min.json', {
-    headers: { 'User-Agent': 'NexusPanel/1.0' },
-  });
-  if (!response.ok) throw new Error(`Poggit search failed: ${response.status}`);
-  return response.json();
+  return hybridCache.cachedJson('market:poggit:releases', async () => {
+    const response = await fetch('https://poggit.pmmp.io/releases.min.json', {
+      headers: { 'User-Agent': 'NexusPanel/2.0 (+https://github.com/Sarvesh12341234/Nexus-panel)' },
+    });
+    if (!response.ok) throw new Error(`Poggit search failed: ${response.status}`);
+    return response.json();
+  }, 15 * 60);
 }
 
 app.get('/api/poggit/search', requireAuth, asyncRoute(async (req, res) => {

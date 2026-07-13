@@ -2507,6 +2507,7 @@ async function renderOptimizer() {
       ['Applied', optimizer.applied ? 'Yes' : 'No', optimizer.message || 'No optimizer changes applied yet'],
       ['CPU Cores', state.settings?.maxCpuCores || navigator.hardwareConcurrency || 1, 'Used for server allocation limits'],
       ['RAM Ceiling', `${state.settings?.maxAllocatableMemoryMb || 0} MB`, 'Max allocatable memory after host reserve'],
+      ['Data Engine', state.settings?.dataEngine?.connected ? 'SQLite + Redis' : 'SQLite', state.settings?.dataEngine?.connected ? `${state.settings.dataEngine.hits} cache hit(s), ${state.settings.dataEngine.localKeys} warm key(s)` : 'Redis cache is optional and will auto-enable when available'],
       ['Plan Items', commands.commands?.length || 0, 'Safe host tuning commands available'],
       ['Mode', 'No background agent', 'Runs only when you click Optimize'],
     ];
