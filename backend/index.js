@@ -803,6 +803,14 @@ function startSpectateSession(server, req = null) {
   const serverRoot = ensureServerDirs(server);
   const runtimeDir = assertInside(serverRoot, path.join(serverRoot, 'runtime', 'spectate'));
   fs.mkdirSync(runtimeDir, { recursive: true });
+  const textureRoots = [
+    path.join(serverRoot, 'resource_packs'),
+    path.join(serverRoot, 'resourcepacks'),
+    path.join(dataRoot, 'spectate-textures'),
+    process.env.APPDATA ? path.join(process.env.APPDATA, '.minecraft') : '',
+    process.env.HOME ? path.join(process.env.HOME, '.minecraft') : '',
+    ...(process.env.NEXUSPANEL_SPECTATE_TEXTURE_ROOT ? String(process.env.NEXUSPANEL_SPECTATE_TEXTURE_ROOT).split(path.delimiter) : []),
+  ].filter(Boolean);
   const config = {
     type: server.type === 'java' ? 'java' : 'bedrock',
     host: '127.0.0.1',
@@ -811,6 +819,7 @@ function startSpectateSession(server, req = null) {
     auth: spectateAuthMode(server),
     rendererPort: spectateRendererPort(server),
     runtimeDir,
+    textureRoots,
     serverName: server.name,
     target: players[0] || '',
   };

@@ -1,4 +1,6 @@
 const path = require('node:path');
+const fs = require('node:fs');
+const zlib = require('node:zlib');
 const { BedrockWorldAdapter, asBuffer, chunkCoords } = require('./bedrock_adapter');
 
 function send(type, payload = {}) {
@@ -73,6 +75,214 @@ function objectKeys(value) {
   return value && typeof value === 'object' && !Buffer.isBuffer(value)
     ? Object.keys(value).slice(0, 12)
     : [];
+}
+
+function safeTextureKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/^minecraft:/, '')
+    .replace(/\.png$/i, '')
+    .replace(/[^a-z0-9_./-]+/g, '_')
+    .replace(/(?:^|\/)\.\.(?:\/|$)/g, '')
+    .replace(/^\/+/, '')
+    .slice(0, 160);
+}
+
+function textureAliases(name) {
+  const key = safeTextureKey(name).replace(/^textures\/(?:blocks?|entity)\//, '');
+  const aliases = new Set([key]);
+  if (key.includes('grass_block')) {
+    aliases.add('grass_block_side');
+    aliases.add('grass_block_top');
+    aliases.add('grass_side');
+    aliases.add('grass_top');
+  }
+  if (key.includes('dirt')) aliases.add('dirt');
+  if (key.includes('stone')) aliases.add('stone');
+  if (key.includes('oak_log') || key.includes('log')) {
+    aliases.add('oak_log');
+    aliases.add('oak_log_side');
+  }
+  if (key.includes('leaves')) aliases.add('oak_leaves');
+  if (key.includes('water')) aliases.add('water_still');
+  if (key.includes('sand')) aliases.add('sand');
+  return [...aliases];
+}
+
+function defaultTextureRoots(config) {
+  const roots = [];
+  if (Array.isArray(config.textureRoots)) roots.push(...config.textureRoots);
+  if (process.env.NEXUSPANEL_SPECTATE_TEXTURE_ROOT) {
+    roots.push(...String(process.env.NEXUSPANEL_SPECTATE_TEXTURE_ROOT).split(path.delimiter));
+  }
+  if (config.runtimeDir) roots.push(path.join(config.runtimeDir, 'textures'));
+  if (process.env.APPDATA) roots.push(path.join(process.env.APPDATA, '.minecraft'));
+  if (process.env.HOME) roots.push(path.join(process.env.HOME, '.minecraft'));
+  return [...new Set(roots.filter(Boolean))];
+}
+
+function buildTextureIndex(config = {}) {
+  const index = new Map();
+  const roots = defaultTextureRoots(config)
+    .map((root) => path.resolve(String(root || '')))
+    .filter((root) => root && fs.existsSync(root));
+  const add = (keys, absolute) => {
+    if (!absolute || (typeof absolute === 'string' && !fs.existsSync(absolute))) return;
+    for (const raw of Array.isArray(keys) ? keys : [keys]) {
+      const key = safeTextureKey(raw);
+      if (key && !index.has(key)) index.set(key, absolute);
+    }
+  };
+  const addTextureKeys = (assetName, value) => {
+    const lower = String(assetName || '').toLowerCase();
+    if (!lower.endsWith('.png')) return;
+    if (!lower.includes('/textures/block') && !lower.includes('/textures/entity')) return;
+    const parsed = path.parse(lower);
+    const kind = lower.includes('/textures/entity') ? 'entity' : 'block';
+    add([parsed.name, `${kind}/${parsed.name}`, lower.replace(/\.png$/i, '')], value);
+  };
+  const visit = (root, dir, depth = 0, seen = { count: 0 }) => {
+    if (depth > 8 || seen.count > 8000) return;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (seen.count > 8000) return;
+      const absolute = path.join(dir, entry.name);
+      const relative = path.relative(root, absolute).replaceAll('\\', '/');
+      const lower = relative.toLowerCase();
+      if (entry.isDirectory()) {
+        if (
+          lower === 'textures'
+          || lower.startsWith('textures/')
+          || lower === 'resourcepacks'
+          || lower === 'server-resource-packs'
+          || lower.includes('/textures')
+          || lower.includes('resource')
+        ) visit(root, absolute, depth + 1, seen);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.png')) continue;
+      if (!lower.includes('textures/') && !lower.includes('texture/')) continue;
+      seen.count += 1;
+      addTextureKeys(relative, absolute);
+    }
+  };
+  const indexJarTextures = (jarPath) => {
+    let fd;
+    try {
+      const stat = fs.statSync(jarPath);
+      const tailSize = Math.min(stat.size, 1024 * 80);
+      fd = fs.openSync(jarPath, 'r');
+      const tail = Buffer.alloc(tailSize);
+      fs.readSync(fd, tail, 0, tailSize, stat.size - tailSize);
+      let eocd = -1;
+      for (let offset = tail.length - 22; offset >= 0; offset -= 1) {
+        if (tail.readUInt32LE(offset) === 0x06054b50) {
+          eocd = offset;
+          break;
+        }
+      }
+      if (eocd < 0) return;
+      const directorySize = tail.readUInt32LE(eocd + 12);
+      const directoryOffset = tail.readUInt32LE(eocd + 16);
+      const directory = Buffer.alloc(directorySize);
+      fs.readSync(fd, directory, 0, directorySize, directoryOffset);
+      let offset = 0;
+      while (offset + 46 <= directory.length && directory.readUInt32LE(offset) === 0x02014b50) {
+        const method = directory.readUInt16LE(offset + 10);
+        const compressedSize = directory.readUInt32LE(offset + 20);
+        const fileNameLength = directory.readUInt16LE(offset + 28);
+        const extraLength = directory.readUInt16LE(offset + 30);
+        const commentLength = directory.readUInt16LE(offset + 32);
+        const localOffset = directory.readUInt32LE(offset + 42);
+        const entryName = directory.subarray(offset + 46, offset + 46 + fileNameLength).toString('utf8');
+        addTextureKeys(entryName, { jarPath, entryName, method, compressedSize, localOffset });
+        offset += 46 + fileNameLength + extraLength + commentLength;
+      }
+    } catch {
+      // Ignore nonstandard jars/resource packs.
+    } finally {
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch {}
+      }
+    }
+  };
+  const indexMinecraftAssets = (root) => {
+    const indexesDir = path.join(root, 'assets', 'indexes');
+    const objectsDir = path.join(root, 'assets', 'objects');
+    if (!fs.existsSync(indexesDir) || !fs.existsSync(objectsDir)) return;
+    const indexes = fs.readdirSync(indexesDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .map((entry) => path.join(indexesDir, entry.name))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+      .slice(0, 6);
+    for (const indexPath of indexes) {
+      let assets;
+      try {
+        assets = JSON.parse(fs.readFileSync(indexPath, 'utf8')).objects || {};
+      } catch {
+        continue;
+      }
+      for (const [assetName, info] of Object.entries(assets)) {
+        const lower = assetName.toLowerCase();
+        if (!lower.endsWith('.png') || !lower.includes('/textures/')) continue;
+        if (!lower.includes('/textures/block') && !lower.includes('/textures/entity')) continue;
+        const hash = String(info?.hash || '');
+        if (!/^[a-f0-9]{40}$/i.test(hash)) continue;
+        const absolute = path.join(objectsDir, hash.slice(0, 2), hash);
+        addTextureKeys(assetName, absolute);
+      }
+    }
+    const versionsDir = path.join(root, 'versions');
+    if (fs.existsSync(versionsDir)) {
+      const jars = [];
+      const stack = [versionsDir];
+      while (stack.length && jars.length < 12) {
+        const dir = stack.pop();
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const absolute = path.join(dir, entry.name);
+          if (entry.isDirectory()) stack.push(absolute);
+          else if (entry.isFile() && entry.name.endsWith('.jar')) jars.push(absolute);
+        }
+      }
+      jars.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs).slice(0, 5).forEach(indexJarTextures);
+    }
+  };
+  for (const root of roots) {
+    indexMinecraftAssets(root);
+    visit(root, root);
+  }
+  return { index, roots };
+}
+
+function readTextureValue(value) {
+  if (typeof value === 'string') return fs.readFileSync(value);
+  if (!value || typeof value !== 'object') return null;
+  let fd;
+  try {
+    fd = fs.openSync(value.jarPath, 'r');
+    const local = Buffer.alloc(30);
+    fs.readSync(fd, local, 0, 30, value.localOffset);
+    if (local.readUInt32LE(0) !== 0x04034b50) return null;
+    const nameLength = local.readUInt16LE(26);
+    const extraLength = local.readUInt16LE(28);
+    const dataOffset = value.localOffset + 30 + nameLength + extraLength;
+    const compressed = Buffer.alloc(value.compressedSize);
+    fs.readSync(fd, compressed, 0, value.compressedSize, dataOffset);
+    if (value.method === 0) return compressed;
+    if (value.method === 8) return zlib.inflateRawSync(compressed);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
+  return null;
 }
 
 function jsonScript(value) {
@@ -221,7 +431,25 @@ function startBedrockBrowserViewer(config, getState) {
 
   const app = express();
   const clients = new Set();
+  const textureStore = buildTextureIndex(config);
   app.disable('x-powered-by');
+
+  app.get('/texture/:kind/:name.png', (req, res) => {
+    const kind = safeTextureKey(req.params.kind);
+    const name = safeTextureKey(req.params.name);
+    if (!['block', 'entity'].includes(kind) || !name) return res.status(404).end();
+    for (const alias of textureAliases(name)) {
+      const file = textureStore.index.get(`${kind}/${alias}`) || textureStore.index.get(alias);
+      if (!file) continue;
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      if (typeof file === 'string') return res.sendFile(file);
+      const png = readTextureValue(file);
+      if (!png) continue;
+      res.type('png').send(png);
+      return;
+    }
+    return res.status(404).end();
+  });
 
   app.get('/state.json', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -287,6 +515,7 @@ canvas{display:block;touch-action:none}
   <button type="button" data-move="down">DN</button>
 </div>
 <script>window.__NEXUS_INITIAL__=${jsonScript(getState())};</script>
+<script>window.__NEXUS_TEXTURE_COUNT__=${textureStore.index.size};</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 (() => {
@@ -317,10 +546,13 @@ canvas{display:block;touch-action:none}
   scene.add(world);
   const entityGroup = new THREE.Group();
   scene.add(entityGroup);
+  const textureLoader = new THREE.TextureLoader();
   const terrainMeshes = new Map();
   const entityMeshes = new Map();
   const materialCache = new Map();
   const textureCache = new Map();
+  const pendingTextureLoads = new Set();
+  let rendererError = '';
   const terrainHeights = new Map();
   let terrainBounds = null;
   let blockCount = 0;
@@ -377,6 +609,22 @@ canvas{display:block;touch-action:none}
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
     textureCache.set(key, texture);
+    const blockName = encodeURIComponent(String(name || '').replace(/^minecraft:/, '').replace(/\.png$/i, ''));
+    if (blockName && !pendingTextureLoads.has(key)) {
+      pendingTextureLoads.add(key);
+      textureLoader.load('texture/block/' + blockName + '.png', (realTexture) => {
+        realTexture.magFilter = THREE.NearestFilter;
+        realTexture.minFilter = THREE.NearestFilter;
+        realTexture.wrapS = THREE.RepeatWrapping;
+        realTexture.wrapT = THREE.RepeatWrapping;
+        textureCache.set(key, realTexture);
+        const material = materialCache.get(key);
+        if (material) {
+          material.map = realTexture;
+          material.needsUpdate = true;
+        }
+      }, undefined, () => {});
+    }
     return texture;
   };
   const materialFor = (column) => {
@@ -390,6 +638,16 @@ canvas{display:block;touch-action:none}
       }));
     }
     return materialCache.get(key);
+  };
+  const applyEntitySkin = (materials) => {
+    textureLoader.load('texture/entity/steve.png', (skin) => {
+      skin.magFilter = THREE.NearestFilter;
+      skin.minFilter = THREE.NearestFilter;
+      for (const material of materials) {
+        material.map = skin;
+        material.needsUpdate = true;
+      }
+    }, undefined, () => {});
   };
   const materialKeyFor = (block) => colorFor(block) + ':' + String(block.name || '').slice(0, 32);
   const faceDefs = [
@@ -500,6 +758,7 @@ canvas{display:block;touch-action:none}
         const bodyMaterial = new THREE.MeshLambertMaterial({ color: entity.self ? 0x2dd4bf : 0x2563eb });
         const limbMaterial = new THREE.MeshLambertMaterial({ color: entity.self ? 0x99f6e4 : 0x93c5fd });
         const skinMaterial = new THREE.MeshLambertMaterial({ color: entity.self ? 0xfde68a : 0xfbcfe8 });
+        applyEntitySkin([bodyMaterial, limbMaterial, skinMaterial]);
         const body = new THREE.Mesh(new THREE.BoxGeometry(.62, .92, .32), bodyMaterial);
         body.castShadow = true;
         body.position.y = 1.05;
@@ -545,7 +804,7 @@ canvas{display:block;touch-action:none}
     const stats = state.world?.packetStats || {};
     const adapter = stats.adapter || {};
     meta.textContent = (state.serverName || 'Server') + ' - ' + (state.botName || 'live-update') + ' - ' + (state.status || 'waiting') + ' - blocks ' + blockCount + ' - faces ' + faceCount + ' - entities ' + entityMeshes.size;
-    debug.textContent = 'chunks ' + chunks.length + ' decoded ' + (stats.renderPackets || 0) + ' hollow blocks ' + blockCount + ' faces ' + faceCount + ' level_chunk ' + (stats.levelChunk || 0) + ' last ' + (stats.lastPacket || 'waiting') + (stats.adapterError || adapter.error ? ' - ' + (stats.adapterError || adapter.error) : '');
+    debug.textContent = 'chunks ' + chunks.length + ' decoded ' + (stats.renderPackets || 0) + ' hollow blocks ' + blockCount + ' faces ' + faceCount + ' source textures ' + (window.__NEXUS_TEXTURE_COUNT__ || 0) + ' active textures ' + textureCache.size + ' level_chunk ' + (stats.levelChunk || 0) + ' last ' + (stats.lastPacket || 'waiting') + (stats.adapterError || adapter.error ? ' - ' + (stats.adapterError || adapter.error) : '') + (rendererError ? ' - renderer ' + rendererError : '');
     empty.style.display = blockCount ? 'none' : 'block';
   };
   const focusEntity = () => {
@@ -651,6 +910,12 @@ canvas{display:block;touch-action:none}
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
+  });
+  addEventListener('error', (event) => { rendererError = String(event.message || 'browser error').slice(0, 160); });
+  addEventListener('unhandledrejection', (event) => { rendererError = String(event.reason?.message || event.reason || 'promise error').slice(0, 160); });
+  renderer.domElement.addEventListener('webglcontextlost', (event) => {
+    event.preventDefault();
+    rendererError = 'WebGL context lost';
   });
   setState(state);
   try {
