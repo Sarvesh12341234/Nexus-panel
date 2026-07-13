@@ -257,7 +257,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#020712;col
 #reticle:before,#reticle:after{content:"";position:absolute;background:#eaffff;border-radius:2px}
 #reticle:before{left:12px;top:0;width:2px;height:26px}
 #reticle:after{left:0;top:12px;width:26px;height:2px}
-#empty{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:4;text-align:center;padding:16px 18px;background:rgba(2,8,18,.72);border:1px solid rgba(123,211,255,.22);border-radius:8px;display:none}
+#empty{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:4;text-align:center;padding:12px 15px;background:rgba(2,8,18,.72);border:1px solid rgba(123,211,255,.22);border-radius:8px;display:none}
 canvas{display:block;touch-action:none}
 @media(max-width:720px){#hud{font-size:13px;padding:10px 12px}#debug{position:fixed;top:auto;right:10px;left:10px;bottom:10px;max-width:none}#meta,#debug{font-size:11px}}
 </style>
@@ -295,13 +295,28 @@ canvas{display:block;touch-action:none}
   scene.add(world);
   const entityGroup = new THREE.Group();
   scene.add(entityGroup);
+  const fallbackWorld = new THREE.Group();
+  const fallbackGround = new THREE.Mesh(
+    new THREE.PlaneGeometry(640, 640, 32, 32),
+    new THREE.MeshLambertMaterial({ color: 0x426f46, side: THREE.DoubleSide })
+  );
+  fallbackGround.rotation.x = -Math.PI / 2;
+  fallbackGround.position.y = 62;
+  const fallbackGrid = new THREE.GridHelper(640, 80, 0xc7f9d4, 0x6ea783);
+  fallbackGrid.position.y = 62.025;
+  const fallbackHorizon = new THREE.Mesh(
+    new THREE.BoxGeometry(520, 34, 4),
+    new THREE.MeshLambertMaterial({ color: 0x6c8f57 })
+  );
+  fallbackHorizon.position.set(0, 78, -180);
+  fallbackWorld.add(fallbackGround, fallbackGrid, fallbackHorizon);
+  scene.add(fallbackWorld);
   const blockMeshes = new Map();
   const entityMeshes = new Map();
   const materialCache = new Map();
   let state = window.__NEXUS_INITIAL__ || {};
-  let yaw = 0;
-  let pitch = -0.24;
-  let distance = 16;
+  let lookYawOffset = 0;
+  let lookPitchOffset = 0;
   let dragging = false;
   let lastX = 0;
   let lastY = 0;
@@ -378,6 +393,7 @@ canvas{display:block;touch-action:none}
     const adapter = stats.adapter || {};
     meta.textContent = (state.serverName || 'Server') + ' - ' + (state.botName || 'live-update') + ' - ' + (state.status || 'waiting') + ' - blocks ' + blockMeshes.size + ' - entities ' + entityMeshes.size;
     debug.textContent = 'chunks ' + chunks.length + ' decoded ' + (stats.renderPackets || 0) + ' level_chunk ' + (stats.levelChunk || 0) + ' last ' + (stats.lastPacket || 'waiting') + (stats.adapterError || adapter.error ? ' - ' + (stats.adapterError || adapter.error) : '');
+    fallbackWorld.visible = blockMeshes.size === 0;
     empty.style.display = blockMeshes.size ? 'none' : 'block';
   };
   const focusEntity = () => {
@@ -389,12 +405,20 @@ canvas{display:block;touch-action:none}
     const fx = Number(focus.x || 0);
     const fy = Number(focus.y || 64) + 1.4;
     const fz = Number(focus.z || 0);
-    camera.position.set(
-      fx + Math.sin(yaw) * Math.cos(pitch) * distance,
-      fy + Math.sin(pitch) * distance + 4,
-      fz + Math.cos(yaw) * Math.cos(pitch) * distance,
+    const baseYaw = Number(focus.yaw || 0) * Math.PI / 180;
+    const yaw = baseYaw + lookYawOffset;
+    const pitch = Math.max(-1.18, Math.min(0.92, Number(focus.pitch || 0) * Math.PI / 180 + lookPitchOffset));
+    fallbackWorld.position.x = Math.round(fx / 32) * 32;
+    fallbackWorld.position.z = Math.round(fz / 32) * 32;
+    fallbackHorizon.position.x = -Math.sin(yaw) * 180;
+    fallbackHorizon.position.z = Math.cos(yaw) * 180;
+    fallbackHorizon.rotation.y = yaw;
+    camera.position.set(fx, fy, fz);
+    camera.lookAt(
+      fx + Math.sin(yaw) * Math.cos(pitch) * 32,
+      fy - Math.sin(pitch) * 32,
+      fz + Math.cos(yaw) * Math.cos(pitch) * 32,
     );
-    camera.lookAt(fx, fy, fz);
     renderer.render(scene, camera);
     requestAnimationFrame(animate);
   };
@@ -407,13 +431,14 @@ canvas{display:block;touch-action:none}
   renderer.domElement.addEventListener('pointerup', () => { dragging = false; });
   renderer.domElement.addEventListener('pointermove', (event) => {
     if (!dragging) return;
-    yaw -= (event.clientX - lastX) * 0.006;
-    pitch = Math.max(-1.05, Math.min(.55, pitch - (event.clientY - lastY) * 0.004));
+    lookYawOffset -= (event.clientX - lastX) * 0.006;
+    lookPitchOffset = Math.max(-1.1, Math.min(1.1, lookPitchOffset + (event.clientY - lastY) * 0.004));
     lastX = event.clientX;
     lastY = event.clientY;
   });
   renderer.domElement.addEventListener('wheel', (event) => {
-    distance = Math.max(4, Math.min(80, distance + event.deltaY * 0.025));
+    camera.fov = Math.max(48, Math.min(92, camera.fov + event.deltaY * 0.018));
+    camera.updateProjectionMatrix();
   }, { passive: true });
   addEventListener('resize', () => {
     camera.aspect = innerWidth / innerHeight;
@@ -663,6 +688,7 @@ function startBedrockBot(config) {
   client.on('add_player', (packet) => {
     const id = packetEntityId(packet) || packet?.username;
     const name = packet?.username || packet?.name || packet?.display_name || id || '';
+    if (cleanPlayerName(name) === cleanPlayerName(config.username)) markConnected(packet);
     if (name) players.add(String(name));
     rememberEntity(id, {
       name,
@@ -713,6 +739,7 @@ function startBedrockBot(config) {
   client.on('player_list', (packet) => {
     for (const record of packet?.records?.records || packet?.records || []) {
       if (record?.username) {
+        if (cleanPlayerName(record.username) === cleanPlayerName(config.username)) markConnected(record);
         players.add(String(record.username));
         rememberEntity(packetEntityId(record) || record.username, {
           name: record.username,
