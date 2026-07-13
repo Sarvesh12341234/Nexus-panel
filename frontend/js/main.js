@@ -1920,7 +1920,7 @@ async function renderSpectate() {
     <div class="metric-grid">
       <div><strong data-spectate-status>${escapeHtml(data.status || 'stopped')}</strong><span>Session</span></div>
       <div><strong data-spectate-server>${escapeHtml(data.serverStatus || server.status)}</strong><span>Server</span></div>
-      <div><strong data-spectate-engine>${escapeHtml(data.serverType === 'bedrock' ? 'Bedrock adapter' : data.engine || 'Bot engine')}</strong><span>${data.serverType === 'bedrock' ? 'Real chunk decode' : data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
+      <div><strong data-spectate-engine>${escapeHtml(data.serverType === 'bedrock' ? 'Bedrock viewer' : data.engine || 'Bot engine')}</strong><span>${data.serverType === 'bedrock' ? 'Browser 3D renderer' : data.packageInstalled ? 'Installed' : 'Missing package'}</span></div>
       <div><strong data-spectate-bot>${escapeHtml(data.botName || 'live-update')}</strong><span>${escapeHtml(data.authMode || 'offline')} auth</span></div>
       <div><strong data-spectate-target>${escapeHtml(data.target || 'Overview')}</strong><span>Target</span></div>
       <div><strong data-spectate-pid>${data.pid ? Number(data.pid) : '-'}</strong><span>Bot PID</span></div>
@@ -2028,24 +2028,24 @@ function updateSpectateLiveDom(data) {
   };
   setText('[data-spectate-status]', data.status || 'stopped');
   setText('[data-spectate-server]', data.serverStatus || '');
-  setText('[data-spectate-engine]', data.serverType === 'bedrock' ? 'Bedrock adapter' : data.engine || 'Bot engine');
+  setText('[data-spectate-engine]', data.serverType === 'bedrock' ? 'Bedrock viewer' : data.engine || 'Bot engine');
   setText('[data-spectate-bot]', data.botName || 'live-update');
   setText('[data-spectate-target]', data.target || 'Overview');
   setText('[data-spectate-pid]', data.pid ? String(Number(data.pid)) : '-');
-  setText('[data-spectate-message]', data.error || (data.framePushActive ? 'Real spectator-client frame stream is active.' : data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.serverType === 'bedrock' ? 'Bedrock chunk adapter is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
+  setText('[data-spectate-message]', data.error || (data.framePushActive ? 'Real spectator-client frame stream is active.' : data.clientVideoUrl ? 'Watch-only Minecraft client video is active.' : data.serverType === 'bedrock' && data.rendererUrl ? 'Bedrock browser 3D renderer is active.' : data.serverType === 'bedrock' ? 'Bedrock chunk adapter is active.' : data.rendererMessage) || data.message || 'Live spectate ready.');
   const detail = panel.querySelector('[data-spectate-detail]');
   if (detail) {
     detail.textContent = data.framePushActive
       ? `Frame stream updated ${data.framePushUpdatedAt ? new Date(data.framePushUpdatedAt).toLocaleTimeString() : 'now'}`
       : data.serverType === 'bedrock'
-      ? (data.rendererMessage || 'Rendering live bot packets in the browser. A real client capture will replace this automatically when available.')
+      ? (data.rendererMessage || 'Rendering live bot packets in your browser. A real client capture will replace this automatically when available.')
       : data.packageInstalled
       ? `${data.host || '127.0.0.1'}:${Number(data.port || 0)} - ${data.botName || 'live-update'} - ${(data.authMode || 'offline')} auth`
       : `Install inside /opt/nexuspanel: ${data.installCommand || 'npm install mineflayer'}`;
   }
   const badge = panel.querySelector('[data-spectate-badge]');
   if (badge) {
-    badge.textContent = data.serverType === 'bedrock' ? 'Adapter ready' : data.packageInstalled ? 'Engine ready' : 'Needs engine';
+    badge.textContent = data.serverType === 'bedrock' ? (data.rendererUrl ? 'Viewer ready' : 'Adapter ready') : data.packageInstalled ? 'Engine ready' : 'Needs engine';
     badge.classList.toggle('is-on', Boolean(data.packageInstalled && data.status !== 'missing-engine'));
   }
   const signature = (data.players || []).join('|');

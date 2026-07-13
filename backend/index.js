@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const dns = require('node:dns').promises;
 const fs = require('node:fs');
+const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
@@ -464,7 +465,8 @@ function spectateRendererPort(server) {
 }
 
 function spectateRendererUrl(server, session, req = null) {
-  if (server.type !== 'java' || session?.rendererStatus !== 'ready' || !session?.rendererPort) return '';
+  if (session?.rendererStatus !== 'ready' || !session?.rendererPort) return '';
+  if (server.type === 'bedrock') return `/api/servers/${server.id}/spectate/renderer/`;
   const host = req ? requestPublicHost(req) : '127.0.0.1';
   return `http://${host}:${Number(session.rendererPort)}`;
 }
@@ -683,13 +685,13 @@ function spectateSessionPayload(server, req = null) {
     pid: session?.child?.pid || 0,
     botName: session?.botName || spectateBotName(server),
     authMode: session?.authMode || spectateAuthMode(server),
-    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-adapter'),
-    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'bedrock-adapter'),
-    rendererPort: session?.rendererPort || (server.type === 'java' ? spectateRendererPort(server) : 0),
+    rendererMode: session?.rendererMode || (server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-threejs-viewer'),
+    rendererStatus: session?.rendererStatus || (server.type === 'java' ? 'waiting' : 'waiting'),
+    rendererPort: session?.rendererPort || spectateRendererPort(server),
     rendererUrl: spectateRendererUrl(server, session, req),
     rendererMessage: session?.rendererMessage || (server.type === 'java'
       ? 'Java screenshare renderer starts after the bot spawns. Install prismarine-viewer if it stays unavailable.'
-      : 'Bedrock chunk adapter is active. It renders only real decoded chunk data.'),
+      : 'Bedrock browser renderer starts with the bot and renders decoded chunk data on your device.'),
     clientVideoUrl: settingValue('spectate_client_video_url', process.env.NEXUSPANEL_SPECTATE_CLIENT_VIDEO_URL || ''),
     framePushActive,
     framePushUpdatedAt: frameFeed?.updatedAt || 0,
@@ -744,8 +746,10 @@ function startSpectateSession(server, req = null) {
     port: Number(server.port || (server.type === 'bedrock' ? 19132 : 25565)),
     username: spectateBotName(server),
     auth: spectateAuthMode(server),
-    rendererPort: server.type === 'java' ? spectateRendererPort(server) : 0,
+    rendererPort: spectateRendererPort(server),
     runtimeDir,
+    serverName: server.name,
+    target: players[0] || '',
   };
   const encoded = Buffer.from(JSON.stringify(config), 'utf8').toString('base64url');
   const child = spawn(process.execPath, [path.join(__dirname, 'spectate_bot.js'), encoded], {
@@ -762,12 +766,12 @@ function startSpectateSession(server, req = null) {
     updatedAt: Date.now(),
     botName: config.username,
     authMode: config.auth,
-    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-adapter',
-    rendererStatus: server.type === 'java' ? 'starting' : 'bedrock-adapter',
+    rendererMode: server.type === 'java' ? 'java-prismarine-firstperson' : 'bedrock-threejs-viewer',
+    rendererStatus: 'starting',
     rendererPort: config.rendererPort,
     rendererMessage: server.type === 'java'
       ? `Starting Java first-person renderer on port ${config.rendererPort}...`
-      : 'Using Bedrock chunk adapter. It renders real decoded chunks only.',
+      : `Starting Bedrock browser renderer on port ${config.rendererPort}...`,
     target: players[0] || '',
     players,
     entities: [],
@@ -5143,6 +5147,42 @@ app.get('/api/servers/:id/spectate/stream', requirePermission(capabilities.CONSO
   const timer = setInterval(writePayload, server.type === 'bedrock' ? 180 : 500);
   timer.unref();
   req.on('close', () => clearInterval(timer));
+});
+
+app.get(['/api/servers/:id/spectate/renderer', '/api/servers/:id/spectate/renderer/*'], requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
+  const server = getServerOr404(req.params.id);
+  const session = spectateSessions.get(Number(server.id));
+  if (!session || session.rendererStatus !== 'ready' || !session.rendererPort) {
+    return res.status(404).send('Spectate renderer is not ready.');
+  }
+  const marker = `/api/servers/${server.id}/spectate/renderer`;
+  const markerIndex = req.originalUrl.indexOf(marker);
+  const suffix = markerIndex >= 0 ? req.originalUrl.slice(markerIndex + marker.length) : '/';
+  const targetPath = suffix && suffix !== '' ? suffix : '/';
+  const upstream = http.request({
+    hostname: '127.0.0.1',
+    port: Number(session.rendererPort),
+    path: targetPath,
+    method: 'GET',
+    headers: {
+      Accept: req.headers.accept || '*/*',
+      'User-Agent': 'NexusPanel-renderer-proxy',
+      Connection: 'close',
+    },
+  }, (upstreamRes) => {
+    res.status(upstreamRes.statusCode || 502);
+    for (const [key, value] of Object.entries(upstreamRes.headers)) {
+      if (['connection', 'content-length', 'keep-alive', 'transfer-encoding'].includes(key.toLowerCase())) continue;
+      if (value !== undefined) res.setHeader(key, value);
+    }
+    upstreamRes.pipe(res);
+  });
+  upstream.on('error', (error) => {
+    if (!res.headersSent) res.status(502).send(`Spectate renderer proxy failed: ${error.message}`);
+    else res.destroy(error);
+  });
+  req.on('close', () => upstream.destroy());
+  upstream.end();
 });
 
 app.post('/api/servers/:id/spectate/frame-push', (req, res) => {

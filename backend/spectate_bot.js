@@ -75,6 +75,22 @@ function objectKeys(value) {
     : [];
 }
 
+function jsonScript(value) {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026');
+}
+
+function closeViewer(viewer) {
+  if (!viewer) return;
+  if (viewer.timer) clearInterval(viewer.timer);
+  for (const client of viewer.clients || []) {
+    try { client.end(); } catch {}
+  }
+  try { viewer.server?.close(); } catch {}
+}
+
 function startJavaBot(config) {
   const mineflayer = require('mineflayer');
   const bot = mineflayer.createBot({
@@ -188,6 +204,269 @@ function startJavaBot(config) {
   });
 }
 
+function startBedrockBrowserViewer(config, getState) {
+  if (!config.rendererPort) return null;
+  let express;
+  try {
+    express = require('express');
+  } catch (error) {
+    send('renderer', {
+      status: 'missing',
+      mode: 'bedrock-threejs-viewer',
+      port: config.rendererPort,
+      message: `Install express for Bedrock browser rendering: cd /opt/nexuspanel && npm install express. ${error.message}`,
+    });
+    return null;
+  }
+
+  const app = express();
+  const clients = new Set();
+  app.disable('x-powered-by');
+
+  app.get('/state.json', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(getState());
+  });
+
+  app.get('/events', (req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-store',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write(`event: spectate\ndata: ${JSON.stringify(getState())}\n\n`);
+    clients.add(res);
+    req.on('close', () => clients.delete(res));
+  });
+
+  app.get('/', (_req, res) => {
+    res.type('html').send(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>NexusPanel Bedrock Live</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#020712;color:#e5f6ff;font-family:Inter,Segoe UI,Arial,sans-serif}
+#hud{position:fixed;left:14px;top:14px;z-index:3;display:grid;gap:7px;max-width:min(420px,calc(100vw - 28px));padding:13px 15px;background:rgba(2,8,18,.74);border:1px solid rgba(123,211,255,.24);border-radius:8px;backdrop-filter:blur(10px)}
+#title{font-weight:850;color:#41e69b;letter-spacing:.02em}
+#meta,#debug{font-size:12px;color:#b9c9d8;line-height:1.45}
+#debug{position:fixed;right:14px;top:14px;left:auto;z-index:3;max-width:min(390px,calc(100vw - 28px));padding:12px 14px;background:rgba(2,8,18,.62);border:1px solid rgba(123,211,255,.18);border-radius:8px}
+#reticle{position:fixed;left:50%;top:50%;width:26px;height:26px;margin:-13px 0 0 -13px;z-index:2;opacity:.78;pointer-events:none}
+#reticle:before,#reticle:after{content:"";position:absolute;background:#eaffff;border-radius:2px}
+#reticle:before{left:12px;top:0;width:2px;height:26px}
+#reticle:after{left:0;top:12px;width:26px;height:2px}
+#empty{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:4;text-align:center;padding:16px 18px;background:rgba(2,8,18,.72);border:1px solid rgba(123,211,255,.22);border-radius:8px;display:none}
+canvas{display:block;touch-action:none}
+@media(max-width:720px){#hud{font-size:13px;padding:10px 12px}#debug{position:fixed;top:auto;right:10px;left:10px;bottom:10px;max-width:none}#meta,#debug{font-size:11px}}
+</style>
+</head>
+<body>
+<div id="hud"><div id="title">Bedrock Live Renderer</div><div id="meta">Starting viewer...</div></div>
+<div id="debug"></div>
+<div id="reticle"></div>
+<div id="empty">Waiting for decoded Bedrock chunks<br><small>Keep the bot online and move near terrain.</small></div>
+<script>window.__NEXUS_INITIAL__=${jsonScript(getState())};</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+  const meta = document.getElementById('meta');
+  const debug = document.getElementById('debug');
+  const empty = document.getElementById('empty');
+  if (!window.THREE) {
+    meta.textContent = 'Three.js could not load in this browser.';
+    empty.style.display = 'block';
+    return;
+  }
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x79b7e8);
+  scene.fog = new THREE.Fog(0x9cc9ee, 38, 190);
+  const camera = new THREE.PerspectiveCamera(74, innerWidth / innerHeight, 0.05, 620);
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.75));
+  renderer.setSize(innerWidth, innerHeight);
+  document.body.appendChild(renderer.domElement);
+  scene.add(new THREE.HemisphereLight(0xbfe7ff, 0x536c42, 1.15));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.05);
+  sun.position.set(55, 95, 36);
+  scene.add(sun);
+  const world = new THREE.Group();
+  scene.add(world);
+  const entityGroup = new THREE.Group();
+  scene.add(entityGroup);
+  const blockMeshes = new Map();
+  const entityMeshes = new Map();
+  const materialCache = new Map();
+  let state = window.__NEXUS_INITIAL__ || {};
+  let yaw = 0;
+  let pitch = -0.24;
+  let distance = 16;
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  const colorFor = (column) => {
+    if (typeof column.color === 'string' && /^#[0-9a-f]{6}$/i.test(column.color)) return Number('0x' + column.color.slice(1));
+    const name = String(column.name || '').toLowerCase();
+    if (name.includes('water')) return 0x2f7dd3;
+    if (name.includes('grass') || name.includes('leaves')) return 0x54a948;
+    if (name.includes('dirt') || name.includes('mud')) return 0x806348;
+    if (name.includes('sand')) return 0xd9cb87;
+    if (name.includes('snow')) return 0xecf4f5;
+    if (name.includes('stone') || name.includes('ore')) return 0x81878c;
+    if (name.includes('wood') || name.includes('log')) return 0x8b633e;
+    return 0x6fb06a;
+  };
+  const materialFor = (column) => {
+    const color = colorFor(column);
+    if (!materialCache.has(color)) materialCache.set(color, new THREE.MeshLambertMaterial({ color }));
+    return materialCache.get(color);
+  };
+  const setState = (next) => {
+    state = next || state || {};
+    const chunks = Array.isArray(state.world?.chunks) ? state.world.chunks : [];
+    const columns = chunks.flatMap((chunk) => Array.isArray(chunk.geometry?.columns) ? chunk.geometry.columns : []).slice(-12000);
+    const liveKeys = new Set();
+    for (const column of columns) {
+      const x = Number(column.x || 0);
+      const y = Number(column.y || 64);
+      const z = Number(column.z || 0);
+      const h = Math.max(1, Math.min(32, Number(column.h || 1)));
+      const key = x + ':' + y + ':' + z + ':' + h + ':' + (column.name || column.stateId || '');
+      liveKeys.add(key);
+      if (!blockMeshes.has(key)) {
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, h, 1), materialFor(column));
+        mesh.position.set(x + 0.5, y + h / 2, z + 0.5);
+        blockMeshes.set(key, mesh);
+        world.add(mesh);
+      }
+    }
+    for (const [key, mesh] of blockMeshes) {
+      if (!liveKeys.has(key)) {
+        world.remove(mesh);
+        mesh.geometry.dispose();
+        blockMeshes.delete(key);
+      }
+    }
+    const entities = Array.isArray(state.entities) ? state.entities : [];
+    const entityKeys = new Set();
+    for (const entity of entities) {
+      const key = String(entity.id || entity.name || '');
+      if (!key) continue;
+      entityKeys.add(key);
+      let mesh = entityMeshes.get(key);
+      if (!mesh) {
+        mesh = new THREE.Group();
+        const body = new THREE.Mesh(new THREE.BoxGeometry(.65, 1.55, .38), new THREE.MeshLambertMaterial({ color: entity.self ? 0x41e69b : 0x60a5fa }));
+        body.position.y = .78;
+        const head = new THREE.Mesh(new THREE.BoxGeometry(.62, .62, .62), new THREE.MeshLambertMaterial({ color: entity.self ? 0xa7f3d0 : 0xbfdbfe }));
+        head.position.y = 1.82;
+        mesh.add(body, head);
+        entityMeshes.set(key, mesh);
+        entityGroup.add(mesh);
+      }
+      mesh.position.set(Number(entity.x || 0), Number(entity.y || 64), Number(entity.z || 0));
+      mesh.rotation.y = -Number(entity.yaw || 0) * Math.PI / 180;
+    }
+    for (const [key, mesh] of entityMeshes) {
+      if (!entityKeys.has(key)) {
+        entityGroup.remove(mesh);
+        entityMeshes.delete(key);
+      }
+    }
+    const stats = state.world?.packetStats || {};
+    const adapter = stats.adapter || {};
+    meta.textContent = (state.serverName || 'Server') + ' - ' + (state.botName || 'live-update') + ' - ' + (state.status || 'waiting') + ' - blocks ' + blockMeshes.size + ' - entities ' + entityMeshes.size;
+    debug.textContent = 'chunks ' + chunks.length + ' decoded ' + (stats.renderPackets || 0) + ' level_chunk ' + (stats.levelChunk || 0) + ' last ' + (stats.lastPacket || 'waiting') + (stats.adapterError || adapter.error ? ' - ' + (stats.adapterError || adapter.error) : '');
+    empty.style.display = blockMeshes.size ? 'none' : 'block';
+  };
+  const focusEntity = () => {
+    const entities = Array.isArray(state.entities) ? state.entities : [];
+    return entities.find((item) => item.name === state.target) || entities.find((item) => item.self) || entities[0] || { x: 0, y: 64, z: 0 };
+  };
+  const animate = () => {
+    const focus = focusEntity();
+    const fx = Number(focus.x || 0);
+    const fy = Number(focus.y || 64) + 1.4;
+    const fz = Number(focus.z || 0);
+    camera.position.set(
+      fx + Math.sin(yaw) * Math.cos(pitch) * distance,
+      fy + Math.sin(pitch) * distance + 4,
+      fz + Math.cos(yaw) * Math.cos(pitch) * distance,
+    );
+    camera.lookAt(fx, fy, fz);
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+  };
+  renderer.domElement.addEventListener('pointerdown', (event) => {
+    dragging = true;
+    lastX = event.clientX;
+    lastY = event.clientY;
+    renderer.domElement.setPointerCapture?.(event.pointerId);
+  });
+  renderer.domElement.addEventListener('pointerup', () => { dragging = false; });
+  renderer.domElement.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    yaw -= (event.clientX - lastX) * 0.006;
+    pitch = Math.max(-1.05, Math.min(.55, pitch - (event.clientY - lastY) * 0.004));
+    lastX = event.clientX;
+    lastY = event.clientY;
+  });
+  renderer.domElement.addEventListener('wheel', (event) => {
+    distance = Math.max(4, Math.min(80, distance + event.deltaY * 0.025));
+  }, { passive: true });
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+  setState(state);
+  try {
+    const events = new EventSource('events');
+    events.addEventListener('spectate', (event) => setState(JSON.parse(event.data || '{}')));
+    events.onerror = () => {
+      fetch('state.json', { cache: 'no-store' }).then((response) => response.json()).then(setState).catch(() => {});
+    };
+  } catch {
+    setInterval(() => fetch('state.json', { cache: 'no-store' }).then((response) => response.json()).then(setState).catch(() => {}), 650);
+  }
+  animate();
+})();
+</script>
+</body>
+</html>`);
+  });
+
+  const server = app.listen(config.rendererPort, '0.0.0.0', () => {
+    send('renderer', {
+      status: 'ready',
+      mode: 'bedrock-threejs-viewer',
+      port: config.rendererPort,
+      message: `Bedrock browser 3D renderer is live on port ${config.rendererPort}.`,
+    });
+  });
+  server.on('error', (error) => {
+    send('renderer', {
+      status: 'error',
+      mode: 'bedrock-threejs-viewer',
+      port: config.rendererPort,
+      message: `Bedrock browser renderer failed: ${error.message}`,
+    });
+  });
+  const timer = setInterval(() => {
+    const data = JSON.stringify(getState());
+    for (const client of [...clients]) {
+      try {
+        client.write(`event: spectate\ndata: ${data}\n\n`);
+      } catch {
+        clients.delete(client);
+      }
+    }
+  }, 500);
+  timer.unref();
+  return { server, clients, timer };
+}
+
 function startBedrockBot(config) {
   const bedrock = require('bedrock-protocol');
   const profilesFolder = path.join(config.runtimeDir, 'bedrock-profiles');
@@ -220,6 +499,7 @@ function startBedrockBot(config) {
   };
   let connected = false;
   let observedPacketIndex = 0;
+  let bedrockViewer = null;
 
   const normalizePacketName = (name) => String(name || '')
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
@@ -283,6 +563,35 @@ function startBedrockBot(config) {
       packetStats: { ...packetStats, adapter: adapter.status() },
     });
   };
+  const viewerState = () => ({
+    serverName: config.serverName || 'Bedrock Server',
+    botName: config.username,
+    status: connected ? 'connected' : 'connecting',
+    target: config.target || config.username,
+    players: [...players].map(cleanPlayerName).filter(Boolean),
+    entities: [...entities.values()]
+      .map((entity) => ({
+        id: String(entity.id || entity.name || '').slice(0, 80),
+        name: cleanPlayerName(entity.name || entity.id),
+        x: finiteNumber(entity.x),
+        y: finiteNumber(entity.y, 64),
+        z: finiteNumber(entity.z),
+        yaw: finiteNumber(entity.yaw),
+        pitch: finiteNumber(entity.pitch),
+        self: Boolean(entity.self),
+        updatedAt: Number(entity.updatedAt || Date.now()),
+      }))
+      .filter((entity) => entity.name)
+      .slice(0, 80),
+    world: {
+      mode: 'bedrock-prismarine-adapter',
+      chunks: adapter.world().slice(-64),
+      blockUpdates: blockUpdates.slice(-128),
+      packetStats: { ...packetStats, adapter: adapter.status() },
+      updatedAt: Date.now(),
+    },
+  });
+  bedrockViewer = startBedrockBrowserViewer(config, viewerState);
   const rememberChunkPacket = async (packet) => {
     const bytes = asBuffer(packet);
     if (bytes?.length) packetStats.bytesTotal += bytes.length;
@@ -420,6 +729,7 @@ function startBedrockBot(config) {
   client.on('disconnect', (packet) => {
     clearInterval(entityTimer);
     clearInterval(worldTimer);
+    closeViewer(bedrockViewer);
     const detail = packet?.message || packet?.reason || 'closed';
     const hint = /auth|xbox|login|token|online/i.test(String(detail)) ? ' If online-mode=true, set NEXUSPANEL_SPECTATE_BEDROCK_AUTH=microsoft and restart NexusPanel.' : '';
     send('status', { status: 'stopped', message: `Bedrock spectate bot disconnected: ${detail}.${hint}` });
@@ -434,13 +744,18 @@ function startBedrockBot(config) {
   client.on('close', () => {
     clearInterval(entityTimer);
     clearInterval(worldTimer);
+    closeViewer(bedrockViewer);
     send('status', { status: 'stopped', message: 'Bedrock spectate bot connection closed.' });
     process.exit(0);
   });
 
   process.on('message', (message) => {
-    if (message?.type === 'target') send('status', { status: 'connected', target: cleanPlayerName(message.target), message: `Following ${cleanPlayerName(message.target) || 'overview'}.` });
+    if (message?.type === 'target') {
+      config.target = cleanPlayerName(message.target);
+      send('status', { status: 'connected', target: config.target, message: `Following ${config.target || 'overview'}.` });
+    }
     if (message?.type === 'stop') {
+      closeViewer(bedrockViewer);
       try { client.disconnect('NexusPanel spectate stopped'); } catch {}
       process.exit(0);
     }
