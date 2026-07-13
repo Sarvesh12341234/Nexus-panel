@@ -102,12 +102,61 @@ function normalizeBlock(block) {
   };
 }
 
+function normalizePaletteBlock(block) {
+  const name = block?.name || block?.displayName || '';
+  const stateId = Number(block?.stateId ?? block?.state_id ?? 0) || 0;
+  return {
+    name: String(name || `state_${stateId}`).replace(/^minecraft:/, '').slice(0, 80),
+    stateId,
+    color: blockColor(name, stateId),
+  };
+}
+
 function getBlockSafe(chunk, x, y, z) {
   try {
     return normalizeBlock(chunk.getBlock({ x, y, z, l: 0 }, true));
   } catch {
     return null;
   }
+}
+
+function chunkYBounds(chunk) {
+  const minY = Number.isFinite(Number(chunk.minY))
+    ? Math.trunc(Number(chunk.minY))
+    : Number.isFinite(Number(chunk.minCY))
+      ? Math.trunc(Number(chunk.minCY)) * 16
+      : -64;
+  const maxY = Number.isFinite(Number(chunk.maxY))
+    ? Math.trunc(Number(chunk.maxY)) - 1
+    : Number.isFinite(Number(chunk.maxCY))
+      ? Math.trunc(Number(chunk.maxCY)) * 16 - 1
+      : 319;
+  return { minY, maxY };
+}
+
+function sectionYAt(chunk, section, index) {
+  if (Number.isFinite(Number(section?.y))) return Math.trunc(Number(section.y));
+  if (Number.isFinite(Number(chunk?.co))) return Math.trunc(index - Number(chunk.co));
+  if (Number.isFinite(Number(chunk?.minCY))) return Math.trunc(Number(chunk.minCY) + index);
+  return index;
+}
+
+function sectionInfo(chunk) {
+  const infos = [];
+  const airState = Number(chunk.registry?.blocksByName?.air?.defaultState ?? 0);
+  for (const [index, section] of (chunk.sections || []).entries()) {
+    const storage = section?.blocks?.[0];
+    const palette = section?.palette?.[0];
+    if (!storage || !Array.isArray(palette) || !palette.length) continue;
+    const hasSolid = palette.some((block) => block && Number(block.stateId ?? 0) !== airState && blockColor(block.name, block.stateId));
+    if (!hasSolid) continue;
+    infos.push({
+      y: sectionYAt(chunk, section, index),
+      storage,
+      palette,
+    });
+  }
+  return infos.sort((a, b) => b.y - a.y);
 }
 
 class BedrockWorldAdapter {
@@ -191,9 +240,16 @@ class BedrockWorldAdapter {
     const blocks = [];
     const blockKeys = new Set();
     const names = new Map();
-    const minY = Number.isFinite(Number(chunk.minCY)) ? Math.trunc(Number(chunk.minCY)) * 16 : -64;
-    const maxY = Number.isFinite(Number(chunk.maxCY)) ? Math.trunc(Number(chunk.maxCY)) * 16 + 15 : 319;
+    const { minY, maxY } = chunkYBounds(chunk);
+    const sections = sectionInfo(chunk);
     const heights = Array.from({ length: 16 }, () => Array(16).fill(minY - 1));
+    const sectionByY = new Map(sections.map((section) => [section.y, section]));
+
+    const readFast = (x, y, z) => {
+      const info = sectionByY.get(y >> 4);
+      if (!info) return null;
+      return normalizePaletteBlock(info.palette[info.storage.get(x, y & 0xf, z)]);
+    };
 
     const addBlock = (x, y, z, normalized) => {
       if (!normalized?.color) return;
@@ -218,29 +274,34 @@ class BedrockWorldAdapter {
     for (let x = 0; x < 16; x += 1) {
       for (let z = 0; z < 16; z += 1) {
         let top = null;
-        for (let y = maxY; y >= minY; y -= 1) {
-          const normalized = getBlockSafe(chunk, x, y, z);
-          if (!normalized.color) continue;
-          top = { y, block: normalized };
-          heights[x][z] = y;
-          columns.push({
-            x: coords.x * 16 + x,
-            y,
-            z: coords.z * 16 + z,
-            h: 1,
-            d: 1,
-            real: true,
-            name: normalized.name,
-            stateId: normalized.stateId,
-            color: normalized.color,
-          });
-          break;
+        for (const section of sections) {
+          const sectionTop = Math.min(maxY, section.y * 16 + 15);
+          const sectionBottom = Math.max(minY, section.y * 16);
+          for (let y = sectionTop; y >= sectionBottom; y -= 1) {
+            const normalized = normalizePaletteBlock(section.palette[section.storage.get(x, y & 0xf, z)]);
+            if (!normalized.color) continue;
+            top = { y, block: normalized };
+            heights[x][z] = y;
+            columns.push({
+              x: coords.x * 16 + x,
+              y,
+              z: coords.z * 16 + z,
+              h: 1,
+              d: 1,
+              real: true,
+              name: normalized.name,
+              stateId: normalized.stateId,
+              color: normalized.color,
+            });
+            break;
+          }
+          if (top) break;
         }
         if (!top) continue;
 
         let addedDepth = 0;
-        for (let y = top.y; y >= minY && addedDepth < 7; y -= 1) {
-          const normalized = getBlockSafe(chunk, x, y, z);
+        for (let y = top.y; y >= minY && addedDepth < 6; y -= 1) {
+          const normalized = readFast(x, y, z);
           if (!normalized?.color) {
             if (addedDepth > 0) break;
             continue;
@@ -260,8 +321,21 @@ class BedrockWorldAdapter {
           if (topY - neighborHeight < 2) continue;
           const lowest = Math.max(neighborHeight + 1, topY - 12, minY);
           for (let y = topY; y >= lowest; y -= 1) {
-            const normalized = getBlockSafe(chunk, x, y, z);
+            const normalized = readFast(x, y, z);
             if (normalized?.color) addBlock(x, y, z, normalized);
+          }
+        }
+      }
+    }
+
+    if (!blocks.length && !sections.length) {
+      for (let x = 0; x < 16; x += 1) {
+        for (let z = 0; z < 16; z += 1) {
+          for (let y = maxY; y >= minY; y -= 1) {
+            const normalized = getBlockSafe(chunk, x, y, z);
+            if (!normalized?.color) continue;
+            addBlock(x, y, z, normalized);
+            break;
           }
         }
       }

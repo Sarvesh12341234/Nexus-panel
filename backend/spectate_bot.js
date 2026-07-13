@@ -307,15 +307,11 @@ canvas{display:block;touch-action:none}
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.75));
   renderer.setSize(innerWidth, innerHeight);
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.enabled = false;
   document.body.appendChild(renderer.domElement);
   scene.add(new THREE.HemisphereLight(0xbfe7ff, 0x536c42, 1.15));
   const sun = new THREE.DirectionalLight(0xffffff, 1.05);
   sun.position.set(55, 95, 36);
-  sun.castShadow = true;
-  sun.shadow.mapSize.width = 1024;
-  sun.shadow.mapSize.height = 1024;
   scene.add(sun);
   const world = new THREE.Group();
   scene.add(world);
