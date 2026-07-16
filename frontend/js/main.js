@@ -1198,6 +1198,13 @@ async function api(path, options = {}) {
     }
     if (!response.ok) throw new Error(data.error || raw.slice(0, 500) || 'Request failed.');
     return data;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      const timeoutError = new Error('Request timed out.');
+      timeoutError.code = 'timeout';
+      throw timeoutError;
+    }
+    throw error;
   } finally {
     if (timeout) window.clearTimeout(timeout);
   }
@@ -1976,9 +1983,12 @@ async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
   state.consoleInFlight[serverId] = true;
   try {
     const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 5000;
-    const data = await api(`/api/servers/${server.id}/console`, { timeoutMs }).catch((error) => ({ lines: [], error: error.message }));
+    const data = await api(`/api/servers/${server.id}/console`, { timeoutMs }).catch((error) => {
+      if (error.code === 'timeout') return { lines: state.consoleLineCache[serverId] || [], timedOut: true };
+      return { lines: [], error: error.message };
+    });
     if (renderToken !== consoleRenderToken || state.activeServerId !== serverId) return;
-    fillServerConfigForm(server);
+    if (elements.serverConfigForm?.dataset.dirty !== '1') fillServerConfigForm(server);
     elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
     elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
     if (data.status && server.status !== data.status) {
@@ -1987,6 +1997,7 @@ async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
       updateLiveServerDom();
     }
     syncConsoleActionButtons(server, data.status || server.status);
+    if (data.timedOut && (state.consoleLineCache[serverId] || []).length) return;
     const lines = data.lines.length
       ? data.lines
       : data.error
@@ -2238,6 +2249,26 @@ function renderSettings() {
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v2.0.0"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
+      <div class="settings-group">
+        <strong>Advanced AI reasoning</strong>
+        <p class="muted" id="advancedAiStatus">Optional local code model: CodeBERTa-small ONNX, about 84M parameters. It scores repair focus from logs and diagnostics; first install may download roughly 1.2 GB of model/cache files.</p>
+        <div class="row-actions">
+          <button class="secondary" type="button" data-action="advanced-ai-status">AI Status</button>
+          <button class="secondary" type="button" data-action="advanced-ai-install">Install Advanced AI</button>
+          <button class="secondary" type="button" data-action="advanced-ai-enable">Enable Advanced AI</button>
+          <button class="danger" type="button" data-action="advanced-ai-disable">Disable Advanced AI</button>
+        </div>
+      </div>
+      <div class="settings-group">
+        <strong>World converter</strong>
+        <p class="muted" id="worldConverterStatus">Converts the selected server world into a new opposite-edition server. It never deletes or overwrites the source server.</p>
+        <div class="row-actions">
+          <button class="secondary" type="button" data-action="world-converter-status">Converter Status</button>
+          <button class="secondary" type="button" data-action="world-converter-install">Install Chunker Converter</button>
+          <button class="secondary" type="button" data-action="convert-world-java">Convert selected to Java</button>
+          <button class="secondary" type="button" data-action="convert-world-bedrock">Convert selected to Bedrock</button>
+        </div>
+      </div>
       <label>Max allocatable RAM <input readonly value="${settings.maxAllocatableMemoryMb || 0} MB"></label>
       <label>Max CPU cores <input readonly value="${settings.maxCpuCores || 1}"></label>
       <label>Edition <input readonly value="${escapeHtml(settings.edition || 'normal')} (${escapeHtml(settings.updateTag || '')})"></label>
@@ -2817,7 +2848,6 @@ async function renderSecurity(forceHealth = false) {
         <div><p class="eyebrow">Security</p><h2>Loading checks...</h2></div>
         <div class="row-actions">
           <button class="secondary" type="button" data-action="database-snapshot">Snapshot DB</button>
-          <button class="secondary" type="button" data-action="ddos-scan">DDoS scan</button>
           <button type="button" data-action="run-health-check">Run check now</button>
         </div>
       </div>
@@ -2839,7 +2869,6 @@ async function renderSecurity(forceHealth = false) {
         <div><p class="eyebrow">Security</p><h2>${escapeHtml(state.health?.summary || 'No check yet')}</h2></div>
         <div class="row-actions">
           <button class="secondary" type="button" data-action="database-snapshot">Snapshot DB</button>
-          <button class="secondary" type="button" data-action="ddos-scan">DDoS scan</button>
           <button type="button" data-action="run-health-check">Run check now</button>
         </div>
       </div>
@@ -2847,7 +2876,6 @@ async function renderSecurity(forceHealth = false) {
       <div class="health-grid">
         ${checks.map((check) => `<article class="${check.ok ? 'is-ok' : 'is-bad'}"><strong>${escapeHtml(check.name)}</strong><span>${escapeHtml(check.message)}</span></article>`).join('') || '<p class="empty-state">Run a health check to verify panel folders, database, software, and Java.</p>'}
       </div>
-      <div class="plugin-list" id="ddosPanel"></div>
     `;
   }
 
@@ -4013,22 +4041,6 @@ document.addEventListener('click', async (event) => {
       ]);
       return;
     }
-    if (action === 'ddos-scan') {
-      const server = activeServer();
-      const data = await api(`/api/security/ddos${server ? `?serverId=${encodeURIComponent(server.id)}` : ''}`);
-      const panel = document.querySelector('#ddosPanel');
-      if (panel) {
-        panel.innerHTML = `
-          <div class="plugin-row">
-            <div><strong>DDoS Guard ${Number(data.parameterCount || 0).toLocaleString()} params - ${escapeHtml(data.analysis?.risk || 'normal')}</strong><div class="muted">${escapeHtml(data.analysis?.top?.id || 'normal')} score ${Number(data.analysis?.top?.score || 0).toFixed(2)} - TCP ${Number(data.evidence?.tcp?.total || 0)} - UDP ${Number(data.evidence?.udp?.total || 0)}</div></div>
-            <span class="badge ${data.analysis?.active ? 'is-on' : ''}">${data.analysis?.active ? 'Active risk' : 'Watching'}</span>
-          </div>
-          ${(data.mitigation?.steps || []).slice(0, 5).map((step) => `<div class="plugin-row"><div><strong>${escapeHtml(step)}</strong><div class="muted">${escapeHtml((data.mitigation?.commands || [])[0] || 'No command required')}</div></div></div>`).join('')}
-        `;
-      }
-      showToast('DDoS scan complete.');
-      return;
-    }
     if (action === 'alpha-nav-move') {
       const current = [...document.querySelectorAll('.nav-list [data-view]')].map((button) => button.dataset.view);
       const index = current.indexOf(actionTarget.dataset.navKey);
@@ -4116,6 +4128,65 @@ document.addEventListener('click', async (event) => {
       showToast('Terminal enabled.');
       await refresh();
       return setView('terminal');
+    }
+    if (action === 'advanced-ai-status' || action === 'advanced-ai-install' || action === 'advanced-ai-enable' || action === 'advanced-ai-disable') {
+      const status = document.querySelector('#advancedAiStatus');
+      try {
+        if (status) status.textContent = action === 'advanced-ai-install' ? 'Installing advanced AI. This can take several minutes on first download...' : 'Checking advanced AI...';
+        const endpoint = action === 'advanced-ai-install'
+          ? '/api/advanced-ai/install'
+          : action === 'advanced-ai-enable' || action === 'advanced-ai-disable'
+            ? '/api/advanced-ai/enabled'
+            : '/api/advanced-ai/status';
+        const data = await api(endpoint, {
+          method: action === 'advanced-ai-status' ? 'GET' : 'POST',
+          body: action === 'advanced-ai-enable' || action === 'advanced-ai-disable'
+            ? JSON.stringify({ enabled: action === 'advanced-ai-enable' })
+            : undefined,
+          timeoutMs: action === 'advanced-ai-install' ? 0 : 15000,
+        });
+        const ai = data.advancedAi || {};
+        if (status) status.textContent = `${ai.enabled ? 'Enabled' : 'Disabled'} | package ${ai.packageInstalled ? 'installed' : 'missing'} | ${ai.modelTask || 'model'} | ${ai.modelId || 'unknown'} | estimated download ${ai.estimatedDownloadMb || 0} MB`;
+        showToast('Advanced AI status updated.');
+      } catch (error) {
+        if (status) status.textContent = error.message;
+        showToast(error.message);
+      }
+      return;
+    }
+    if (action === 'world-converter-status' || action === 'world-converter-install' || action === 'convert-world-java' || action === 'convert-world-bedrock') {
+      const status = document.querySelector('#worldConverterStatus');
+      try {
+        if (status) status.textContent = action === 'world-converter-install' ? 'Installing Chunker converter...' : 'Checking converter...';
+        if (action === 'world-converter-install') {
+          const data = await api('/api/world-converter/install', { method: 'POST', timeoutMs: 0 });
+          if (status) status.textContent = `Installed ${data.converter?.provider || 'converter'} at ${data.converter?.jarPath || 'data/tools/chunker-cli.jar'}`;
+          showToast('World converter installed.');
+          return;
+        }
+        if (action === 'world-converter-status') {
+          const data = await api('/api/world-converter/status');
+          if (status) status.textContent = `${data.converter?.provider || 'Converter'}: ${data.converter?.installed ? 'installed' : 'not installed'} ${data.converter?.jarPath || ''}`;
+          return;
+        }
+        const server = activeServer();
+        if (!server) return showToast('Select a source server first.');
+        const targetType = action === 'convert-world-java' ? 'java' : 'bedrock';
+        if (server.type === targetType) return showToast('Pick the opposite edition. This server is already that type.');
+        if (!confirm(`Convert "${server.name}" into a NEW ${targetType} server? Source server files will not be deleted or overwritten. Player inventories/entities may not fully convert across editions.`)) return;
+        const data = await api(`/api/servers/${server.id}/world-convert`, {
+          method: 'POST',
+          body: JSON.stringify({ targetType }),
+          timeoutMs: 0,
+        });
+        if (status) status.textContent = `Created ${data.target?.name || 'converted server'} using ${data.format || 'Chunker'}.`;
+        showToast(`Created converted server: ${data.target?.name || 'done'}`);
+        await refresh();
+      } catch (error) {
+        if (status) status.textContent = error.message;
+        showToast(error.message);
+      }
+      return;
     }
     if (action === 'refresh-fixed') {
       await renderFixed();

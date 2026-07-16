@@ -104,6 +104,28 @@ install_panel() {
   npm install --include=optional --no-audit --no-fund || true
 }
 
+install_advanced_ai() {
+  cd "${INSTALL_DIR}"
+  local WANT_AI="${NEXUSPANEL_INSTALL_ADVANCED_AI:-ask}"
+  if [ "$WANT_AI" = "ask" ]; then
+    echo
+    echo "Advanced AI reasoning is optional."
+    echo "Model: onnx-community/CodeBERTa-small-v1-ONNX (~84M parameters). First setup can download about 1.2 GB of model/cache files."
+    echo "This code-trained model scores repair focus from logs. The built-in sandbox repair engine still performs actions."
+    read -r -p "Install advanced AI now? [y/N]: " WANT_AI
+  fi
+  case "${WANT_AI}" in
+    y|Y|yes|YES|1|true|TRUE)
+      echo "[3b/7] Installing advanced AI package and model cache..."
+      npm install @huggingface/transformers@latest --no-audit --no-fund
+      "$NODE_PATH" "${INSTALL_DIR}/backend/advanced_ai.js" || echo "Advanced AI install skipped after model download error. You can retry from Settings."
+      ;;
+    *)
+      echo "Advanced AI skipped. The panel will use the built-in deterministic repair brain."
+      ;;
+  esac
+}
+
 prepare_paths() {
   echo "[4/7] Preparing data folders and permissions..."
   cd "${INSTALL_DIR}"
@@ -173,6 +195,7 @@ main() {
     install_tunnel_tools
   fi
   install_panel
+  install_advanced_ai
   prepare_paths
   install_cli
   setup_owner

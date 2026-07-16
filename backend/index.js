@@ -15,6 +15,8 @@ const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
 const { AdaptiveEngine } = require('./adaptive_engine');
 const { MODEL_VERSION: REPAIR_AGENT_MODEL_VERSION, PARAMETER_COUNT: REPAIR_AGENT_PARAMETER_COUNT, RepairAgent } = require('./repair_agent');
 const { RepairWebResearch } = require('./repair_web');
+const advancedAi = require('./advanced_ai');
+const worldConverter = require('./world_converter');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
 const { assertInside, backupsRoot, displayPath, ensureServerDirs, findServerRoot, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
@@ -26,7 +28,7 @@ const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZ
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { processTreeMetrics } = require('./process_metrics');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
-const { DDOS_PARAMETER_COUNT, collectDdosEvidence, mitigationPlan } = require('./ddos_guard');
+const { DDOS_PARAMETER_COUNT, collectDdosEvidence } = require('./ddos_guard');
 const { runAgentTerminal, runFullAccessCommand } = require('./agent_terminal');
 const {
   SESSION_COOKIE,
@@ -1349,7 +1351,7 @@ function canOwnServerShare(user, server) {
 
 function resolveServerOwnerUserId(req, requestedValue, fallback = null) {
   if (!ownerOnly(req)) return fallback;
-  if (requestedValue === '__everyone__') return null;
+  if (['__everyone__', 'everyone', 'all'].includes(String(requestedValue || '').toLowerCase())) return null;
   if (requestedValue === undefined || requestedValue === null || requestedValue === '') return null;
   const id = Number(requestedValue);
   if (!Number.isSafeInteger(id) || id < 1) throw new Error('Assigned user is invalid.');
@@ -2251,6 +2253,177 @@ function groupedBackups(backups) {
   return groups;
 }
 
+async function advancedRepairContext(server, software, root) {
+  const files = [];
+  const queue = [{ absolute: root, relative: '' }];
+  let scanned = 0;
+  while (queue.length && scanned < 500 && files.length < 180) {
+    const directory = queue.shift();
+    const entries = await fs.promises.readdir(directory.absolute, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      scanned += 1;
+      const relative = path.join(directory.relative, entry.name).replaceAll('\\', '/');
+      if (/^(?:runtime|backups|archives|node_modules)(?:\/|$)/i.test(relative)) continue;
+      const absolute = assertInside(root, path.join(directory.absolute, entry.name));
+      if (entry.isDirectory()) {
+        queue.push({ absolute, relative });
+        continue;
+      }
+      const stats = await fs.promises.stat(absolute).catch(() => null);
+      files.push({
+        path: relative,
+        size: stats?.size || 0,
+        modifiedAt: stats ? Math.round(stats.mtimeMs) : 0,
+      });
+      if (scanned >= 500 || files.length >= 180) break;
+    }
+  }
+  return {
+    server: serverPayload(server),
+    software: software ? {
+      key: software.key,
+      name: software.name,
+      edition: software.edition,
+      executable: software.executable,
+      startArgs: software.startArgs || [],
+    } : null,
+    runtime: runtimeDetails(server.id),
+    status: runtimeStatus(server.id),
+    properties: ['java', 'bedrock'].includes(server.type)
+      ? parseProperties(await fs.promises.readFile(path.join(root, 'server.properties'), 'utf8').catch(() => ''))
+      : null,
+    plugins: pluginRows(server.id),
+    backups: await backupRows(server).catch(() => []),
+    timeline: timelineRows(server.id).slice(0, 12),
+    health: databaseHealthStatus,
+    settings: {
+      edition: panelEdition(),
+      terminalEnabled: settingValue('terminal_enabled', '0') === '1',
+      repairWebEnabled: settingValue('repair_web_enabled', '1') === '1',
+      repairAgentTerminalEnabled: settingValue('repair_agent_terminal_enabled', '1') === '1',
+      repairAgentLiveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
+      publicBaseUrl: settingValue('public_base_url', ''),
+    },
+    files,
+    scanned,
+  };
+}
+
+function logNeedleText(logs, diagnostics = []) {
+  return [
+    ...(Array.isArray(logs) ? logs : []),
+    ...diagnostics.flatMap((item) => [item.id, item.summary, ...(item.techniques || [])]),
+  ].join('\n').toLowerCase();
+}
+
+async function quarantinePluginFile(server, root, plugin, reason) {
+  const relative = String(plugin.relativePath || plugin.relative_path || plugin.fileName || plugin.file_name || '').replaceAll('\\', '/').replace(/^\/+/, '');
+  if (!relative) return null;
+  const source = assertInside(root, path.join(root, relative));
+  const stats = await fs.promises.stat(source).catch(() => null);
+  if (!stats?.isFile()) {
+    db.prepare('UPDATE plugins SET enabled = 0 WHERE id = ?').run(plugin.id);
+    return `Disabled plugin record ${plugin.name || plugin.fileName || plugin.id}; file was already absent.`;
+  }
+  const quarantineDir = assertInside(root, path.join(root, 'runtime', 'plugin-quarantine'));
+  await fs.promises.mkdir(quarantineDir, { recursive: true });
+  const safeName = `${Date.now()}-${path.basename(relative).replace(/[^A-Za-z0-9._-]+/g, '-')}`;
+  const target = assertInside(quarantineDir, path.join(quarantineDir, safeName));
+  await fs.promises.rename(source, target).catch(async () => {
+    await fs.promises.copyFile(source, target);
+    await fs.promises.rm(source, { force: true });
+  });
+  db.prepare('UPDATE plugins SET enabled = 0 WHERE id = ?').run(plugin.id);
+  appendLog(server.id, `[NexusPanel] Advanced agent quarantined ${displayPath(source)} because ${reason}.`);
+  return `Quarantined ${plugin.name || path.basename(relative)} to ${displayPath(target)}`;
+}
+
+async function applyAdvancedAgentActions(server, software, root, diagnostics, repairContext, logs) {
+  const actions = [];
+  const warnings = [];
+  const ids = new Set(diagnostics.map((item) => item.id));
+  const offline = runtimeStatus(server.id) === 'offline';
+  const needle = logNeedleText(logs, diagnostics);
+  const pluginProblem = [...ids].some((id) => [
+    'plugin-exception',
+    'plugin-dependency',
+    'duplicate-plugin',
+    'plugin-api-version',
+    'loader-mismatch',
+    'mod-resolution',
+    'mixin',
+    'datapack',
+  ].includes(id));
+
+  if (offline && pluginProblem) {
+    const candidates = (repairContext.plugins || []).filter((plugin) => {
+      const names = [plugin.name, plugin.fileName, plugin.relativePath]
+        .filter(Boolean)
+        .map((value) => String(value).toLowerCase());
+      return names.some((name) => name && needle.includes(name.replace(/\.(?:jar|zip|mcpack|mcaddon)$/i, '')))
+        || names.some((name) => name && needle.includes(path.basename(name).replace(/\.(?:jar|zip|mcpack|mcaddon)$/i, '')));
+    }).slice(0, 3);
+    if (candidates.length) {
+      for (const plugin of candidates) {
+        const action = await quarantinePluginFile(server, root, plugin, 'recent logs identified it as the likely failing plugin/mod/pack');
+        if (action) actions.push(action);
+      }
+    } else {
+      warnings.push('Plugin/mod diagnosis found, but logs did not name a registered plugin file clearly enough to quarantine automatically.');
+    }
+  }
+
+  if (offline && ids.has('archive-incomplete')) {
+    const partials = (repairContext.files || [])
+      .filter((file) => /\.(?:download|uploading|part|tmp)$/i.test(file.path))
+      .slice(0, 20);
+    for (const file of partials) {
+      const target = assertInside(root, path.join(root, file.path));
+      await fs.promises.rm(target, { force: true }).catch(() => {});
+    }
+    if (partials.length) actions.push(`Removed ${partials.length} partial transfer/archive file(s).`);
+  }
+
+  if (ids.has('java-missing') && software?.edition === 'java') {
+    try {
+      const requirement = ensureSoftwareRequirements(software, server.id, () => {});
+      actions.push(requirement.message);
+    } catch (error) {
+      warnings.push(`Java requirement repair needs owner/VPS package access: ${error.message}`);
+      if (repairFullAccessEnabled() && process.platform === 'linux') {
+        queueFullAccessCommand({
+          serverId: server.id,
+          command: 'apt-get update && apt-get install -y openjdk-21-jre-headless',
+          purpose: 'advanced-agent-java-runtime-install',
+          risk: 'critical',
+          requestedBy: 'advanced-agent',
+        });
+        actions.push('Queued owner-approved Java 21 runtime install command.');
+      }
+    }
+  }
+
+  if (ids.has('missing-library') && repairFullAccessEnabled() && process.platform === 'linux') {
+    const existing = db.prepare(`
+      SELECT id FROM repair_agent_command_queue
+      WHERE server_id = ? AND status = 'pending' AND purpose = 'advanced-agent-library-debug'
+        AND requested_at >= ?
+    `).get(server.id, Date.now() - 30 * 60 * 1000);
+    if (!existing) {
+      queueFullAccessCommand({
+        serverId: server.id,
+        command: 'ldd ./bedrock_server || true; dpkg -l | grep -E "libstdc|libgcc|libc6" || true',
+        purpose: 'advanced-agent-library-debug',
+        risk: 'high',
+        requestedBy: 'advanced-agent',
+      });
+      actions.push('Queued owner-approved native library diagnostic command.');
+    }
+  }
+
+  return { actions, warnings };
+}
+
 function executableCandidates(server, software) {
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   if (path.resolve(server.server_path || '') !== path.resolve(root)) {
@@ -2751,6 +2924,30 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   const agentAnalysis = await analyzeServerWithAgent(server, software, diagnostics, {
     allowWeb: applyOptimizations,
   });
+  const repairContext = await advancedRepairContext(server, software, root).catch((error) => ({ error: error.message }));
+  agentAnalysis.contextSummary = {
+    files: repairContext.files?.length || 0,
+    plugins: repairContext.plugins?.length || 0,
+    backups: repairContext.backups?.length || 0,
+    status: repairContext.status || '',
+    error: repairContext.error || '',
+  };
+  let advancedReasoning = '';
+  try {
+    advancedReasoning = await advancedAi.reason({ server, diagnostics, logs: consoleLogs(server.id), context: repairContext });
+    if (advancedReasoning) {
+      agentAnalysis.advancedReasoning = advancedReasoning;
+      logFixed({
+        serverId: server.id,
+        category: 'advanced-ai',
+        title: 'Advanced AI reasoning completed',
+        detail: advancedReasoning.slice(0, 1000),
+        source: 'advanced-ai',
+      });
+    }
+  } catch (error) {
+    warnings.push(`Advanced AI reasoning unavailable: ${error.message}`);
+  }
   const terminalTelemetry = await collectAgentTerminalTelemetry(server);
   agentAnalysis.terminalTelemetry = terminalTelemetry;
   if (terminalTelemetry.enabled) {
@@ -2774,6 +2971,11 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     detail: diagnostics.length
       ? `${diagnostics.length} direct cause(s); neural ranker produced ${agentAnalysis.diagnoses.length} candidate(s).`
       : `Neural ranker analyzed ${agentAnalysis.featureCount} features across ${knowledge.diagnosticSignals} signals.`,
+  });
+  checks.push({
+    name: 'Advanced local AI',
+    ok: Boolean(advancedReasoning) || !advancedAi.status().enabled,
+    detail: advancedReasoning ? advancedReasoning.slice(0, 220) : (advancedAi.status().enabled ? 'Enabled but no model response was produced.' : 'Disabled; using deterministic repair brain.'),
   });
   checks.push({
     name: 'Terminal telemetry',
@@ -2822,12 +3024,24 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   const bedrockReferenceRepair = await repairBedrockPackReferences(server, root);
   bedrockReferenceRepair.actions.forEach((item) => actions.push(item));
   bedrockReferenceRepair.warnings.forEach((item) => warnings.push(item));
+  const advancedActions = await applyAdvancedAgentActions(server, software, root, diagnostics, repairContext, consoleLogs(server.id));
+  advancedActions.actions.forEach((item) => actions.push(item));
+  advancedActions.warnings.forEach((item) => warnings.push(item));
+  if (advancedActions.actions.length) {
+    logFixed({
+      serverId: server.id,
+      category: 'advanced-agent',
+      title: 'Advanced agent applied safe action(s)',
+      detail: advancedActions.actions.join('\n').slice(0, 1200),
+      source: 'advanced-agent',
+    });
+  }
   checks.push({
-    name: 'Support config files',
+    name: 'Support config files and agent actions',
     ok: true,
-    detail: [...supportRepair.actions, ...bedrockReferenceRepair.actions].length
-      ? [...supportRepair.actions, ...bedrockReferenceRepair.actions].join(', ')
-      : 'Required support config files and Bedrock pack references are present and valid.',
+    detail: [...supportRepair.actions, ...bedrockReferenceRepair.actions, ...advancedActions.actions].length
+      ? [...supportRepair.actions, ...bedrockReferenceRepair.actions, ...advancedActions.actions].join(', ')
+      : 'Required support config files, Bedrock pack references, and safe agent actions are clear.',
   });
   if (server.type === 'bedrock' && diagnostics.some((item) => item.id === 'bedrock-pack-version' || item.id === 'bedrock-world-native-crash')) {
     const packRepair = await quarantineIncompatibleBedrockPacks(server, root, consoleLogs(server.id));
@@ -2935,6 +3149,90 @@ async function restoreServerBackup(server, backupName) {
   const name = String(backupName || '').replaceAll('\\', '/').replace(/^\/+/, '');
   if (!name.endsWith('.zip') || name.includes('/')) throw new Error('Choose a backup ZIP to restore.');
   return restoreBackupFileIntoServer(server, server.id, name);
+}
+
+function findJavaWorldRoot(root) {
+  const candidates = [path.join(root, 'world'), root];
+  const found = candidates.find((candidate) => fs.existsSync(path.join(candidate, 'level.dat')));
+  if (!found) throw new Error('No Java world level.dat was found. Start the server once or upload a world first.');
+  return found;
+}
+
+function findBedrockWorldRoot(root) {
+  const worlds = path.join(root, 'worlds');
+  if (!fs.existsSync(worlds)) throw new Error('No Bedrock worlds folder was found. Start the server once or upload a world first.');
+  const entries = fs.readdirSync(worlds, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(worlds, entry.name));
+  const found = entries.find((candidate) => fs.existsSync(path.join(candidate, 'level.dat')) || fs.existsSync(path.join(candidate, 'db')));
+  if (!found) throw new Error('No Bedrock world folder with level.dat/db was found.');
+  return found;
+}
+
+function findConvertedWorldRoot(output) {
+  const queue = [output];
+  while (queue.length) {
+    const current = queue.shift();
+    if (fs.existsSync(path.join(current, 'level.dat')) || fs.existsSync(path.join(current, 'db'))) return current;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) queue.push(path.join(current, entry.name));
+    }
+  }
+  return output;
+}
+
+function sourceWorldForConversion(server) {
+  const root = ensureServerDirs(server);
+  return server.type === 'bedrock' ? findBedrockWorldRoot(root) : findJavaWorldRoot(root);
+}
+
+function createConvertedServerRecord(source, targetType, req) {
+  const selectedSoftware = defaultSoftware(targetType);
+  const result = db.prepare(`
+    INSERT INTO servers (
+      name, type, port, max_memory_mb, auto_start, auto_restart, crash_backup,
+      scheduled_backups, backup_interval_hours, backup_interval_minutes, backup_retention, wake_on_join, whitelist,
+      tunnel_provider, public_alias, startup_delay_sec, software_key, software_version,
+      cpu_cores, disk_limit_mb, owner_user_id, install_status, install_progress, install_message
+    )
+    VALUES (?, ?, ?, ?, 0, 1, 1, 1, 24, 1440, 4, 0, 0, 'none', '', 0, ?, 'latest', ?, 0, ?, 'converted', 5, ?)
+  `).run(
+    `${source.name} ${targetType === 'java' ? 'Java' : 'Bedrock'} Convert`.slice(0, 80),
+    targetType,
+    clampNumber(targetType === 'java' ? source.port + 1 : source.port + 10, 1024, 65535, targetType === 'java' ? 25565 : 19132),
+    clampMemoryMb(source.max_memory_mb, 1024),
+    selectedSoftware.key,
+    clampNumber(source.cpu_cores, 1, hostCpuCount(), 1),
+    source.owner_user_id || null,
+    `World conversion queued from ${source.name}. Install ${selectedSoftware.name} after conversion if needed.`,
+  );
+  const inserted = db.prepare('SELECT * FROM servers WHERE id = ?').get(result.lastInsertRowid);
+  setSettingValue(`server_backup_timezone_${inserted.id}`, getUserTimezone(req.user.id));
+  prepareServerIdForCreation(inserted.id);
+  const root = ensureServerDirs({ ...inserted, server_path: serverPath(inserted.id, inserted.name) });
+  const executablePath = path.join(root, 'software', selectedSoftware.executable);
+  const mark = writeProfile({ ...inserted, server_path: root }, root, null);
+  db.prepare('UPDATE servers SET server_path = ?, executable_path = ?, nexus_mark_profile = ? WHERE id = ?')
+    .run(root, executablePath, JSON.stringify(mark), inserted.id);
+  const created = db.prepare('SELECT * FROM servers WHERE id = ?').get(inserted.id);
+  writeServerMetadata(created, root);
+  return created;
+}
+
+async function copyConvertedWorldIntoServer(convertedRoot, targetServer) {
+  const root = ensureServerDirs(targetServer);
+  const target = targetServer.type === 'java'
+    ? path.join(root, 'world')
+    : path.join(root, 'worlds', targetServer.name.replace(/[^A-Za-z0-9 _-]+/g, '').slice(0, 40) || 'Converted World');
+  await fs.promises.mkdir(target, { recursive: true });
+  copyDirectoryContents(convertedRoot, target);
+  return target;
 }
 
 async function restoreBackupFileIntoServer(server, sourceServerId, backupName) {
@@ -3907,8 +4205,31 @@ app.get('/api/repair/bundle', requirePermission(capabilities.SECURITY_VIEW, perm
 });
 
 app.get('/api/repair/agent/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
-  res.json({ agent: repairBrainPayload().agent });
+  res.json({ agent: repairBrainPayload().agent, advancedAi: advancedAi.status() });
 });
+
+app.get('/api/advanced-ai/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ advancedAi: advancedAi.status() });
+});
+
+app.post('/api/advanced-ai/install', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can install the advanced AI model.' });
+  res.json({ advancedAi: await advancedAi.install() });
+}));
+
+app.post('/api/advanced-ai/enabled', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can change advanced AI mode.' });
+  res.json({ advancedAi: await advancedAi.setEnabled(toBool(req.body.enabled)) });
+}));
+
+app.get('/api/world-converter/status', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
+  res.json({ converter: worldConverter.status() });
+});
+
+app.post('/api/world-converter/install', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can install the world converter.' });
+  res.json({ converter: await worldConverter.install() });
+}));
 
 app.get('/api/fixed/logs', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   pruneFixedLogs();
@@ -4104,6 +4425,46 @@ app.post('/api/servers/:id/repair-preview', requirePermission(capabilities.SERVE
     knowledge: knowledgeStatus(),
     changesApplied: false,
   });
+}));
+
+app.post('/api/servers/:id/world-convert', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const source = getServerOr404(req.params.id);
+  if (runtimeStatus(source.id) === 'online') throw new Error('Stop the source server before converting its world.');
+  const targetType = String(req.body.targetType || '').toLowerCase() === 'java' ? 'java' : 'bedrock';
+  if (targetType === source.type) throw new Error('Choose the opposite edition for conversion.');
+  const sourceWorldPath = sourceWorldForConversion(source);
+  const target = createConvertedServerRecord(source, targetType, req);
+  try {
+    appendLog(source.id, `[NexusPanel] World conversion started for new ${targetType} server ${target.name}.`);
+    appendLog(target.id, `[NexusPanel] World conversion source: ${source.name}.`);
+    const converted = await worldConverter.convert({
+      sourceWorldPath,
+      targetType,
+      targetVersion: req.body.targetVersion || '',
+      serverId: source.id,
+    });
+    const convertedRoot = findConvertedWorldRoot(converted.output);
+    const targetWorldPath = await copyConvertedWorldIntoServer(convertedRoot, target);
+    db.prepare(`
+      UPDATE servers
+      SET install_status = 'missing', install_progress = 100, install_message = ?
+      WHERE id = ?
+    `).run(`Converted world copied to ${displayPath(targetWorldPath)}. Install ${targetType === 'java' ? 'Java Vanilla' : 'Bedrock Dedicated Server'} from Software before starting.`, target.id);
+    appendLog(source.id, `[NexusPanel] World conversion completed into ${target.name}.`);
+    appendLog(target.id, `[NexusPanel] Converted world ready at ${displayPath(targetWorldPath)} using ${converted.format}.`);
+    res.status(201).json({
+      source: serverPayload(source, req),
+      target: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(target.id), req),
+      converter: worldConverter.status(),
+      format: converted.format,
+      note: 'Chunker conversion does not reliably preserve live entities or player inventories across editions. Put important player items into chests before converting.',
+    });
+  } catch (error) {
+    db.prepare("UPDATE servers SET install_status = 'failed', install_progress = 0, install_message = ? WHERE id = ?")
+      .run(error.message, target.id);
+    appendLog(target.id, `[NexusPanel] World conversion failed: ${error.message}`);
+    throw error;
+  }
 }));
 
 app.post('/api/host/provision', asyncRoute(async (req, res) => {
@@ -5379,13 +5740,13 @@ app.get('/api/presence', requireAuth, (req, res) => {
   });
 });
 
-app.get('/api/security/ddos', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_SECURITY), (req, res) => {
-  const server = req.query.serverId ? db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.query.serverId)) : null;
+app.get('/api/security/ddos', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_SECURITY), (_req, res) => {
   const report = collectDdosEvidence();
   res.json({
-    ...report,
+    ok: true,
+    active: Boolean(report.analysis?.active),
+    risk: report.analysis?.risk || 'normal',
     parameterCount: DDOS_PARAMETER_COUNT,
-    mitigation: mitigationPlan(report.analysis, server),
   });
 });
 
@@ -6348,6 +6709,23 @@ async function runLiveAgentSweep() {
             detail: support.actions.join('\n'),
             source: 'live-agent',
           });
+        }
+      }
+      if (runtimeStatus(server.id) === 'offline') {
+        const repairContext = await advancedRepairContext(server, software, root).catch(() => ({ plugins: [], files: [] }));
+        const advancedActions = await applyAdvancedAgentActions(server, software, root, diagnostics, repairContext, logs);
+        if (advancedActions.actions.length) {
+          actions.push(`Live agent applied ${advancedActions.actions.length} safe action(s) for ${server.name}`);
+          logFixed({
+            serverId: server.id,
+            category: 'live-agent',
+            title: 'Live agent applied safe action(s)',
+            detail: advancedActions.actions.join('\n').slice(0, 1200),
+            source: 'live-agent',
+          });
+        }
+        if (advancedActions.warnings.length) {
+          appendLog(server.id, `[NexusPanel] Live agent note: ${advancedActions.warnings.join(' ')}`);
         }
       }
       if (repairFullAccessEnabled() && diagnostics.some((item) => ['disk-full', 'inode-full', 'read-only-fs', 'disk-io-error'].includes(item.id))) {
