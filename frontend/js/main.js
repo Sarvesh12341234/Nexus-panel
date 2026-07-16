@@ -67,6 +67,7 @@ const elements = {
   modrinthGrid: document.querySelector('#modrinthGrid'),
   adminPanel: document.querySelector('#adminPanel'),
   adminForm: document.querySelector('#adminForm'),
+  adminAccessPreview: document.querySelector('#adminAccessPreview'),
   userList: document.querySelector('#userList'),
   toast: document.querySelector('#toast'),
   accessOutput: document.querySelector('#accessOutput'),
@@ -1259,10 +1260,11 @@ function fillServerConfigForm(server, force = false) {
     const isOwner = state.user?.role === 'owner';
     ownerLabel.hidden = !isOwner;
     ownerSelect.disabled = !isOwner;
-      ownerSelect.innerHTML = '<option value="">Owner / unassigned</option>' + (state.users || [])
+    ownerSelect.innerHTML = '<option value="__everyone__">Everyone</option><option value="">Owner only</option>' + (state.users || [])
       .filter((user) => user.role !== 'owner')
-      .map((user) => `<option value="${user.id}" ${Number(server.ownerUserId || 0) === Number(user.id) ? 'selected' : ''}>${escapeHtml(user.name)} - ${escapeHtml(user.email)}</option>`)
+      .map((user) => `<option value="${user.id}">${escapeHtml(user.name)} - ${escapeHtml(user.email)}</option>`)
       .join('');
+    ownerSelect.value = server.ownerUserId ? String(server.ownerUserId) : '__everyone__';
   }
   form.dataset.serverId = String(server.id);
   form.dataset.dirty = '0';
@@ -1556,7 +1558,7 @@ function renderStats() {
   if (elements.ownerAssignLabel && elements.ownerUserSelect) {
     const owner = state.user?.role === 'owner';
     elements.ownerAssignLabel.hidden = !owner;
-    elements.ownerUserSelect.innerHTML = '<option value="">Owner / unassigned</option>' + (state.users || [])
+    elements.ownerUserSelect.innerHTML = '<option value="__everyone__">Everyone</option><option value="">Owner only</option>' + (state.users || [])
       .filter((user) => user.role !== 'owner')
       .map((user) => `<option value="${user.id}">${escapeHtml(user.name)} · ${escapeHtml(user.email)}</option>`)
       .join('');
@@ -1741,6 +1743,7 @@ function renderSoftware() {
       <div class="stat-row"><span class="muted">Executable</span><code>${escapeHtml(server.executablePath || 'resolved after install')}</code></div>
       <div class="install-track"><span data-live-install-track style="width:${server.installProgress || 0}%"></span></div>
       <div class="stat-row"><span class="muted" data-live-install-message data-live-message-format="message">${escapeHtml(server.installMessage || server.installStatus || 'Ready')}</span><strong data-live-install-progress>${server.installProgress || 0}%</strong></div>
+      ${server.installStatus === 'installed' ? '<p class="muted">Reinstall replaces the template runtime files. Worlds, configs, plugins, and backups stay untouched.</p>' : ''}
       <button type="button" data-action="install-software" data-software-key="${escapeHtml(server.softwareKey || '')}">${server.installStatus === 'installed' ? 'Reinstall Template' : 'Install Template'}</button>
     </article>
   ` : '') + state.softwareCatalog.map((software) => {
@@ -1757,6 +1760,7 @@ function renderSoftware() {
         <label>Version <select data-software-version="${software.key}" data-current-version="${selected ? escapeHtml(server.softwareVersion || '') : ''}" ${compatible ? '' : 'disabled'}><option value="">Loading versions...</option></select></label>
         <div class="install-track"><span data-live-install-track style="width:${selected ? server.installProgress : 0}%"></span></div>
         <div class="stat-row"><span class="muted" data-live-install-message data-live-message-format="software">${selected ? `${escapeHtml(server.installMessage)} (${escapeHtml(server.softwareVersion || 'latest')})` : 'Not selected'}</span><strong data-live-install-progress>${selected ? `${server.installProgress}%` : ''}</strong></div>
+        ${selected && server.installStatus === 'installed' ? '<p class="muted">Reinstall deletes and replaces only the selected server software runtime files/build. Worlds, configs, plugins, mods, packs, and backups stay.</p>' : ''}
         <button type="button" data-action="install-software" data-software-key="${software.key}" ${compatible ? '' : 'disabled'}>${selected && server.installStatus === 'installed' ? 'Reinstall' : 'Install'}</button>
       </article>
     `;
@@ -1829,16 +1833,22 @@ function renderPlugins() {
   }
 
   if (server.softwareKey === 'bedrock-vanilla') {
-    elements.modrinthGrid.innerHTML = '<p class="empty-state">Bedrock Dedicated Server does not support server plugins. Use File Manager to add resource packs or behavior packs, or switch software to PocketMine for plugins.</p>';
+    elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Bedrock packs: upload .mcpack or .mcaddon';
+    elements.modrinthForm.querySelector('[name="projectType"]').disabled = true;
+    elements.modrinthForm.querySelector('[name="loader"]').disabled = true;
+    elements.modrinthGrid.innerHTML = '<p class="empty-state">Bedrock Dedicated Server supports resource and behavior packs, but automatic marketplace install needs manifest registration. Upload .mcpack or .mcaddon in File Manager for now.</p>';
   } else if (server.softwareKey === 'pocketmine') {
     elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Poggit: PurePerms, ScoreHud, Worlds';
     elements.modrinthForm.querySelector('[name="projectType"]').disabled = true;
     elements.modrinthForm.querySelector('[name="loader"]').disabled = true;
     loadPluginMarketplace({ featured: true }).catch(() => {});
   } else {
-    elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Modrinth: Geyser, LuckPerms, ViaVersion';
+    const isModded = ['fabric', 'forge'].includes(server.softwareKey);
+    elements.modrinthForm.querySelector('input[name="query"]').placeholder = isModded ? 'Search Modrinth mods: Lithium, FerriteCore, Create' : 'Search Modrinth plugins: Geyser, LuckPerms, ViaVersion';
     elements.modrinthForm.querySelector('[name="projectType"]').disabled = false;
     elements.modrinthForm.querySelector('[name="loader"]').disabled = false;
+    elements.modrinthForm.querySelector('[name="projectType"]').value = isModded ? 'mod' : 'plugin';
+    elements.modrinthForm.querySelector('[name="loader"]').value = server.softwareKey === 'purpur' ? 'paper' : server.softwareKey;
     loadPluginMarketplace({ featured: true }).catch(() => {});
   }
 
@@ -2236,7 +2246,7 @@ function renderSettings() {
       <div class="settings-group tunnel-settings">
         <strong>Normal public tunnel setup</strong>
         <label>ngrok auth token <input name="ngrokAuthToken" type="password" placeholder="${settings.ngrokConfigured ? `Saved (${escapeHtml(settings.ngrokAuthtokenPreview || 'configured')})` : 'Paste ngrok token'}"></label>
-        <label>Tunnel packet type <select id="normalTunnelProtocol"><option value="auto">Auto from server type</option><option value="tcp">TCP (Java)</option><option value="udp">UDP (Bedrock)</option></select></label>
+        <label>Tunnel packet type <select id="normalTunnelProtocol"><option value="auto">Auto from server type</option><option value="tcp">TCP (Java)</option><option value="udp">UDP (Bedrock)</option><option value="http">HTTP panel website</option><option value="https">HTTPS panel website</option></select></label>
         <label class="switch"><input name="playitEnabled" type="checkbox" ${settings.playitEnabled ? 'checked' : ''}><span></span>Enable playit.gg helper</label>
         <div class="row-actions">
           <button class="secondary" type="button" data-action="show-normal-tunnel-plan">Status</button>
@@ -2387,7 +2397,9 @@ function setTunnelOutput(message, mode = 'info') {
 async function fetchTunnelPlan() {
   const server = activeServer();
   const protocol = document.querySelector('#normalTunnelProtocol')?.value || 'auto';
-  return api(`/api/tunnels/normal-plan${server ? `?serverId=${encodeURIComponent(server.id)}&protocol=${encodeURIComponent(protocol)}` : ''}`);
+  const params = new URLSearchParams({ protocol });
+  if (server && !['http', 'https'].includes(protocol)) params.set('serverId', server.id);
+  return api(`/api/tunnels/normal-plan?${params}`);
 }
 
 async function refreshTunnelOutput(prefix = '') {
@@ -3886,6 +3898,7 @@ function applyAdminPermissionPreset(level = elements.adminForm.accessLevel?.valu
   elements.adminForm.querySelectorAll('[name="permissionKey"]').forEach((checkbox) => {
     checkbox.checked = selected.has(checkbox.value);
   });
+  syncAdminAccessPreview();
 }
 
 if (elements.adminForm.accessLevel?.tagName === 'SELECT') {
@@ -3903,12 +3916,26 @@ function accessLevelForPermissionKeys(keys) {
   return 5;
 }
 
+function syncAdminAccessPreview() {
+  if (!elements.adminForm) return 0;
+  const keys = [...elements.adminForm.querySelectorAll('[name="permissionKey"]:checked')]
+    .map((checkbox) => checkbox.value);
+  const level = accessLevelForPermissionKeys(keys);
+  if (elements.adminForm.accessLevel) elements.adminForm.accessLevel.value = String(level);
+  if (elements.adminAccessPreview) elements.adminAccessPreview.textContent = `${accessName(level)} (${level})`;
+  return level;
+}
+
+elements.adminForm.querySelectorAll('[name="permissionKey"]').forEach((checkbox) => {
+  checkbox.addEventListener('change', syncAdminAccessPreview);
+});
+
 elements.adminForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const payload = formData(elements.adminForm);
   payload.permissionKeys = [...elements.adminForm.querySelectorAll('[name="permissionKey"]:checked')]
     .map((checkbox) => checkbox.value);
-  payload.accessLevel = accessLevelForPermissionKeys(payload.permissionKeys);
+  payload.accessLevel = syncAdminAccessPreview();
   try {
     await api('/api/users', { method: 'POST', body: JSON.stringify(payload) });
     elements.adminForm.reset();
@@ -4235,6 +4262,8 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
       const versionSelect = document.querySelector(`[data-software-version="${CSS.escape(actionTarget.dataset.softwareKey)}"]`);
+      const reinstalling = server.softwareKey === actionTarget.dataset.softwareKey && server.installStatus === 'installed';
+      if (reinstalling && !confirm('Reinstall replaces the selected software runtime/build files. Worlds, configs, plugins, mods, packs, and backups stay untouched. Continue?')) return;
       actionTarget.disabled = true;
       const card = actionTarget.closest('.software-card');
       const fill = card?.querySelector('.install-track span');
@@ -4351,8 +4380,8 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'install-ngrok-agent' || action === 'start-ngrok-tunnel' || action === 'stop-ngrok-tunnel') {
       const server = activeServer();
-      if (!server && action !== 'install-ngrok-agent') return showToast('Create or select a server first.');
       const protocol = document.querySelector('#normalTunnelProtocol')?.value || 'auto';
+      if (!server && action !== 'install-ngrok-agent' && !['http', 'https'].includes(protocol)) return showToast('Create or select a server first.');
       const endpoint = action === 'install-ngrok-agent'
         ? '/api/tunnels/ngrok/install'
         : action === 'start-ngrok-tunnel'
@@ -4363,7 +4392,7 @@ document.addEventListener('click', async (event) => {
       try {
         const data = await api(endpoint, {
           method: 'POST',
-          body: JSON.stringify({ serverId: server?.id || 0, protocol }),
+          body: JSON.stringify({ serverId: ['http', 'https'].includes(protocol) ? 0 : server?.id || 0, protocol }),
         });
         const remote = data.ngrok?.remoteHost || data.ngrok?.message || 'ngrok status updated.';
         if (data.ngrok?.remoteHost) await navigator.clipboard?.writeText(data.ngrok.remoteHost).catch(() => {});
@@ -4865,10 +4894,13 @@ document.addEventListener('click', async (event) => {
     const row = event.target.closest('[data-user-id]');
     if (row && action === 'update-user') {
       const permissionKeys = [...row.querySelectorAll('[data-user-permission]:checked')].map((input) => input.value);
+      const accessLevel = accessLevelForPermissionKeys(permissionKeys);
+      const accessInput = row.querySelector('[data-user-access-level]');
+      if (accessInput && !accessInput.disabled) accessInput.value = String(accessLevel);
       await api(`/api/users/${row.dataset.userId}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          accessLevel: Number(row.querySelector('[data-user-access-level]').value),
+          accessLevel,
           permissionKeys,
         }),
       });
@@ -4884,6 +4916,15 @@ document.addEventListener('click', async (event) => {
   } catch (error) {
     showToast(error.message);
   }
+});
+
+document.addEventListener('change', (event) => {
+  if (!event.target.matches('[data-user-permission]')) return;
+  const row = event.target.closest('[data-user-id]');
+  const input = row?.querySelector('[data-user-access-level]');
+  if (!row || !input || input.disabled) return;
+  const permissionKeys = [...row.querySelectorAll('[data-user-permission]:checked')].map((item) => item.value);
+  input.value = String(accessLevelForPermissionKeys(permissionKeys));
 });
 
 initThemes();

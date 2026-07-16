@@ -257,15 +257,20 @@ function startServer(server, software) {
     if (profile.startupCpuQuotaPercent > profile.cpuQuotaPercent) {
       appendLog(server.id, `[NexusPanel] Cgroup active: startup ${profile.startupCpuQuotaPercent}% CPU, then ${profile.cpuQuotaPercent}% CPU.`);
       const throttleTimer = setTimeout(() => {
-        if (!processes.has(server.id)) return;
+        if (processes.get(server.id) !== child) return;
         const result = spawnSync('systemctl', ['set-property', wrapped.unit, `CPUQuota=${profile.cpuQuotaPercent}%`], {
           encoding: 'utf8',
           windowsHide: true,
         });
         if (result.status === 0) appendLog(server.id, `[NexusPanel] Startup CPU burst ended. Limit is now ${profile.cpuCores} core(s).`);
-        else appendLog(server.id, `[NexusPanel] CPU throttle update failed: ${String(result.stderr || '').trim() || 'systemctl error'}`);
+        else {
+          const detail = String(result.stderr || '').trim() || 'systemctl error';
+          if (/unit .* not found/i.test(detail)) appendLog(server.id, '[NexusPanel] Startup CPU burst unit was already collected; steady database allocation remains enforced by Nexus-Mark.');
+          else appendLog(server.id, `[NexusPanel] CPU throttle update failed: ${detail}`);
+        }
       }, 90 * 1000);
       throttleTimer.unref();
+      child.nexusThrottleTimer = throttleTimer;
     } else {
       appendLog(server.id, `[NexusPanel] Cgroup active: steady limit ${profile.cpuQuotaPercent}% CPU (${profile.cpuCores} cores); startup burst is disabled for allocations above 3 cores.`);
     }
@@ -274,11 +279,13 @@ function startServer(server, software) {
   child.stderr.on('data', (chunk) => splitLines(server.id, chunk));
   child.on('error', (error) => {
     if (child.nexusGuardTimer) clearInterval(child.nexusGuardTimer);
+    if (child.nexusThrottleTimer) clearTimeout(child.nexusThrottleTimer);
     appendLog(server.id, `[NexusPanel] Failed to start: ${error.message}`);
     processes.delete(server.id);
   });
   child.on('exit', (code, signal) => {
     if (child.nexusGuardTimer) clearInterval(child.nexusGuardTimer);
+    if (child.nexusThrottleTimer) clearTimeout(child.nexusThrottleTimer);
     const intentional = intentionalStops.delete(server.id);
     appendLog(server.id, `[NexusPanel] Process exited code=${code ?? 'none'} signal=${signal ?? 'none'}`);
     processes.delete(server.id);

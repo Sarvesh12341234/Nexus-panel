@@ -1324,7 +1324,7 @@ async function runHealthCheck(force = false) {
 function visibleServerDatabaseRows(user) {
   return user?.role === 'owner' || !isHostEdition()
     ? db.prepare('SELECT * FROM servers ORDER BY created_at DESC').all()
-    : db.prepare('SELECT * FROM servers WHERE owner_user_id = ? ORDER BY created_at DESC').all(user?.id || 0);
+    : db.prepare('SELECT * FROM servers WHERE owner_user_id IS NULL OR owner_user_id = ? ORDER BY created_at DESC').all(user?.id || 0);
 }
 
 function serverRows(user, req = null) {
@@ -1335,6 +1335,7 @@ function canUseServer(user, server) {
   if (!user || !server) return false;
   if (user.role === 'owner') return true;
   if (!isHostEdition()) return true;
+  if (!server.owner_user_id) return true;
   return Number(server.owner_user_id) === Number(user.id);
 }
 
@@ -1342,11 +1343,13 @@ function canOwnServerShare(user, server) {
   if (!user || !server) return false;
   if (user.role === 'owner') return true;
   if (!isHostEdition()) return canUseServer(user, server);
+  if (!server.owner_user_id) return true;
   return Number(server.owner_user_id) === Number(user.id);
 }
 
 function resolveServerOwnerUserId(req, requestedValue, fallback = null) {
   if (!ownerOnly(req)) return fallback;
+  if (requestedValue === '__everyone__') return null;
   if (requestedValue === undefined || requestedValue === null || requestedValue === '') return null;
   const id = Number(requestedValue);
   if (!Number.isSafeInteger(id) || id < 1) throw new Error('Assigned user is invalid.');
@@ -3160,7 +3163,7 @@ function tunnelKey(provider, serverId = 0) {
 
 function tunnelProtocolForServer(server, requested = '') {
   const protocol = String(requested || '').toLowerCase();
-  if (['tcp', 'udp'].includes(protocol)) return protocol;
+  if (['tcp', 'udp', 'http', 'https'].includes(protocol)) return protocol;
   return server?.type === 'bedrock' ? 'udp' : 'tcp';
 }
 
@@ -3253,7 +3256,7 @@ async function startNgrokTunnel(server, requestedProtocol = '') {
   if (!status.running && !status.remoteHost) {
     throw new Error(status.message || `ngrok ${protocol} tunnel exited before it returned a public address.`);
   }
-  appendLog(server.id, `[NexusPanel] ngrok ${protocol} tunnel ${status.remoteHost ? `ready: ${status.remoteHost}` : 'started; waiting for remote address'}.`);
+  if (server.id) appendLog(server.id, `[NexusPanel] ngrok ${protocol} tunnel ${status.remoteHost ? `ready: ${status.remoteHost}` : 'started; waiting for remote address'}.`);
   return status;
 }
 
@@ -4286,8 +4289,8 @@ app.get('/api/settings/update-status', requirePermission(capabilities.SETTINGS_M
 app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   if (isHostEdition()) return res.status(404).json({ error: 'Normal-edition tunnel setup is not available in host edition.' });
   const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
-  const port = Number(server?.port || 25565);
   const protocol = tunnelProtocolForServer(server, req.query.protocol);
+  const port = ['http', 'https'].includes(protocol) ? Number(req.query.port || 3000) : Number(server?.port || 25565);
   const ngrok = server ? await ngrokStatus(server) : { installed: commandExists('ngrok'), binary: commandExists('ngrok') ? resolveCommand('ngrok') : '', running: false, publicUrl: '', remoteHost: '', protocol };
   const playit = playitStatus();
   res.json({
@@ -4301,7 +4304,9 @@ app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAG
       publicUrl: ngrok.publicUrl,
       remoteHost: ngrok.remoteHost,
       command: `ngrok ${protocol} ${port}`,
-      note: server?.type === 'bedrock' && protocol === 'tcp'
+      note: ['http', 'https'].includes(protocol)
+        ? `This exposes the panel web port ${port}. Use HTTPS/HTTP only for the website, not Minecraft gameplay.`
+        : server?.type === 'bedrock' && protocol === 'tcp'
         ? 'This server is Bedrock, so public gameplay needs UDP. TCP ngrok can start but Bedrock clients will not connect through it.'
         : protocol === 'udp'
         ? 'Bedrock uses UDP. ngrok UDP requires an ngrok plan/account that supports UDP endpoints; Playit is usually easier for Bedrock.'
@@ -4322,12 +4327,18 @@ app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAG
 }));
 
 app.post('/api/tunnels/ngrok/start', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.body.serverId || req.query.serverId);
-  res.json({ ngrok: await startNgrokTunnel(server, req.body.protocol || req.query.protocol) });
+  const protocol = tunnelProtocolForServer(null, req.body.protocol || req.query.protocol);
+  const server = ['http', 'https'].includes(protocol) && !Number(req.body.serverId || req.query.serverId)
+    ? { id: 0, name: 'NexusPanel website', type: 'panel', port: Number(req.body.port || req.query.port || port || 3000) }
+    : getServerOr404(req.body.serverId || req.query.serverId);
+  res.json({ ngrok: await startNgrokTunnel(server, protocol) });
 }));
 
 app.post('/api/tunnels/ngrok/stop', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.body.serverId || req.query.serverId);
+  const protocol = tunnelProtocolForServer(null, req.body.protocol || req.query.protocol);
+  const server = ['http', 'https'].includes(protocol) && !Number(req.body.serverId || req.query.serverId)
+    ? { id: 0, name: 'NexusPanel website', type: 'panel', port: Number(req.body.port || req.query.port || port || 3000) }
+    : getServerOr404(req.body.serverId || req.query.serverId);
   stopTunnelProcess('ngrok', server.id);
   res.json({ ngrok: await ngrokStatus(server) });
 }));
@@ -5108,13 +5119,14 @@ app.post('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANA
 app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
   const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
   const software = server ? (findSoftware(server.software_key) || defaultSoftware(server.type)) : null;
-  if (software && !['paper', 'purpur'].includes(software.key)) {
-    return res.json({ hits: [], source: 'modrinth', message: 'Modrinth plugins are available for Paper/Purpur Java servers.' });
+  if (software && !['paper', 'purpur', 'fabric', 'forge'].includes(software.key)) {
+    return res.json({ hits: [], source: 'modrinth', message: 'Modrinth installs are available for Paper/Purpur plugins and Fabric/Forge mods.' });
   }
-  const loader = String(req.query.loader || (software && ['paper', 'purpur'].includes(software.key) ? 'paper' : '')).trim().toLowerCase();
+  const defaultLoader = software?.key === 'purpur' ? 'paper' : ['paper', 'fabric', 'forge'].includes(software?.key) ? software.key : '';
+  const loader = String(req.query.loader || defaultLoader).trim().toLowerCase();
   const projectType = ['mod', 'plugin'].includes(String(req.query.projectType || '').toLowerCase())
     ? String(req.query.projectType).toLowerCase()
-    : 'plugin';
+    : ['fabric', 'forge'].includes(software?.key) ? 'mod' : 'plugin';
   const version = String(req.query.version || server?.software_version || '').trim();
   const query = String(req.query.query || '').trim();
   const facets = [[`project_type:${projectType}`], ['server_side:required', 'server_side:optional']];
@@ -5195,14 +5207,14 @@ app.get('/api/poggit/search', requireAuth, asyncRoute(async (req, res) => {
 app.post('/api/servers/:id/modrinth/install', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
-  if (!['paper', 'purpur'].includes(software.key)) {
-    return res.status(400).json({ error: 'Modrinth plugin install currently supports Paper/Purpur Java servers.' });
+  if (!['paper', 'purpur', 'fabric', 'forge'].includes(software.key)) {
+    return res.status(400).json({ error: 'Modrinth install supports Paper/Purpur plugins and Fabric/Forge mods.' });
   }
 
   const projectId = String(req.body.projectId || '').trim();
   if (!projectId) return res.status(400).json({ error: 'Modrinth project id is required.' });
   const gameVersion = String(req.body.gameVersion || server.software_version || '').trim();
-  const loaders = ['paper'];
+  const loaders = [['paper', 'purpur'].includes(software.key) ? 'paper' : software.key];
   const params = new URLSearchParams({ loaders: JSON.stringify(loaders) });
   if (gameVersion && !['latest', 'manual'].includes(gameVersion)) params.set('game_versions', JSON.stringify([gameVersion]));
 
@@ -5213,7 +5225,7 @@ app.post('/api/servers/:id/modrinth/install', requirePermission(capabilities.PLU
   const versions = await versionResponse.json();
   const selected = versions[0];
   const file = selected?.files?.find((item) => item.primary) || selected?.files?.[0];
-  if (!file?.url || !file?.filename) throw new Error('No compatible plugin file found on Modrinth.');
+  if (!file?.url || !file?.filename) throw new Error('No compatible Modrinth file found.');
 
   const target = pluginTarget(server, 'jar-plugin', file.filename);
   await downloadToFile(file.url, target.absolutePath, () => {});
@@ -5222,7 +5234,7 @@ app.post('/api/servers/:id/modrinth/install', requirePermission(capabilities.PLU
     INSERT INTO plugins (server_id, name, kind, file_name, relative_path, enabled)
     VALUES (?, ?, 'jar-plugin', ?, ?, 1)
   `).run(server.id, name, file.filename, target.relativePath);
-  appendLog(server.id, `[NexusPanel] Installed Modrinth plugin ${name}. Restart server to load it.`);
+  appendLog(server.id, `[NexusPanel] Installed Modrinth ${['fabric', 'forge'].includes(software.key) ? 'mod' : 'plugin'} ${name}. Restart server to load it.`);
 
   res.status(201).json({
     plugin: pluginRows(server.id).find((plugin) => plugin.id === result.lastInsertRowid),
