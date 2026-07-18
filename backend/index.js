@@ -22,7 +22,8 @@ const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
 const { assertInside, backupsRoot, displayPath, ensureServerDirs, findServerRoot, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
 const { clearSoftwareVersionCache, defaultSoftware, findSoftware, installedJavaMajor, pluginKindForFile, requiredJavaMajorForMinecraftVersion, resolveDownload, softwareCatalog, softwareVersions } = require('./software');
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
-const { profileForServer, writeProfile } = require('./nexus_mark');
+const { kernelStatus, nativeStatus, profileForServer, writeProfile } = require('./nexus_mark');
+const { removeServerIdentity } = require('./nexus_mark_identity');
 const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer, subscribeConsole } = require('./runtime');
 const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions, zipEntries } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
@@ -30,6 +31,7 @@ const { processTreeMetrics } = require('./process_metrics');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
 const { DDOS_PARAMETER_COUNT, collectDdosEvidence } = require('./ddos_guard');
 const { runAgentTerminal, runFullAccessCommand } = require('./agent_terminal');
+const hostAgent = require('./host_agent');
 const {
   SESSION_COOKIE,
   authMiddleware,
@@ -63,13 +65,15 @@ const keyedOperations = new Map();
 const crashHistory = new Map();
 const crashRestartTimers = new Map();
 const autoBackupInFlight = new Set();
+const serverSizeCache = new Map();
 const adaptiveEngine = new AdaptiveEngine();
 const repairAgent = new RepairAgent(db);
 const repairWeb = new RepairWebResearch(db);
 let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
+const dummyPasswordHash = hashPassword(crypto.randomBytes(24).toString('base64url'));
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
-const PANEL_VERSION = '2.0.0';
+const PANEL_VERSION = '3.0.0';
 let updateStatus = {
   running: false,
   progress: 0,
@@ -79,31 +83,43 @@ let updateStatus = {
   exitCode: null,
 };
 
-app.set('trust proxy', true);
+app.set('trust proxy', process.env.NEXUSPANEL_TRUST_PROXY === '1' ? 1 : 'loopback');
 
 app.use('/api/servers/:id/files/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/servers/:id/files/upload', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/network/upload-test', express.raw({ type: 'application/octet-stream', limit: '64mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(authMiddleware);
+app.use('/api', (req, res, next) => {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+  if (/^Bearer /i.test(String(req.headers.authorization || '')) || req.headers['x-nexuspanel-token']) return next();
+  if (req.headers['x-nexuspanel-request'] !== '1') return res.status(403).json({ error: 'Request verification failed.' });
+  const fetchSite = String(req.headers['sec-fetch-site'] || '');
+  if (fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite)) return res.status(403).json({ error: 'Cross-site request blocked.' });
+  return next();
+});
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; media-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
 });
 app.use('/pictures', express.static(path.join(__dirname, '..', 'pictures'), {
   etag: true,
-  maxAge: 0,
+  maxAge: '1d',
   setHeaders: (res) => {
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
   },
 }));
 app.use(express.static(path.join(__dirname, '..', 'frontend'), {
   etag: true,
   maxAge: 0,
   setHeaders: (res) => {
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Cache-Control', 'no-cache');
   },
 }));
 
@@ -250,8 +266,13 @@ const repairAgentModelFreshness = ensureRepairAgentModelFresh();
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
-  const defaultTag = edition === 'host' ? 'host-v2.0.0' : 'normal-v2.0.0';
-  const configuredTag = settingValue('update_target_tag', defaultTag);
+  const defaultTag = edition === 'host' ? 'host-v3.0.0' : 'normal-v3.0.0';
+  let configuredTag = settingValue('update_target_tag', defaultTag);
+  if (/^(?:normal|host)-v[12]\./.test(configuredTag)) {
+    configuredTag = defaultTag;
+    setSettingValue('update_target_tag', configuredTag);
+  }
+  const markNative = nativeStatus({ build: process.platform === 'linux' });
   return {
     version: PANEL_VERSION,
     terminalEnabled: settingValue('terminal_enabled', '0') === '1',
@@ -263,6 +284,15 @@ function panelSettingsPayload(user = null) {
     updateStatus,
     hostApiTokenPreview: edition === 'host' && user?.role === 'owner' ? `${hostToken.slice(0, 8)}....${hostToken.slice(-6)}` : '',
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
+    hostAgent: hostAgent.localStatus(),
+    nexusMarkNative: {
+      available: Boolean(markNative.available),
+      detail: markNative.detail || '',
+      reason: markNative.reason || '',
+      landlockAbi: Number(markNative.landlockAbi || 0),
+      selfTestMs: Number(markNative.selfTestMs || 0),
+      staleBinary: Boolean(markNative.staleBinary),
+    },
     repairWebEnabled: settingValue('repair_web_enabled', '1') === '1',
     repairAgentTerminalEnabled: settingValue('repair_agent_terminal_enabled', '1') === '1',
     repairAgentLiveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
@@ -1042,6 +1072,7 @@ function serverPayload(server, req = null) {
     maxMemoryMb: server.max_memory_mb,
     cpuCores: server.cpu_cores || 1,
     diskLimitMb: server.disk_limit_mb || 0,
+    serverSizeBytes: cachedServerSizeBytes(server),
     templateKey: server.template_key || '',
     ownerUserId: server.owner_user_id || null,
     nexusMarkProfile: server.nexus_mark_profile || '',
@@ -1214,12 +1245,11 @@ function deviceFromUserAgent(userAgent) {
           : /Linux/i.test(ua) ? 'Linux'
             : 'Unknown OS';
   const form = /iPad|Tablet/i.test(ua) ? 'Tablet' : /Mobile|Android|iPhone/i.test(ua) ? 'Phone' : 'Desktop';
-  return `${form} Â· ${osName}`;
+  return `${form} - ${osName}`;
 }
 
 function clientIp(req) {
-  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  return forwarded || req.ip || req.socket.remoteAddress || '';
+  return req.ip || req.socket.remoteAddress || '';
 }
 
 function recordLoginEvent(req, user) {
@@ -1297,7 +1327,7 @@ async function runHealthCheck(force = false) {
           add(`${server.name} executable`, false, `Missing. Auto-repair failed: ${error.message}`);
         }
       } else {
-        add(`${server.name} executable`, false, 'Missing. Run Security â†’ Run check now to auto-repair, or reinstall software.');
+        add(`${server.name} executable`, false, 'Missing. Run Security -> Run check now to auto-repair, or reinstall software.');
       }
     }
   }
@@ -1324,9 +1354,49 @@ async function runHealthCheck(force = false) {
 }
 
 function visibleServerDatabaseRows(user) {
-  return user?.role === 'owner' || !isHostEdition()
+  return user?.role === 'owner'
     ? db.prepare('SELECT * FROM servers ORDER BY created_at DESC').all()
     : db.prepare('SELECT * FROM servers WHERE owner_user_id IS NULL OR owner_user_id = ? ORDER BY created_at DESC').all(user?.id || 0);
+}
+
+function throttleKey(scope, value) {
+  return `${scope}:${crypto.createHash('sha256').update(String(value || '')).digest('hex')}`;
+}
+
+function throttleState(key) {
+  const row = db.prepare('SELECT * FROM auth_throttle WHERE key = ?').get(key);
+  if (!row) return { failures: 0, window_started_at: 0, blocked_until: 0 };
+  if (Date.now() - Number(row.window_started_at || 0) > 15 * 60 * 1000) {
+    db.prepare('DELETE FROM auth_throttle WHERE key = ?').run(key);
+    return { failures: 0, window_started_at: 0, blocked_until: 0 };
+  }
+  return row;
+}
+
+function loginThrottle(req, email) {
+  const keys = [throttleKey('account', email), throttleKey('ip', clientIp(req))];
+  const retryMs = Math.max(0, ...keys.map((key) => Number(throttleState(key).blocked_until || 0) - Date.now()));
+  return { keys, retryMs };
+}
+
+function recordLoginFailure(keys) {
+  const now = Date.now();
+  keys.forEach((key, index) => {
+    const current = throttleState(key);
+    const failures = Number(current.failures || 0) + 1;
+    const threshold = index === 0 ? 5 : 10;
+    const delayMs = failures >= threshold ? Math.min(60 * 60 * 1000, (2 ** Math.min(10, failures - threshold)) * 30 * 1000) : 0;
+    db.prepare(`
+      INSERT INTO auth_throttle (key, failures, window_started_at, blocked_until, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET failures = excluded.failures,
+        window_started_at = excluded.window_started_at, blocked_until = excluded.blocked_until, updated_at = excluded.updated_at
+    `).run(key, failures, Number(current.window_started_at || 0) || now, now + delayMs, now);
+  });
+}
+
+function clearLoginThrottle(keys) {
+  for (const key of keys) db.prepare('DELETE FROM auth_throttle WHERE key = ?').run(key);
 }
 
 function serverRows(user, req = null) {
@@ -1336,7 +1406,6 @@ function serverRows(user, req = null) {
 function canUseServer(user, server) {
   if (!user || !server) return false;
   if (user.role === 'owner') return true;
-  if (!isHostEdition()) return true;
   if (!server.owner_user_id) return true;
   return Number(server.owner_user_id) === Number(user.id);
 }
@@ -1401,9 +1470,14 @@ function pluginRows(serverId = null) {
   }));
 }
 
-function getServerOr404(id) {
+function getServerOr404(id, user = null) {
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(id));
   if (!target) throw new Error('Server not found.');
+  if (user && !canUseServer(user, target)) {
+    const error = new Error('Server not found.');
+    error.statusCode = 404;
+    throw error;
+  }
   return target;
 }
 
@@ -1411,11 +1485,57 @@ function safeServerFile(server, relative = '') {
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const cleaned = String(relative || '').replaceAll('\\', '/').replace(/^\/+/, '');
   assertUserEditableServerPath(cleaned);
+  const rootStats = fs.lstatSync(root, { throwIfNoEntry: false });
+  if (rootStats?.isSymbolicLink()) throw new Error('Server root symlinks are blocked.');
+  let cursor = root;
+  for (const part of cleaned.split('/').filter(Boolean)) {
+    cursor = assertInside(root, path.join(cursor, part));
+    const stats = fs.lstatSync(cursor, { throwIfNoEntry: false });
+    if (stats?.isSymbolicLink()) throw new Error('Symlinks are blocked in the server file manager.');
+  }
   return {
     root,
     relative: cleaned,
     absolute: assertInside(root, path.join(root, cleaned)),
   };
+}
+
+async function scanServerSize(root) {
+  const queue = [root];
+  let bytes = 0;
+  let visited = 0;
+  while (queue.length && visited < 200000) {
+    const directory = queue.shift();
+    const entries = await fs.promises.readdir(directory, { withFileTypes: true }).catch(() => []);
+    visited += entries.length;
+    const files = [];
+    for (const entry of entries) {
+      const absolute = assertInside(root, path.join(directory, entry.name));
+      if (entry.isDirectory()) queue.push(absolute);
+      else if (entry.isFile()) files.push(absolute);
+    }
+    const sizes = await Promise.all(files.map((file) => fs.promises.stat(file).then((stats) => stats.size).catch(() => 0)));
+    bytes += sizes.reduce((total, size) => total + size, 0);
+  }
+  return bytes;
+}
+
+function cachedServerSizeBytes(server) {
+  const id = Number(server.id);
+  const cached = serverSizeCache.get(id) || { bytes: 0, scannedAt: 0, promise: null };
+  if (!cached.promise && Date.now() - cached.scannedAt >= 30000) {
+    const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+    cached.promise = scanServerSize(root)
+      .then((bytes) => {
+        cached.bytes = bytes;
+        cached.scannedAt = Date.now();
+      })
+      .finally(() => {
+        cached.promise = null;
+      });
+  }
+  serverSizeCache.set(id, cached);
+  return cached.bytes;
 }
 
 function assertUserEditableServerPath(relative = '') {
@@ -1439,6 +1559,41 @@ function isUserVisibleServerEntry(relative = '') {
   } catch {
     return false;
   }
+}
+
+const editableFileExtensions = new Set(['txt', 'log', 'json', 'json5', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'conf', 'properties', 'xml', 'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'java', 'kt', 'kts', 'py', 'sh', 'bat', 'cmd', 'ps1', 'md', 'csv', 'tsv', 'mcfunction', 'lang', 'sql']);
+const fileTypeMap = {
+  pdf: ['pdf', 'application/pdf'],
+  doc: ['document', 'application/msword'], docx: ['document', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  xls: ['spreadsheet', 'application/vnd.ms-excel'], xlsx: ['spreadsheet', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  ppt: ['presentation', 'application/vnd.ms-powerpoint'], pptx: ['presentation', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  png: ['image', 'image/png'], jpg: ['image', 'image/jpeg'], jpeg: ['image', 'image/jpeg'], gif: ['image', 'image/gif'], webp: ['image', 'image/webp'], bmp: ['image', 'image/bmp'],
+  mp3: ['audio', 'audio/mpeg'], wav: ['audio', 'audio/wav'], ogg: ['audio', 'audio/ogg'], m4a: ['audio', 'audio/mp4'],
+  mp4: ['video', 'video/mp4'], webm: ['video', 'video/webm'], mov: ['video', 'video/quicktime'],
+  zip: ['archive', 'application/zip'], jar: ['archive', 'application/java-archive'], gz: ['archive', 'application/gzip'], tar: ['archive', 'application/x-tar'], '7z': ['archive', 'application/x-7z-compressed'], rar: ['archive', 'application/vnd.rar'],
+};
+
+function fileDescriptor(relative, size = 0) {
+  const extension = path.extname(String(relative || '')).slice(1).toLowerCase();
+  if (editableFileExtensions.has(extension) || (!extension && Number(size) <= 1024 * 1024)) {
+    return { extension, kind: 'text', mime: 'text/plain; charset=utf-8', editable: Number(size) <= 1024 * 1024, previewable: true };
+  }
+  const [kind, mime] = fileTypeMap[extension] || ['binary', 'application/octet-stream'];
+  return { extension, kind, mime, editable: false, previewable: ['pdf', 'image', 'audio', 'video'].includes(kind) };
+}
+
+function validPreviewSignature(kind, header) {
+  if (kind === 'pdf') return header.subarray(0, 5).toString('ascii') === '%PDF-';
+  if (kind === 'image') return header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    || header.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+    || ['GIF87a', 'GIF89a'].includes(header.subarray(0, 6).toString('ascii'))
+    || (header.subarray(0, 4).toString('ascii') === 'RIFF' && header.subarray(8, 12).toString('ascii') === 'WEBP')
+    || header.subarray(0, 2).toString('ascii') === 'BM';
+  if (kind === 'audio') return ['ID3', 'OggS', 'RIFF'].includes(header.subarray(0, 4).toString('ascii'))
+    || header[0] === 0xff;
+  if (kind === 'video') return header.subarray(4, 8).toString('ascii') === 'ftyp'
+    || header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+  return false;
 }
 
 async function firstProtectedServerTreeEntry(root, relative = '') {
@@ -1544,7 +1699,7 @@ function tunnelRows(serverId) {
     .map((row) => ({
       provider: row.provider,
       hasToken: Boolean(row.token),
-      tokenPreview: row.token ? `${row.token.slice(0, 4)}â€¢â€¢â€¢â€¢${row.token.slice(-4)}` : '',
+      tokenPreview: row.token ? `${row.token.slice(0, 4)}****${row.token.slice(-4)}` : '',
       remoteHost: row.remote_host,
     }));
 }
@@ -3962,6 +4117,7 @@ app.get('/api/live', requireAuth, (req, res) => {
       installStatus: server.install_status,
       installProgress: server.install_progress,
       installMessage: server.install_message,
+      serverSizeBytes: cachedServerSizeBytes(server),
     })),
     updateStatus,
   });
@@ -4083,14 +4239,23 @@ app.post('/api/setup', asyncRoute(async (req, res) => {
 
 app.post('/api/login', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
+  const throttle = loginThrottle(req, email);
+  if (throttle.retryMs > 0) {
+    const retrySeconds = Math.max(1, Math.ceil(throttle.retryMs / 1000));
+    res.setHeader('Retry-After', String(retrySeconds));
+    return res.status(429).json({ error: `Too many login attempts. Try again in ${retrySeconds} seconds.` });
+  }
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  const passwordValid = verifyPassword(String(req.body.password || ''), user?.password_hash || dummyPasswordHash);
 
-  if (!user || !verifyPassword(req.body.password, user.password_hash)) {
+  if (!user || !passwordValid) {
+    recordLoginFailure(throttle.keys);
     return res.status(401).json({ error: 'Invalid email or password.' });
   }
 
+  clearLoginThrottle(throttle.keys);
   recordLoginEvent(req, user);
-  setSessionCookie(res, createSession(user.id));
+  setSessionCookie(res, createSession(user.id, { userAgent: req.headers['user-agent'] || '' }), { secure: req.secure });
   res.json({ user: publicUser(user) });
 });
 
@@ -4103,7 +4268,7 @@ app.post('/api/password/forgot', asyncRoute(async (req, res) => {
   if (Date.now() - lastRequest < 60 * 1000) {
     return res.status(429).json({ error: 'Wait one minute before requesting another code.' });
   }
-  if (isHostEdition() && user.role !== 'owner' && settingValue('host_maintenance_mode', '0') === '1') {
+  if (isHostEdition() && user && user.role !== 'owner' && settingValue('host_maintenance_mode', '0') === '1') {
     return res.status(503).json({ error: 'Host maintenance is active. Only the panel owner can sign in.' });
   }
   passwordResetRequests.set(requestKey, Date.now());
@@ -4132,7 +4297,7 @@ app.post('/api/password/reset', (req, res) => {
   const otp = String(req.body.otp || '').trim();
   const password = String(req.body.password || '');
   if (!email.includes('@') || !/^\d{6}$/.test(otp)) return res.status(400).json({ error: 'Email and 6-digit OTP are required.' });
-  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters.' });
   const row = db.prepare('SELECT * FROM password_reset_otps WHERE email = ?').get(email);
   if (!row || row.expires_at < Date.now()) return res.status(400).json({ error: 'OTP expired. Request a new code.' });
   if (row.attempts >= 5) return res.status(429).json({ error: 'Too many OTP attempts. Request a new code.' });
@@ -4143,6 +4308,7 @@ app.post('/api/password/reset', (req, res) => {
   db.prepare('UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?').run(hashPassword(password), email);
   db.prepare('DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE email = ?)').run(email);
   db.prepare('DELETE FROM password_reset_otps WHERE email = ?').run(email);
+  db.prepare('DELETE FROM auth_throttle WHERE key = ?').run(throttleKey('account', email));
   res.json({ ok: true, message: 'Password reset. You can log in now.' });
 });
 
@@ -4184,6 +4350,53 @@ app.post('/api/host/token/regenerate', requireAuth, (req, res) => {
 
 app.get('/api/health', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
   res.json({ health: await runHealthCheck(req.query.force === '1') });
+}));
+
+function renderEscape(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+app.get('/api/host-agent/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {
+  res.json({ hostAgent: { ...hostAgent.localStatus(), live: await hostAgent.request('STATUS') } });
+}));
+
+app.get('/api/security/render', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  const [health, liveAgent] = await Promise.all([
+    runHealthCheck(req.query.force === '1'),
+    hostAgent.request('STATUS'),
+  ]);
+  const events = loginEventRows(10);
+  const checks = (health.checks || []).map((check) => `
+    <article class="${check.ok ? 'is-ok' : 'is-bad'}">
+      <strong>${renderEscape(check.name)}</strong><span>${renderEscape(check.message)}</span>
+    </article>`).join('');
+  const logins = events.map((event) => `
+    <article class="audit-row">
+      <div><strong>${renderEscape(event.email)}</strong><span>${renderEscape(event.browser)} - ${renderEscape(event.device)}</span></div>
+      <code>${renderEscape(event.ip || 'unknown IP')}</code><time>${renderEscape(event.createdAt)}</time>
+    </article>`).join('');
+  const agentState = liveAgent.available && liveAgent.ok ? 'online' : 'unavailable';
+  res.type('html').send(`
+    <div class="section-head">
+      <div><p class="eyebrow">Server-rendered security</p><h2>${renderEscape(health.summary || 'Security status')}</h2></div>
+      <div class="row-actions"><button class="secondary" type="button" data-action="database-snapshot">Snapshot DB</button><button type="button" data-action="run-health-check">Run check now</button></div>
+    </div>
+    <div class="security-runtime-strip">
+      <article><span>Native host agent</span><strong class="${agentState === 'online' ? 'is-online' : 'is-offline'}">${agentState}</strong></article>
+      <article><span>Agent version</span><strong>${renderEscape(liveAgent.version || '3.0.0')}</strong></article>
+      <article><span>Response mode</span><strong>SSR + CSP</strong></article>
+      <article><span>Panel version</span><strong>${PANEL_VERSION}</strong></article>
+    </div>
+    <p class="muted">Generated and escaped on the server at ${renderEscape(new Date().toISOString())}.</p>
+    <div class="health-grid">${checks || '<p class="empty-state">No checks available.</p>'}</div>
+    <div class="section-head"><div><p class="eyebrow">Audit</p><h2>Recent logins</h2></div></div>
+    <div class="audit-list">${logins || '<p class="empty-state">No login events recorded yet.</p>'}</div>
+  `);
 }));
 
 app.get('/api/repair/bundle', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
@@ -4406,6 +4619,76 @@ app.post('/api/repair/agent/commands/:commandId/approve', requirePermission(capa
   res.json({ ok: result.code === 0, result, agent: repairBrainPayload().agent });
 }));
 
+const advancedAgentTools = Object.freeze([
+  { name: 'server_info', mutates: false, purpose: 'Read runtime, configuration, logs, and resource state.' },
+  { name: 'list_files', mutates: false, purpose: 'List a server directory without following symlinks.' },
+  { name: 'read_file', mutates: false, purpose: 'Read an editable text configuration file up to 512 KB.' },
+  { name: 'write_file', mutates: true, purpose: 'Atomically edit a server file after creating a recovery timeline point.' },
+  { name: 'send_console', mutates: true, purpose: 'Send a command to the selected running Minecraft server.' },
+  { name: 'diagnostic_command', mutates: false, purpose: 'Run one command from the audited diagnostic allowlist.' },
+  { name: 'queue_host_command', mutates: true, purpose: 'Queue a host command for separate owner-password approval.' },
+]);
+
+app.get('/api/repair/agent/tools', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ version: 3, tools: advancedAgentTools, fullAccessEnabled: repairFullAccessEnabled() });
+});
+
+app.post('/api/repair/agent/tools/execute', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can execute advanced AI tools.' });
+  const tool = String(req.body.tool || '');
+  const definition = advancedAgentTools.find((item) => item.name === tool);
+  if (!definition) return res.status(400).json({ error: 'Unknown AI tool.' });
+  if (definition.mutates && !repairFullAccessEnabled()) return res.status(409).json({ error: 'Unlock time-limited AI full access before running a mutating tool.' });
+  const server = req.body.serverId ? getServerOr404(req.body.serverId, req.user) : null;
+  if (!server && !['diagnostic_command', 'queue_host_command'].includes(tool)) return res.status(400).json({ error: 'A server is required for this tool.' });
+  let result;
+  if (tool === 'server_info') {
+    result = {
+      server: serverPayload(server, req),
+      runtime: runtimeDetails(server.id),
+      logs: consoleLogs(server.id).slice(-120),
+      nexusmark: profileForServer(server),
+    };
+  } else if (tool === 'list_files') {
+    const target = safeServerFile(server, req.body.path || '');
+    const entries = await fs.promises.readdir(target.absolute, { withFileTypes: true });
+    result = entries.slice(0, 500).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' : 'file' }));
+  } else if (tool === 'read_file') {
+    const target = safeServerFile(server, req.body.path || '');
+    const stats = await fs.promises.stat(target.absolute);
+    if (!stats.isFile() || stats.size > 512 * 1024) throw new Error('AI text reads are limited to 512 KB files.');
+    result = { path: target.relative, content: await fs.promises.readFile(target.absolute, 'utf8'), size: stats.size };
+  } else if (tool === 'write_file') {
+    const target = safeServerFile(server, req.body.path || '');
+    const content = String(req.body.content ?? '');
+    if (!target.relative || Buffer.byteLength(content) > 512 * 1024) throw new Error('AI writes require a path and are limited to 512 KB.');
+    await safeTimelinePoint(server, req, 'Before AI file edit', `Recovery point before editing ${target.relative}.`);
+    await fs.promises.mkdir(path.dirname(target.absolute), { recursive: true });
+    const temporary = `${target.absolute}.nexus-agent-${process.pid}.tmp`;
+    await fs.promises.writeFile(temporary, content, { encoding: 'utf8', mode: 0o600 });
+    await fs.promises.rename(temporary, target.absolute);
+    appendLog(server.id, `[NexusPanel] Advanced AI atomically edited ${target.relative}.`);
+    result = { path: target.relative, bytes: Buffer.byteLength(content), recoveryCreated: true };
+  } else if (tool === 'send_console') {
+    const command = String(req.body.command || '').replace(/[\r\n]/g, '').trim().slice(0, 500);
+    if (!command) throw new Error('Console command is empty.');
+    sendCommand(server.id, command);
+    result = { sent: true, command };
+  } else if (tool === 'diagnostic_command') {
+    result = await runAgentTerminal(db, repairAgentSecret(), {
+      server,
+      command: req.body.command,
+      args: req.body.args,
+      purpose: req.body.purpose || 'advanced-ai-tool',
+      timeoutMs: clampNumber(req.body.timeoutMs, 500, 30000, 10000),
+    });
+  } else if (tool === 'queue_host_command') {
+    result = { queuedId: queueFullAccessCommand({ serverId: server?.id, command: req.body.command, purpose: req.body.purpose || 'advanced-ai-tool', requestedBy: 'advanced-ai' }) };
+  }
+  logFixed({ serverId: server?.id, category: 'advanced-ai-tool', title: `AI tool executed: ${tool}`, detail: definition.purpose, source: 'owner-authorized-ai' });
+  res.json({ ok: true, tool, result });
+}));
+
 app.post('/api/database/snapshot', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   const snapshot = backupDatabase({ force: true });
   databaseHealthStatus = { ...snapshot.verification, checkedAt: Date.now(), snapshotAt: Date.now() };
@@ -4413,7 +4696,7 @@ app.post('/api/database/snapshot', requirePermission(capabilities.SECURITY_VIEW,
 });
 
 app.post('/api/servers/:id/repair-preview', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const diagnostics = diagnoseRuntime(consoleLogs(server.id));
   const software = softwareForServer(server);
   const agent = await analyzeServerWithAgent(server, software, diagnostics, { allowWeb: true });
@@ -4428,7 +4711,7 @@ app.post('/api/servers/:id/repair-preview', requirePermission(capabilities.SERVE
 }));
 
 app.post('/api/servers/:id/world-convert', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const source = getServerOr404(req.params.id);
+  const source = getServerOr404(req.params.id, req.user);
   if (runtimeStatus(source.id) === 'online') throw new Error('Stop the source server before converting its world.');
   const targetType = String(req.body.targetType || '').toLowerCase() === 'java' ? 'java' : 'bedrock';
   if (targetType === source.type) throw new Error('Choose the opposite edition for conversion.');
@@ -4649,7 +4932,7 @@ app.get('/api/settings/update-status', requirePermission(capabilities.SETTINGS_M
 
 app.get('/api/tunnels/normal-plan', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   if (isHostEdition()) return res.status(404).json({ error: 'Normal-edition tunnel setup is not available in host edition.' });
-  const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
+  const server = req.query.serverId ? getServerOr404(req.query.serverId, req.user) : null;
   const protocol = tunnelProtocolForServer(server, req.query.protocol);
   const port = ['http', 'https'].includes(protocol) ? Number(req.query.port || 3000) : Number(server?.port || 25565);
   const ngrok = server ? await ngrokStatus(server) : { installed: commandExists('ngrok'), binary: commandExists('ngrok') ? resolveCommand('ngrok') : '', running: false, publicUrl: '', remoteHost: '', protocol };
@@ -4691,7 +4974,7 @@ app.post('/api/tunnels/ngrok/start', requirePermission(capabilities.NETWORK_MANA
   const protocol = tunnelProtocolForServer(null, req.body.protocol || req.query.protocol);
   const server = ['http', 'https'].includes(protocol) && !Number(req.body.serverId || req.query.serverId)
     ? { id: 0, name: 'NexusPanel website', type: 'panel', port: Number(req.body.port || req.query.port || port || 3000) }
-    : getServerOr404(req.body.serverId || req.query.serverId);
+    : getServerOr404(req.body.serverId || req.query.serverId, req.user);
   res.json({ ngrok: await startNgrokTunnel(server, protocol) });
 }));
 
@@ -4699,13 +4982,13 @@ app.post('/api/tunnels/ngrok/stop', requirePermission(capabilities.NETWORK_MANAG
   const protocol = tunnelProtocolForServer(null, req.body.protocol || req.query.protocol);
   const server = ['http', 'https'].includes(protocol) && !Number(req.body.serverId || req.query.serverId)
     ? { id: 0, name: 'NexusPanel website', type: 'panel', port: Number(req.body.port || req.query.port || port || 3000) }
-    : getServerOr404(req.body.serverId || req.query.serverId);
+    : getServerOr404(req.body.serverId || req.query.serverId, req.user);
   stopTunnelProcess('ngrok', server.id);
   res.json({ ngrok: await ngrokStatus(server) });
 }));
 
 app.get('/api/tunnels/ngrok/status', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
+  const server = req.query.serverId ? getServerOr404(req.query.serverId, req.user) : null;
   res.json({ ngrok: await ngrokStatus(server) });
 }));
 
@@ -4742,9 +5025,23 @@ app.get('/api/tunnels/playit/status', requirePermission(capabilities.NETWORK_MAN
 });
 
 app.get('/api/servers/:id/nexus-mark', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const nexu = parseJsonObject(server.nexu_payload);
   res.json({ profile: profileForServer(server, nexu), nexu });
+});
+
+app.post('/api/settings/nexusmark/doctor', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can run the kernel isolation doctor.' });
+  const status = kernelStatus({ refresh: true });
+  logFixed({
+    category: 'security',
+    title: `Nexus-Mark doctor: ${status.tier}`,
+    detail: status.preflightPassed
+      ? `Kernel policy ${status.tier} passed with systemd ${status.systemdVersion}, cgroup v2 ${status.cgroupV2 ? 'active' : 'fallback'}, and native runtime ${status.native?.available ? 'active' : 'unavailable'}.`
+      : `Native fallback ${status.native?.available ? 'active' : 'unavailable'}; ${status.failures?.[0]?.detail || status.reason || 'systemd preflight unavailable'}`,
+    source: 'nexus-mark-doctor',
+  });
+  res.json({ nexusMark: status });
 });
 
 app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
@@ -5298,7 +5595,7 @@ app.patch('/api/servers/:id', requirePermission(capabilities.SERVER_MANAGE, perm
 });
 
 app.delete('/api/servers/:id', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (runtimeStatus(server.id) === 'online') return res.status(400).json({ error: 'Stop the server before deleting it.' });
   const root = assertInside(serversRoot, server.server_path || serverPath(server.id, server.name));
   setSettingValue(serverTombstoneKey(server.id), JSON.stringify({ deletedAt: Date.now(), root }));
@@ -5308,13 +5605,15 @@ app.delete('/api/servers/:id', requirePermission(capabilities.SERVER_MANAGE, per
   crashHistory.delete(server.id);
   closeWakeWatcher(server.id);
   db.prepare('DELETE FROM servers WHERE id = ?').run(server.id);
+  serverSizeCache.delete(Number(server.id));
   const removalError = await fs.promises.rm(assertInside(serversRoot, root), { recursive: true, force: true })
     .then(() => null)
     .catch((error) => error);
+  const identityCleanup = removalError ? { removed: false, reason: 'server-cleanup-pending' } : removeServerIdentity(server.id);
   db.prepare('DELETE FROM panel_settings WHERE key = ?').run(`server_backup_timezone_${server.id}`);
   await fs.promises.rm(assertInside(backupsRoot, path.join(backupsRoot, String(server.id))), { recursive: true, force: true }).catch(() => {});
   appendLog(server.id, '[NexusPanel] Server deleted.');
-  res.json({ ok: true, cleanupPending: Boolean(removalError) });
+  res.json({ ok: true, cleanupPending: Boolean(removalError), identityCleanup });
 }));
 
 app.patch('/api/servers/:id/software', requirePermission(capabilities.SOFTWARE_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
@@ -5478,7 +5777,7 @@ app.post('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANA
 }));
 
 app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
-  const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
+  const server = req.query.serverId ? getServerOr404(req.query.serverId, req.user) : null;
   const software = server ? (findSoftware(server.software_key) || defaultSoftware(server.type)) : null;
   if (software && !['paper', 'purpur', 'fabric', 'forge'].includes(software.key)) {
     return res.json({ hits: [], source: 'modrinth', message: 'Modrinth installs are available for Paper/Purpur plugins and Fabric/Forge mods.' });
@@ -5530,7 +5829,7 @@ async function poggitReleases() {
 }
 
 app.get('/api/poggit/search', requireAuth, asyncRoute(async (req, res) => {
-  const server = req.query.serverId ? getServerOr404(req.query.serverId) : null;
+  const server = req.query.serverId ? getServerOr404(req.query.serverId, req.user) : null;
   const software = server ? (findSoftware(server.software_key) || defaultSoftware(server.type)) : null;
   if (software && software.key !== 'pocketmine') {
     return res.json({ hits: [], source: 'poggit', message: 'Poggit plugins are available for PocketMine servers.' });
@@ -5566,7 +5865,7 @@ app.get('/api/poggit/search', requireAuth, asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/servers/:id/modrinth/install', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   if (!['paper', 'purpur', 'fabric', 'forge'].includes(software.key)) {
     return res.status(400).json({ error: 'Modrinth install supports Paper/Purpur plugins and Fabric/Forge mods.' });
@@ -5604,7 +5903,7 @@ app.post('/api/servers/:id/modrinth/install', requirePermission(capabilities.PLU
 }));
 
 app.post('/api/servers/:id/poggit/install', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   if (software.key !== 'pocketmine') {
     return res.status(400).json({ error: 'Poggit plugins can only be installed on PocketMine servers.' });
@@ -5658,7 +5957,7 @@ app.get('/api/servers/:id/console/stream', requirePermission(capabilities.CONSOL
 });
 
 app.get('/api/servers/:id/metrics', requireAuth, (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const details = runtimeDetails(server.id);
   const processMetrics = processTreeMetrics({
     pid: details.pid,
@@ -5677,6 +5976,10 @@ app.get('/api/servers/:id/metrics', requireAuth, (req, res) => {
     maxMemoryMb: server.max_memory_mb,
     rssMb: processMetrics.rssMb,
     cpuPercent: processMetrics.cpuPercent,
+    kernelPressure: processMetrics.pressure,
+    memoryEvents: processMetrics.memoryEvents,
+    cpuThrottledCount: processMetrics.nrThrottled,
+    cpuThrottledUsec: processMetrics.throttledUsec,
   });
 });
 
@@ -5699,7 +6002,7 @@ app.use('/api/servers/:id/timeline', requirePermission(capabilities.SERVER_MANAG
 app.post('/api/presence', requireAuth, (req, res) => {
   const view = String(req.body.view || '').slice(0, 40);
   const serverId = req.body.serverId ? Number(req.body.serverId) : null;
-  if (serverId) getServerOr404(serverId);
+  if (serverId) getServerOr404(serverId, req.user);
   const cursor = {
     x: clampNumber(req.body.x, 0, 100000, 0),
     y: clampNumber(req.body.y, 0, 100000, 0),
@@ -5717,6 +6020,7 @@ app.get('/api/presence', requireAuth, (req, res) => {
   const now = Date.now();
   db.prepare('DELETE FROM panel_presence WHERE updated_at < ?').run(now - 45 * 1000);
   const serverId = req.query.serverId ? Number(req.query.serverId) : null;
+  if (serverId) getServerOr404(serverId, req.user);
   const rows = db.prepare(`
     SELECT presence.user_id, presence.server_id, presence.view, presence.cursor_json, presence.updated_at,
            user.name, user.email
@@ -5751,7 +6055,7 @@ app.get('/api/security/ddos', requirePermission(capabilities.SECURITY_VIEW, perm
 });
 
 app.post('/api/servers/:id/start', requirePermission(capabilities.SERVER_START, permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can start.' });
@@ -5773,7 +6077,7 @@ app.post('/api/servers/:id/start', requirePermission(capabilities.SERVER_START, 
 }));
 
 app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (runtimeStatus(server.id) === 'online') return res.status(409).json({ error: 'Stop the server before running Fix Server.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This server has no repairable software runtime.' });
@@ -5787,7 +6091,7 @@ app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, p
 }));
 
 app.post('/api/servers/:id/eula', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   await safeTimelinePoint(server, req, 'Before EULA change', 'Captured configuration before accepting EULA.');
   await agreeJavaEula(server);
   appendLog(server.id, '[NexusPanel] EULA accepted from panel.');
@@ -5802,7 +6106,7 @@ app.post('/api/servers/:id/stop', requirePermission(capabilities.SERVER_STOP, pe
 });
 
 app.post('/api/servers/:id/restart', requirePermission(capabilities.SERVER_RESTART, permissions.POWER_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can restart.' });
@@ -5826,14 +6130,14 @@ app.post('/api/servers/:id/command', requirePermission(capabilities.CONSOLE_COMM
 });
 
 app.get('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const values = await readProperties(server);
   const schema = propertySchema.filter((item) => item.editions.includes(server.type));
   res.json({ schema, values });
 }));
 
 app.put('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   await safeTimelinePoint(server, req, 'Before server.properties edit', 'Captured properties before panel edit.');
   const allowed = new Set(propertySchema.filter((item) => item.editions.includes(server.type)).map((item) => item.key));
   const values = {};
@@ -5846,12 +6150,12 @@ app.put('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES
 }));
 
 app.get('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   res.json({ players: await readWhitelist(server) });
 }));
 
 app.post('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   await safeTimelinePoint(server, req, 'Before whitelist edit', 'Captured whitelist and properties before adding player.');
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   const name = String(req.body.name || '').trim();
@@ -5872,7 +6176,7 @@ app.post('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_
 }));
 
 app.delete('/api/servers/:id/whitelist/:name', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   await safeTimelinePoint(server, req, 'Before whitelist removal', `Captured whitelist before removing ${req.params.name}.`);
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   const name = String(req.params.name || '').toLowerCase();
@@ -5884,7 +6188,7 @@ app.delete('/api/servers/:id/whitelist/:name', requirePermission(capabilities.WH
 }));
 
 app.delete('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   await safeTimelinePoint(server, req, 'Before whitelist clear', 'Captured whitelist before clearing all entries.');
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   await writeWhitelist(server, []);
@@ -5894,7 +6198,7 @@ app.delete('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIS
 }));
 
 app.get('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const canShareOwner = canOwnServerShare(req.user, server);
   const code = canShareOwner ? db.prepare('SELECT code, expires_at FROM backup_share_codes WHERE server_id = ? AND expires_at > ?').get(server.id, Date.now()) : null;
   const incoming = canShareOwner ? db.prepare(`
@@ -5951,7 +6255,7 @@ app.get('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAG
 }));
 
 app.post('/api/servers/:id/backups/public-link', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the server owner can publish backup links.' });
   const expiresAt = Date.now() + durationMs(req.body || {}, 60, 24 * 60);
   const token = crypto.randomBytes(32).toString('base64url');
@@ -5973,7 +6277,7 @@ app.post('/api/servers/:id/backups/public-link', requirePermission(capabilities.
 }));
 
 app.delete('/api/servers/:id/backups/public-link', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the server owner can revoke backup links.' });
   db.prepare('UPDATE backup_public_links SET revoked_at = ? WHERE server_id = ? AND revoked_at = 0').run(Date.now(), server.id);
   res.json({ ok: true });
@@ -6000,7 +6304,7 @@ app.post('/api/public/backups/:token/:name', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/servers/:id/backups/import-url', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const url = await validatePublicBackupUrl(req.body.url);
   const response = await fetch(url, {
     method: 'POST',
@@ -6043,21 +6347,21 @@ app.post('/api/servers/:id/backups/import-url', requirePermission(capabilities.B
 }));
 
 app.post('/api/servers/:id/backups/share-code', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can create backup codes.' });
   const code = ensureBackupShareCode(server, req.body || {});
   res.json({ code: code.code, expiresAt: code.expires_at });
 });
 
 app.delete('/api/servers/:id/backups/share-code', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can hide backup codes.' });
   db.prepare('DELETE FROM backup_share_codes WHERE server_id = ?').run(server.id);
   res.json({ ok: true });
 });
 
 app.post('/api/servers/:id/backups/share-request', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
-  const target = getServerOr404(req.params.id);
+  const target = getServerOr404(req.params.id, req.user);
   const code = String(req.body.code || '').trim();
   if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter a 6-digit backup code.' });
   const share = db.prepare('SELECT * FROM backup_share_codes WHERE code = ? AND expires_at > ?').get(code, Date.now());
@@ -6072,7 +6376,7 @@ app.post('/api/servers/:id/backups/share-request', requirePermission(capabilitie
 });
 
 app.post('/api/servers/:id/backups/share-requests/:requestId/approve', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can approve backup access.' });
   const request = db.prepare('SELECT * FROM backup_share_requests WHERE id = ? AND source_server_id = ?').get(Number(req.params.requestId), server.id);
   if (!request) return res.status(404).json({ error: 'Share request not found.' });
@@ -6082,7 +6386,7 @@ app.post('/api/servers/:id/backups/share-requests/:requestId/approve', requirePe
 });
 
 app.delete('/api/servers/:id/backups/share-requests/:requestId', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   if (!canOwnServerShare(req.user, server)) return res.status(403).json({ error: 'Only the source server owner can remove backup access.' });
   const request = db.prepare('SELECT * FROM backup_share_requests WHERE id = ? AND source_server_id = ?').get(Number(req.params.requestId), server.id);
   if (!request) return res.status(404).json({ error: 'Share request not found.' });
@@ -6091,14 +6395,14 @@ app.delete('/api/servers/:id/backups/share-requests/:requestId', requirePermissi
 });
 
 app.post('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const backup = await createServerBackup(server, 'manual');
   logFixed({ serverId: server.id, category: 'backup', title: 'Manual backup created', detail: backup.name, source: 'backup' });
   res.status(201).json({ backup, backups: await backupRows(server) });
 }));
 
 app.delete('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const backupPath = String(req.query.path || '').replaceAll('\\', '/').replace(/^\/+/, '');
   if (!backupPath.endsWith('.zip') || backupPath.includes('/')) {
     return res.status(400).json({ error: 'Choose a backup file to delete.' });
@@ -6109,7 +6413,7 @@ app.delete('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MA
 }));
 
 app.get('/api/servers/:id/backups/download', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const name = String(req.query.name || '').replaceAll('\\', '/');
   if (!name.endsWith('.zip') || name.includes('/')) return res.status(400).json({ error: 'Choose a backup file.' });
   const target = assertInside(backupsRoot, path.join(backupsRoot, String(server.id), name));
@@ -6117,7 +6421,7 @@ app.get('/api/servers/:id/backups/download', requirePermission(capabilities.BACK
 }));
 
 app.post('/api/servers/:id/backups/restore', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   await safeTimelinePoint(server, req, 'Before backup restore', `Captured configuration before restoring ${req.body.name || 'backup'}.`);
   const sourceServerId = Number(req.body.sourceServerId || server.id);
   if (sourceServerId !== Number(server.id)) {
@@ -6135,7 +6439,7 @@ app.post('/api/servers/:id/backups/restore', requirePermission(capabilities.BACK
 }));
 
 app.put('/api/servers/:id/backups/settings', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const intervalMinutes = parseBackupIntervalMinutes(req.body, backupIntervalMinutesFrom(server));
   const intervalHours = Math.max(1, Math.round(intervalMinutes / 60));
   const retention = clampNumber(req.body.backupRetention, 1, 50, server.backup_retention || 4);
@@ -6145,17 +6449,17 @@ app.put('/api/servers/:id/backups/settings', requirePermission(capabilities.BACK
 });
 
 app.get('/api/servers/:id/tunnels', requireAuth, (req, res) => {
-  getServerOr404(req.params.id);
+  getServerOr404(req.params.id, req.user);
   res.status(410).json({ error: 'Tunnels were removed. Use Templates or your VPS reverse proxy setup instead.' });
 });
 
 app.put('/api/servers/:id/tunnels', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
-  getServerOr404(req.params.id);
+  getServerOr404(req.params.id, req.user);
   res.status(410).json({ error: 'Tunnels were removed. Use Templates or your VPS reverse proxy setup instead.' });
 });
 
 app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.query.path || '');
   const stats = await fs.promises.stat(target.absolute).catch(() => null);
   if (!stats) return res.status(404).json({ error: 'Path not found.' });
@@ -6172,6 +6476,7 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
         path: path.posix.join(target.relative.replaceAll('\\', '/'), entry.name).replace(/^\/+/, ''),
         size: entryStats && entryStats.isFile() ? entryStats.size : 0,
         modifiedAt: entryStats ? entryStats.mtimeMs : 0,
+        ...(entry.isDirectory() ? { extension: '', kind: 'folder', mime: '', editable: false, previewable: false } : fileDescriptor(entry.name, entryStats?.size || 0)),
       };
     }));
     return res.json({
@@ -6181,16 +6486,37 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
     });
   }
 
-  if (stats.size > 1024 * 1024) return res.status(413).json({ error: 'File is larger than 1MB. Use upload/SFTP for huge files.' });
+  const descriptor = fileDescriptor(target.relative, stats.size);
+  if (!descriptor.editable) return res.json({ path: target.relative, type: 'file', size: stats.size, ...descriptor });
   res.json({
     path: target.relative,
     type: 'file',
     content: await fs.promises.readFile(target.absolute, 'utf8'),
+    size: stats.size,
+    ...descriptor,
   });
 }));
 
+app.get('/api/servers/:id/files/preview', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  const target = safeServerFile(server, req.query.path || '');
+  const stats = await fs.promises.stat(target.absolute).catch(() => null);
+  if (!stats?.isFile()) return res.status(404).json({ error: 'File not found.' });
+  const descriptor = fileDescriptor(target.relative, stats.size);
+  if (!descriptor.previewable) return res.status(415).json({ error: 'This file type is download-only.' });
+  const handle = await fs.promises.open(target.absolute, 'r');
+  const header = Buffer.alloc(16);
+  await handle.read(header, 0, header.length, 0).finally(() => handle.close());
+  if (!validPreviewSignature(descriptor.kind, header)) return res.status(415).json({ error: 'File signature does not match its extension.' });
+  res.setHeader('Content-Type', descriptor.mime);
+  res.setHeader('Content-Disposition', `inline; filename="${path.basename(target.absolute).replace(/["\\]/g, '_')}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:");
+  res.sendFile(target.absolute, { acceptRanges: true, cacheControl: false });
+}));
+
 app.put('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a file path inside the server folder.' });
   await safeTimelinePoint(server, req, 'Before file edit', `Captured state before editing ${target.relative}.`);
@@ -6200,7 +6526,7 @@ app.put('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
 }));
 
 app.post('/api/servers/:id/files/upload', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
   if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Upload body must be binary.' });
@@ -6211,12 +6537,12 @@ app.post('/api/servers/:id/files/upload', requirePermission(capabilities.FILES_M
 }));
 
 app.get('/api/servers/:id/files/uploads', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   res.json({ uploads: uploadRows(server.id) });
 });
 
 app.get('/api/servers/:id/files/upload-status', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
   const totalSize = Number(req.query.size || 0);
@@ -6245,7 +6571,7 @@ app.get('/api/servers/:id/files/upload-status', requirePermission(capabilities.F
 }));
 
 app.post('/api/servers/:id/files/upload-chunk', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
   return withKeyedOperation(`upload:${server.id}:${target.relative}`, async () => {
@@ -6293,7 +6619,7 @@ app.post('/api/servers/:id/files/upload-chunk', requirePermission(capabilities.F
 }));
 
 app.post('/api/servers/:id/files/upload-complete', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose a destination file path.' });
   await safeTimelinePoint(server, req, 'Before upload complete', `Captured state before completing ${target.relative}.`);
@@ -6324,7 +6650,7 @@ app.post('/api/servers/:id/files/upload-complete', requirePermission(capabilitie
 }));
 
 app.post('/api/servers/:id/files/upload-pause', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose an upload path.' });
   const partial = await fs.promises.stat(`${target.absolute}.uploading`).catch(() => null);
@@ -6335,7 +6661,7 @@ app.post('/api/servers/:id/files/upload-pause', requirePermission(capabilities.F
 }));
 
 app.delete('/api/servers/:id/files/upload-session', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Choose an upload path.' });
   await fs.promises.rm(`${target.absolute}.uploading`, { force: true }).catch(() => {});
@@ -6344,7 +6670,7 @@ app.delete('/api/servers/:id/files/upload-session', requirePermission(capabiliti
 }));
 
 app.post('/api/servers/:id/files/mkdir', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.body.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Folder name is required.' });
   await safeTimelinePoint(server, req, 'Before folder create', `Captured state before creating ${target.relative}.`);
@@ -6353,7 +6679,7 @@ app.post('/api/servers/:id/files/mkdir', requirePermission(capabilities.FILES_MA
 }));
 
 app.delete('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.query.path || '');
   if (!target.relative) return res.status(400).json({ error: 'Cannot delete the server root.' });
   await safeTimelinePoint(server, req, 'Before file delete', `Captured state before deleting ${target.relative}.`);
@@ -6362,7 +6688,7 @@ app.delete('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE
 }));
 
 app.post('/api/servers/:id/files/copy', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const destinationDir = safeServerFile(server, req.body.destination || '');
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
   const copied = [];
@@ -6379,7 +6705,7 @@ app.post('/api/servers/:id/files/copy', requirePermission(capabilities.FILES_MAN
 }));
 
 app.post('/api/servers/:id/files/move', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const destinationDir = safeServerFile(server, req.body.destination || '');
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
   const moved = [];
@@ -6401,7 +6727,7 @@ app.post('/api/servers/:id/files/move', requirePermission(capabilities.FILES_MAN
 }));
 
 app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const destinationDir = safeServerFile(server, req.body.destination || '');
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
   const mode = ['replace', 'skip', 'fail'].includes(req.body.mode) ? req.body.mode : 'fail';
@@ -6437,7 +6763,7 @@ app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_
 }));
 
 app.post('/api/servers/:id/files/archive', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
   const relativePaths = requested
@@ -6460,7 +6786,7 @@ app.post('/api/servers/:id/files/archive', requirePermission(capabilities.FILES_
 }));
 
 app.get('/api/servers/:id/files/download', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
-  const server = getServerOr404(req.params.id);
+  const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.query.path || '');
   await streamDownload(req, res, target.absolute, path.basename(target.absolute));
 }));
@@ -6488,7 +6814,7 @@ app.delete('/api/plugins/:id', requirePermission(capabilities.PLUGINS_MANAGE, pe
 });
 
 app.use((err, _req, res, _next) => {
-  res.status(400).json({ error: err.message || 'Something went wrong.' });
+  res.status(Number(err.statusCode) || 400).json({ error: err.message || 'Something went wrong.' });
 });
 
 async function runAutoBackups() {
@@ -6540,6 +6866,7 @@ async function runAdaptiveMaintenance() {
     }
   }
   const expiredSessions = db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now).changes;
+  db.prepare('DELETE FROM auth_throttle WHERE updated_at < ?').run(now - 24 * 60 * 60 * 1000);
   const expiredOtps = db.prepare('DELETE FROM password_reset_otps WHERE expires_at <= ?').run(now).changes;
   const expiredLinks = db.prepare('UPDATE backup_public_links SET revoked_at = ? WHERE revoked_at = 0 AND expires_at <= ?').run(now, now).changes;
   if (expiredSessions) actions.push(`Removed ${expiredSessions} expired session(s)`);
@@ -6915,7 +7242,7 @@ async function ensureInitialOwner() {
   try {
     const name = (await rl.question('Owner name [Owner]: ')).trim() || 'Owner';
     const email = (await rl.question('Owner email: ')).trim();
-    const password = await rl.question('Owner password (8+ chars): ');
+    const password = await rl.question('Owner password (12+ chars): ');
 
     createUser({
       email,

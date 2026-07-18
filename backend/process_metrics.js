@@ -5,6 +5,7 @@ const { spawnSync } = require('node:child_process');
 
 const CLK_TCK = 100;
 const cache = new Map();
+const unitCgroupCache = new Map();
 
 function readText(filePath) {
   try {
@@ -53,16 +54,33 @@ function linuxProcMetrics(pid) {
 
 function linuxCgroupMetrics(unit) {
   if (!unit || process.platform !== 'linux') return null;
-  const show = spawnSync('systemctl', ['show', unit, '-p', 'ControlGroup', '--value'], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
-  const controlGroup = String(show.stdout || '').trim();
+  const now = Date.now();
+  let cachedGroup = unitCgroupCache.get(unit);
+  if (!cachedGroup || cachedGroup.expiresAt <= now) {
+    const show = spawnSync('systemctl', ['show', unit, '-p', 'ControlGroup', '--value'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    cachedGroup = { value: String(show.stdout || '').trim(), expiresAt: now + 30000 };
+    unitCgroupCache.set(unit, cachedGroup);
+  }
+  const controlGroup = cachedGroup.value;
   if (!controlGroup) return null;
   const cgroup = path.join('/sys/fs/cgroup', controlGroup);
   const memoryCurrent = Number(readText(path.join(cgroup, 'memory.current')).trim());
   const cpuStat = readText(path.join(cgroup, 'cpu.stat'));
   const usageUsec = Number(cpuStat.match(/^usage_usec\s+(\d+)/m)?.[1] || 0);
+  const nrThrottled = Number(cpuStat.match(/^nr_throttled\s+(\d+)/m)?.[1] || 0);
+  const throttledUsec = Number(cpuStat.match(/^throttled_usec\s+(\d+)/m)?.[1] || 0);
+  const memoryEventsText = readText(path.join(cgroup, 'memory.events'));
+  const memoryEvents = Object.fromEntries([...memoryEventsText.matchAll(/^(\w+)\s+(\d+)$/gm)].map((match) => [match[1], Number(match[2])]));
+  const pressure = {};
+  for (const resource of ['cpu', 'memory', 'io']) {
+    const text = readText(path.join(cgroup, `${resource}.pressure`));
+    const some = Number(text.match(/^some\s+avg10=([0-9.]+)/m)?.[1] || 0);
+    const full = Number(text.match(/^full\s+avg10=([0-9.]+)/m)?.[1] || 0);
+    pressure[resource] = { someAvg10: some, fullAvg10: full };
+  }
   const pids = readText(path.join(cgroup, 'cgroup.procs'))
     .split(/\s+/)
     .map(Number)
@@ -72,6 +90,10 @@ function linuxCgroupMetrics(unit) {
     rssBytes: Number.isFinite(memoryCurrent) ? memoryCurrent : 0,
     cpuTicks: Number.isFinite(usageUsec) ? usageUsec / (1000000 / CLK_TCK) : 0,
     source: 'cgroup',
+    memoryEvents,
+    pressure,
+    nrThrottled,
+    throttledUsec,
   };
 }
 
@@ -124,6 +146,10 @@ function processTreeMetrics({ pid, unit, cacheKey }) {
     rssMb: Math.round((sample.rssBytes || 0) / 1024 / 1024),
     cpuPercent: Math.max(0, Math.min(999, cpuPercent)),
     source: sample.source,
+    memoryEvents: sample.memoryEvents || {},
+    pressure: sample.pressure || {},
+    nrThrottled: Number(sample.nrThrottled || 0),
+    throttledUsec: Number(sample.throttledUsec || 0),
   };
   cache.set(key, { sampledAt: now, raw: sample, payload });
   return payload;

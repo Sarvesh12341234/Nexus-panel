@@ -13,8 +13,8 @@ if [ -z "$EDITION" ] && [ -f "$APP_DIR/data/edition" ]; then
 fi
 EDITION="${EDITION:-normal}"
 case "$EDITION" in
-  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-host-v2.0.0}" ;;
-  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-normal-v2.0.0}" ;;
+  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-host-v3.0.0}" ;;
+  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-normal-v3.0.0}" ;;
 esac
 
 cd "$APP_DIR"
@@ -62,6 +62,8 @@ fi
 
 if [ -f package.json ]; then
   npm install
+  npm run build:nexusmark || echo "[NexusPanel] Native NexusMark build unavailable; keeping systemd isolation fallback."
+  npm run build:host-agent || echo "[NexusPanel] Native host agent build unavailable; restart the service installer after installing a C compiler."
 fi
 echo "[NexusPanel][85%] Dependencies verified."
 

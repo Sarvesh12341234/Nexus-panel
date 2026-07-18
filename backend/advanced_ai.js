@@ -3,21 +3,21 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const workspaceRoot = path.join(__dirname, '..');
-const modelId = process.env.NEXUSPANEL_ADVANCED_AI_MODEL || 'onnx-community/CodeBERTa-small-v1-ONNX';
-const modelParameters = 84000000;
-const estimatedDownloadMb = 1240;
-const modelTask = 'fill-mask';
+const modelId = process.env.NEXUSPANEL_ADVANCED_AI_MODEL || 'onnx-community/Qwen2.5-Coder-0.5B-Instruct';
+const modelParameters = 494000000;
+const estimatedDownloadMb = 760;
+const modelTask = 'text-generation';
 const focusLabels = [
-  { token: 'java', detail: 'Java/runtime compatibility' },
-  { token: 'memory', detail: 'memory pressure or allocation limits' },
-  { token: 'permission', detail: 'filesystem permission or ownership issue' },
-  { token: 'network', detail: 'port, tunnel, DNS, or connection issue' },
-  { token: 'world', detail: 'world data or corrupted save issue' },
-  { token: 'plugin', detail: 'plugin, mod, behavior pack, or datapack issue' },
-  { token: 'configuration', detail: 'server.properties or launch configuration issue' },
-  { token: 'storage', detail: 'disk space, file write, or backup issue' },
-  { token: 'systemd', detail: 'service lifecycle or cgroup issue' },
-  { token: 'sandbox', detail: 'Nexus-Mark isolation or resource control issue' },
+  { token: 'java', detail: 'Java/runtime compatibility', patterns: [/unsupported class/i, /java(?:\s+|_)?version/i, /jvm|jdk|jre/i, /could not (?:find|create).*java/i] },
+  { token: 'memory', detail: 'memory pressure or allocation limits', patterns: [/outofmemory/i, /heap space/i, /oom|killed process/i, /memory (?:limit|pressure|allocation)/i] },
+  { token: 'permission', detail: 'filesystem permission or ownership issue', patterns: [/permission denied/i, /eacces/i, /operation not permitted/i, /read-only file system/i, /ownership/i] },
+  { token: 'network', detail: 'port, tunnel, DNS, or connection issue', patterns: [/address already in use/i, /eaddrinuse/i, /connection (?:refused|timed out)/i, /dns|enotfound|firewall|route unreachable/i] },
+  { token: 'world', detail: 'world data or corrupted save issue', patterns: [/level\.dat/i, /failed to (?:load|save).*world/i, /corrupt.*(?:world|chunk)/i, /chunk.*(?:error|invalid)/i] },
+  { token: 'plugin', detail: 'plugin, mod, behavior pack, or datapack issue', patterns: [/plugin|mod(?:s|ded)?|datapack/i, /mixin|loader conflict/i, /incompatible.*(?:pack|version)/i, /could not load.*\.jar/i] },
+  { token: 'configuration', detail: 'server.properties or launch configuration issue', patterns: [/server\.properties/i, /invalid (?:config|configuration|property)/i, /parse.*(?:yaml|json|toml|properties)/i, /eula/i] },
+  { token: 'storage', detail: 'disk space, file write, or backup issue', patterns: [/no space left/i, /disk (?:full|quota|i\/o)/i, /enospc/i, /failed to (?:write|backup)/i, /sqlite.*(?:locked|wal)/i] },
+  { token: 'systemd', detail: 'service lifecycle or cgroup issue', patterns: [/systemd|systemctl/i, /start-limit/i, /cgroup/i, /unit .* (?:failed|not found)/i] },
+  { token: 'sandbox', detail: 'Nexus-Mark isolation or resource control issue', patterns: [/nexus-mark/i, /sandbox/i, /allocation guard/i, /resource control/i, /outside server root/i] },
 ];
 
 let pipelinePromise = null;
@@ -55,7 +55,9 @@ function status() {
     modelParameters,
     estimatedDownloadMb,
     modelTask,
-    modelPurpose: 'Code-trained local ONNX repair-focus scorer. The deterministic repair agent still performs all actions.',
+    reasoningVersion: 3,
+    reasoningStrategy: 'quantized-coder-model-evidence-and-typed-tools',
+    modelPurpose: 'Quantized local coding model proposes diagnoses and typed tools; policy checks and owner approval control mutations.',
     packageInstalled: packageInstalled(),
     enabled: marker.enabled === true,
     installedAt: marker.installedAt || 0,
@@ -85,9 +87,28 @@ function installPackage() {
 async function loadPipeline() {
   if (!pipelinePromise) {
     pipelinePromise = import('@huggingface/transformers')
-      .then(({ pipeline }) => pipeline(modelTask, modelId, { dtype: 'q8' }));
+      .then(({ pipeline }) => pipeline(modelTask, modelId, { dtype: 'q4' }))
+      .catch((error) => {
+        pipelinePromise = null;
+        throw error;
+      });
   }
   return pipelinePromise;
+}
+
+function evidenceRank(text, diagnostics) {
+  return focusLabels.map((label) => {
+    const matches = label.patterns.filter((pattern) => pattern.test(text)).length;
+    const direct = diagnostics.filter((item) => {
+      const value = `${item?.id || ''} ${item?.summary || ''} ${item?.detail || ''}`;
+      return label.patterns.some((pattern) => pattern.test(value));
+    }).length;
+    return {
+      ...label,
+      evidenceCount: matches + (direct * 2),
+      evidenceScore: Math.min(1, (matches * 0.18) + (direct * 0.35)),
+    };
+  });
 }
 
 async function install() {
@@ -130,38 +151,48 @@ async function reason({ server, diagnostics = [], logs = [], context = null }) {
     }).slice(-8000)
     : '';
   const prompt = [
-    'minecraft server repair focus: <mask>',
+    'You are the NexusPanel repair planner. Diagnose the strongest root cause using only the supplied evidence.',
+    'Available typed tools: server_info, list_files, read_file, write_file, send_console, diagnostic_command, queue_host_command.',
+    'Never invent evidence. Mutating tools require a time-limited owner unlock and host commands require separate approval.',
     `Server: ${server?.name || 'unknown'} ${server?.type || ''} ${server?.software_key || ''}`,
     `Diagnostics: ${diagnostics.map((item) => `${item.id}:${item.summary}`).join('; ') || 'none'}`,
     `Panel context: ${(contextText || 'none').slice(-3500)}`,
     `Recent logs: ${logs.slice(-24).join('\n').slice(-3000)}`,
   ].join('\n');
-  const classifier = await loadPipeline();
-  let output;
-  try {
-    output = await classifier(prompt, {
-      targets: focusLabels.map((item) => item.token),
-      top_k: 6,
-    });
-  } catch {
-    output = await classifier(prompt, { top_k: 6 });
+  const evidenceText = [
+    diagnostics.map((item) => `${item?.id || ''} ${item?.summary || ''} ${item?.detail || ''}`).join('\n'),
+    contextText,
+    logs.slice(-80).join('\n'),
+  ].join('\n').slice(-16000);
+  const generator = await loadPipeline();
+  const output = await generator([
+    { role: 'system', content: 'You are a concise infrastructure repair planner. Return a short diagnosis, evidence, and safest next tool.' },
+    { role: 'user', content: prompt.slice(-7000) },
+  ], { max_new_tokens: 180, temperature: 0.2, do_sample: false, repetition_penalty: 1.08 });
+  const generated = Array.isArray(output) ? output[0]?.generated_text : output?.generated_text;
+  const modelText = Array.isArray(generated)
+    ? String(generated[generated.length - 1]?.content || '')
+    : String(generated || '').slice(prompt.length);
+  const modelScores = new Map();
+  for (const label of focusLabels) {
+    if (label.patterns.some((pattern) => pattern.test(modelText)) || modelText.toLowerCase().includes(label.token)) modelScores.set(label.token, 0.72);
   }
-  const rows = (Array.isArray(output) ? output : [output])
-    .flat()
-    .map((item) => ({
-      token: String(item?.token_str || item?.sequence || item?.token || '').replace(/\s+/g, ' ').trim().toLowerCase(),
-      score: Number(item?.score || 0),
+  const ranked = evidenceRank(evidenceText, diagnostics)
+    .map((label) => ({
+      ...label,
+      modelScore: modelScores.get(label.token) || 0,
+      score: Math.min(0.99, ((modelScores.get(label.token) || 0) * 0.4) + (label.evidenceScore * 0.6)),
     }))
-    .filter((item) => item.token)
-    .slice(0, 6);
-  const ranked = rows.map((item) => {
-    const label = focusLabels.find((candidate) => item.token.includes(candidate.token));
-    const name = label ? label.detail : item.token.replace(/<[^>]+>/g, '').slice(0, 42);
-    return `${name} ${Math.round(item.score * 100)}%`;
-  });
-  return ranked.length
-    ? `CodeBERTa repair focus: ${ranked.join(', ')}. Use this as a secondary signal; built-in sandbox checks choose the action.`
-    : 'CodeBERTa repair focus produced no confident label. Use built-in deterministic repair checks.';
+    .filter((item) => item.score >= 0.04 || item.evidenceCount > 0)
+    .sort((left, right) => right.score - left.score || right.evidenceCount - left.evidenceCount)
+    .slice(0, 4);
+  if (!ranked.length) {
+    return modelText.trim()
+      ? `Advanced AI found no corroborated failure signature. Model assessment: ${modelText.replace(/\s+/g, ' ').trim().slice(0, 600)} Deterministic checks retain control.`
+      : 'Advanced AI found no corroborated failure signature. Deterministic repair checks retain control.';
+  }
+  const summary = ranked.map((item) => `${item.detail} ${Math.round(item.score * 100)}% (${item.evidenceCount} evidence match${item.evidenceCount === 1 ? '' : 'es'})`);
+  return `Advanced AI ensemble: ${summary.join(', ')}. Planner: ${modelText.replace(/\s+/g, ' ').trim().slice(0, 600)} Policy checks choose every action.`;
 }
 
 if (require.main === module) {

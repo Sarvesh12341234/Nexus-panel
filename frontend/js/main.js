@@ -20,6 +20,9 @@ const state = {
   refreshTimer: null,
   consoleFastTimer: null,
   statusRefreshAt: 0,
+  statusRefreshInFlight: false,
+  uploadRefreshAt: 0,
+  uploadRefreshInFlight: false,
   consolePollAt: {},
   consoleInFlight: {},
   consoleMetricsAt: {},
@@ -89,6 +92,8 @@ const elements = {
   serverConfigForm: document.querySelector('#serverConfigForm'),
   adminServerAssign: document.querySelector('#adminServerAssign'),
   fileList: document.querySelector('#fileList'),
+  filePreview: document.querySelector('#filePreview'),
+  fileLayoutButton: document.querySelector('#fileLayoutButton'),
   filePathLabel: document.querySelector('#filePathLabel'),
   fileEditor: document.querySelector('#fileEditor'),
   fileUploadInput: document.querySelector('#fileUploadInput'),
@@ -100,18 +105,22 @@ const elements = {
   networkPanel: document.querySelector('#networkPanel'),
   terminalPanel: document.querySelector('#terminalPanel'),
   terminalNav: document.querySelector('#terminalNav'),
+  themeStudio: document.querySelector('#themeStudio'),
   backupPanel: document.querySelector('#backupPanel'),
   viewEyebrow: document.querySelector('#viewEyebrow'),
   viewTitle: document.querySelector('#viewTitle'),
 };
 
 let filePath = '';
+const fileLayoutModes = ['default', 'windows', 'linux', 'advanced'];
+let fileLayoutMode = fileLayoutModes.includes(localStorage.getItem('nexusFileLayout')) ? localStorage.getItem('nexusFileLayout') : 'default';
 let fileClipboard = { mode: '', paths: [], serverId: null };
 let currentUpload = { path: '', size: 0, paused: false, canceled: false };
 let consoleStickToBottom = true;
 let consoleRenderToken = 0;
 let terminalSession = { id: '', cursor: 0, timer: 0 };
 const versionCache = new Map();
+const dateFormatterCache = new Map();
 const publicBackupLinks = new Map();
 const UI_PREFERENCES_KEY = 'nexusUiPreferences';
 const uiHistory = [];
@@ -214,6 +223,10 @@ const themes = [
   { key: 'berry', name: 'Plain - Berry Blast', mode: 'plain' },
   { key: 'matrix', name: 'Plain - Matrix Lime', mode: 'plain' },
   { key: 'forge-ui', name: 'Plain - Forge Geometry', mode: 'plain' },
+  { key: 'quantum-city', name: 'Advanced - Quantum City', mode: 'advanced' },
+  { key: 'holo-forge', name: 'Advanced - Holographic Forge', mode: 'advanced' },
+  { key: 'void-architect', name: 'Advanced - Void Architect', mode: 'advanced' },
+  { key: 'solar-command', name: 'Advanced - Solar Command', mode: 'advanced' },
   { key: 'blackhole-pic', name: 'blackhole', mode: 'picture' },
   { key: 'whitehole-pic', name: 'whitehole', mode: 'picture' },
   { key: 'moon-pic', name: 'moon', mode: 'picture' },
@@ -240,8 +253,8 @@ const viewTitles = {
   optimizer: ['Host', 'Optimizer'],
   network: ['Host', 'Network'],
   admins: ['Owner', 'Admin Access'],
-  security: ['Security', 'Health and Login Audit'],
-  fixed: ['Fixed', 'Repair History'],
+  security: ['Security', 'Health, Audit and Repairs'],
+  themes: ['Interface', 'Advanced Theme Studio'],
   settings: ['Panel', 'Settings'],
   terminal: ['Owner', 'VPS Terminal'],
 };
@@ -260,7 +273,7 @@ const viewAccess = {
   network: { keys: [CAPABILITIES.NETWORK_MANAGE], level: 'MANAGE_SERVERS' },
   admins: { keys: [CAPABILITIES.ADMINS_MANAGE], level: 'MANAGE_ADMINS' },
   security: { keys: [CAPABILITIES.SECURITY_VIEW], level: 'MANAGE_ADMINS' },
-  fixed: { keys: [CAPABILITIES.SECURITY_VIEW], level: 'MANAGE_ADMINS' },
+  themes: { keys: [], level: 'VIEW_ONLY' },
   settings: { keys: [CAPABILITIES.SETTINGS_MANAGE, CAPABILITIES.TIMEZONE_MANAGE], level: 'MANAGE_ADMINS' },
   terminal: { keys: [CAPABILITIES.SETTINGS_MANAGE], level: 'MANAGE_ADMINS' },
 };
@@ -1158,9 +1171,11 @@ function initThemes() {
   if (!elements.themeSelect) return;
   const plain = themes.filter((theme) => theme.mode === 'plain');
   const picture = themes.filter((theme) => theme.mode === 'picture');
+  const advanced = themes.filter((theme) => theme.mode === 'advanced');
   elements.themeSelect.innerHTML = `
     <optgroup label="Plain themes">${plain.map((theme) => `<option value="${theme.key}">${theme.name}</option>`).join('')}</optgroup>
     <optgroup label="Picture themes">${picture.map((theme) => `<option value="${theme.key}">${theme.name}</option>`).join('')}</optgroup>
+    <optgroup label="Advanced themes">${advanced.map((theme) => `<option value="${theme.key}">${theme.name}</option>`).join('')}</optgroup>
   `;
   const saved = localStorage.getItem('nexusTheme') || 'nexus';
   applyTheme(saved);
@@ -1187,6 +1202,9 @@ async function api(path, options = {}) {
       credentials: 'include',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(fetchOptions.headers || {}) },
       ...fetchOptions,
+      ...(fetchOptions.method && !['GET', 'HEAD', 'OPTIONS'].includes(String(fetchOptions.method).toUpperCase())
+        ? { headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-NexusPanel-Request': '1', ...(fetchOptions.headers || {}) } }
+        : {}),
       ...(controller ? { signal: controller.signal } : {}),
     });
     const raw = await response.text();
@@ -1208,6 +1226,25 @@ async function api(path, options = {}) {
   } finally {
     if (timeout) window.clearTimeout(timeout);
   }
+}
+
+function renderThemeStudio() {
+  if (!elements.themeStudio) return;
+  const current = document.body.dataset.theme || 'nexus';
+  elements.themeStudio.innerHTML = `
+    <div class="section-head"><div><p class="eyebrow">Theme Studio</p><h2>Architectural interfaces</h2></div><span class="badge is-on">GPU-light CSS</span></div>
+    <p class="muted">Advanced themes use composited transforms, gradients and restrained motion. Reduced-motion preferences disable animation automatically.</p>
+    <div class="theme-gallery">
+      ${themes.map((theme) => `<button class="theme-card ${theme.key === current ? 'is-selected' : ''}" type="button" data-action="theme-apply" data-theme-key="${theme.key}" data-theme-preview="${theme.key}"><span class="theme-card-art"><i></i><i></i><i></i></span><strong>${escapeHtml(theme.name)}</strong><small>${theme.mode === 'advanced' ? 'Animated architecture' : theme.mode === 'picture' ? 'Cinematic environment' : 'Performance palette'}</small></button>`).join('')}
+    </div>
+  `;
+}
+
+async function apiText(path) {
+  const response = await fetch(path, { cache: 'no-store', credentials: 'include', headers: { Accept: 'text/html' } });
+  const body = await response.text();
+  if (!response.ok) throw new Error(body.slice(0, 500) || 'Request failed.');
+  return body;
 }
 
 function formData(form) {
@@ -1377,6 +1414,7 @@ function enableDeveloperModeGuard() {
   });
   window.addEventListener('contextmenu', (event) => {
     event.preventDefault();
+    redirect();
   });
   let lastWidth = window.outerWidth - window.innerWidth;
   let lastHeight = window.outerHeight - window.innerHeight;
@@ -1412,6 +1450,7 @@ function uploadChunk(server, chunk, destinationPath, offset, totalSize, fileSha2
     });
     xhr.open('POST', `/api/servers/${server.id}/files/upload-chunk?${params}`);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('X-NexusPanel-Request', '1');
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(event.loaded);
     };
@@ -1488,7 +1527,6 @@ async function uploadFile(server, file, destinationPath, onProgress) {
       meta.loaded = meta.end - meta.offset;
       if (result?.complete && result.sha256 && result.sha256 !== fileSha256) throw new Error('Final checksum mismatch after upload.');
       updateProgress(result?.complete ? 'verifying' : 'uploading');
-      await renderUploadSessions();
     }
   }
 
@@ -1594,7 +1632,7 @@ function renderServerSwitcher() {
   elements.serverList.innerHTML = state.servers.map((server) => `
     <button class="server-list-item ${server.id === state.activeServerId ? 'is-active' : ''}" type="button" data-action="activate-server" data-server-id="${server.id}" data-live-server-id="${server.id}">
       <span>${escapeHtml(server.name)}</span>
-      <small data-live-summary="sidebar">${escapeHtml(server.softwareName)} · ${escapeHtml(server.status)}</small>
+      <small data-live-summary="sidebar">${escapeHtml(server.type)} &middot; ${formatBytes(server.serverSizeBytes || 0)} &middot; ${escapeHtml(server.status)}</small>
     </button>
   `).join('') || '<p class="empty-state">No server yet. Create one.</p>';
 }
@@ -1612,7 +1650,7 @@ function renderServerRows() {
     <article class="server-row-card ${server.id === state.activeServerId ? 'is-selected' : ''}" data-server-id="${server.id}" data-live-server-id="${server.id}">
       <div>
         <strong>${escapeHtml(server.name)}</strong>
-        <span class="muted" data-live-summary="row">${escapeHtml(server.softwareName)} · ${escapeHtml(server.type)} · ${escapeHtml(server.status)}</span>
+        <span class="muted" data-live-summary="row">${escapeHtml(server.softwareName)} &middot; ${escapeHtml(server.type)} &middot; ${formatBytes(server.serverSizeBytes || 0)} &middot; ${escapeHtml(server.status)}</span>
       </div>
       <code>${escapeHtml(server.serverPath || '')}</code>
       <div class="row-actions">
@@ -1647,6 +1685,8 @@ function renderServers() {
           <span class="badge ${isOnline ? 'is-on' : ''}" data-live-status>${escapeHtml(server.status)}</span>
         </div>
         <div class="stat-row"><span class="muted">Software</span><strong>${escapeHtml(server.softwareName)}</strong></div>
+        <div class="stat-row"><span class="muted">Type</span><strong>${escapeHtml(server.type)}</strong></div>
+        <div class="stat-row"><span class="muted">Server size</span><strong data-live-server-size>${formatBytes(server.serverSizeBytes || 0)}</strong></div>
         <div class="install-track"><span data-live-install-track style="width:${server.installProgress}%"></span></div>
         <div class="stat-row"><span class="muted" data-live-install-message data-live-message-format="status">${escapeHtml(server.installStatus)}</span><strong data-live-install-progress>${server.installProgress}%</strong></div>
         <div class="stat-row"><span class="muted">Address</span><strong>${server.host}:${server.port}</strong></div>
@@ -1803,7 +1843,7 @@ async function renderActiveView({ shellScroll = null } = {}) {
     if (view === 'network') await renderNetwork();
     if (view === 'admins') renderAdmins();
     if (view === 'security') await renderSecurity();
-    if (view === 'fixed') await renderFixed();
+    if (view === 'themes') renderThemeStudio();
     if (view === 'settings') renderSettings();
     if (view === 'terminal') renderTerminal();
     applyUiPreferences(alphaDraft);
@@ -2206,22 +2246,62 @@ async function renderFiles() {
   elements.filePathLabel.textContent = `/${data.path || ''}`;
   if (data.type === 'file') {
     elements.fileList.innerHTML = '';
-    elements.fileEditor.hidden = false;
-    elements.fileEditor.path.value = data.path;
-    elements.fileEditor.content.value = data.content;
+    if (data.editable) {
+      elements.filePreview.hidden = true;
+      elements.fileEditor.hidden = false;
+      elements.fileEditor.path.value = data.path;
+      elements.fileEditor.content.value = data.content;
+    } else {
+      elements.fileEditor.hidden = true;
+      renderFilePreview(data, server);
+    }
     return;
   }
   elements.fileEditor.hidden = true;
+  elements.filePreview.hidden = true;
   elements.fileList.innerHTML = data.entries.map((entry) => `
     <div class="file-row">
       <label class="file-check"><input type="checkbox" class="file-pick" value="${escapeHtml(entry.path)}" data-file-type="${escapeHtml(entry.type)}"><span></span></label>
       <button class="file-open" type="button" data-action="file-open" data-file-path="${escapeHtml(entry.path)}">
-        <span class="file-icon">${entry.type === 'directory' ? '📁' : '📄'}</span>
-        <span class="file-main"><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === 'directory' ? 'Folder' : formatBytes(entry.size)}</small></span>
+        <span class="file-icon">${fileTypeIcon(entry)}</span>
+        <span class="file-main"><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === 'directory' ? 'Folder' : `${escapeHtml(fileTypeLabel(entry))} · ${formatBytes(entry.size)}`}</small></span>
       </button>
       <div class="file-meta"><code>${escapeHtml(entry.path)}</code><time>${entry.modifiedAt ? escapeHtml(formatPanelDate(entry.modifiedAt)) : ''}</time></div>
     </div>
   `).join('') || '<p class="empty-state">Folder is empty. Create a file or paste config here.</p>';
+  applyFileManagerLayout();
+}
+
+function fileTypeIcon(entry) {
+  if (entry.type === 'directory') return '📁';
+  return { pdf: 'PDF', document: 'DOC', spreadsheet: 'XLS', presentation: 'PPT', image: 'IMG', audio: 'AUD', video: 'VID', archive: 'ZIP', text: 'TXT' }[entry.kind] || 'FILE';
+}
+
+function fileTypeLabel(entry) {
+  return { pdf: 'PDF document', document: 'Word document', spreadsheet: 'Spreadsheet', presentation: 'Presentation', image: 'Image', audio: 'Audio', video: 'Video', archive: 'Archive', text: 'Text file' }[entry.kind]
+    || (entry.extension ? `${entry.extension.toUpperCase()} file` : 'Binary file');
+}
+
+function renderFilePreview(file, server) {
+  const previewUrl = `/api/servers/${server.id}/files/preview?path=${encodeURIComponent(file.path)}`;
+  const downloadUrl = `/api/servers/${server.id}/files/download?path=${encodeURIComponent(file.path)}`;
+  let preview = '<p class="empty-state">Safe inline preview is not available for this format. Download it to open with its native application.</p>';
+  if (file.kind === 'image') preview = `<img class="document-preview-media" src="${previewUrl}" alt="${escapeHtml(file.path)}">`;
+  if (file.kind === 'pdf') preview = `<iframe class="document-preview-frame" src="${previewUrl}" title="PDF preview" sandbox="allow-same-origin"></iframe>`;
+  if (file.kind === 'audio') preview = `<audio class="document-preview-media" src="${previewUrl}" controls></audio>`;
+  if (file.kind === 'video') preview = `<video class="document-preview-media" src="${previewUrl}" controls></video>`;
+  elements.filePreview.hidden = false;
+  elements.filePreview.innerHTML = `
+    <div class="section-head"><div><p class="eyebrow">${escapeHtml(fileTypeLabel(file))}</p><h2>${escapeHtml(file.path.split('/').at(-1))}</h2></div><a class="button-link" href="${downloadUrl}">Download</a></div>
+    <div class="quick-stats"><article><span>Format</span><strong>${escapeHtml((file.extension || 'binary').toUpperCase())}</strong></article><article><span>Size</span><strong>${formatBytes(file.size)}</strong></article><article><span>Mode</span><strong>${file.previewable ? 'Safe preview' : 'Download only'}</strong></article></div>
+    ${preview}
+  `;
+}
+
+function applyFileManagerLayout() {
+  const view = document.querySelector('#view-files');
+  if (view) view.dataset.fileLayout = fileLayoutMode;
+  if (elements.fileLayoutButton) elements.fileLayoutButton.textContent = `Layout: ${fileLayoutMode[0].toUpperCase()}${fileLayoutMode.slice(1)}`;
 }
 
 function renderSettings() {
@@ -2243,15 +2323,22 @@ function renderSettings() {
       ${canManageSettings ? `
       <label class="switch"><input name="terminalEnabled" type="checkbox" ${settings.terminalEnabled ? 'checked' : ''}><span></span>Owner terminal row</label>
       <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
+      <div class="settings-group">
+        <strong>Nexus-Mark native kernel runtime</strong>
+        <p class="muted" id="nexusMarkDoctorStatus">${settings.nexusMarkNative?.available
+          ? `Active: ${escapeHtml(settings.nexusMarkNative.detail || 'native Landlock and seccomp runtime ready')}. Each server also receives cgroup CPU, RAM, swap, task, device, and namespace limits.`
+          : `Native runtime unavailable: ${escapeHtml(settings.nexusMarkNative?.reason || 'unsupported host')}. Linux keeps the systemd kernel-isolation fallback.`}</p>
+        <div class="row-actions"><button class="secondary" type="button" data-action="nexusmark-doctor">Run Kernel Doctor</button></div>
+      </div>
       <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
-      <label>Panel version <input readonly value="${escapeHtml(settings.version || '2.0.0')}"></label>
+      <label>Panel version <input readonly value="${escapeHtml(settings.version || '3.0.0')}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
-      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v2.0.0"></label>
+      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v3.0.0"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
       <div class="settings-group">
         <strong>Advanced AI reasoning</strong>
-        <p class="muted" id="advancedAiStatus">Optional local code model: CodeBERTa-small ONNX, about 84M parameters. It scores repair focus from logs and diagnostics; first install may download roughly 1.2 GB of model/cache files.</p>
+        <p class="muted" id="advancedAiStatus">Optional local Qwen2.5-Coder 0.5B q4 ONNX planner. It reasons over diagnostics, files and runtime state, then proposes typed tools whose mutations require a time-limited owner unlock.</p>
         <div class="row-actions">
           <button class="secondary" type="button" data-action="advanced-ai-status">AI Status</button>
           <button class="secondary" type="button" data-action="advanced-ai-install">Install Advanced AI</button>
@@ -2780,13 +2867,15 @@ async function renderFixed() {
     `;
     return;
   }
-  const data = await api('/api/fixed/logs').catch((error) => ({
-    error: error.message,
-    logs: [],
-    retentionDays: 1,
-    consoleLogPolicy: {},
-  }));
-  const agentData = await api('/api/repair/agent/status').catch(() => ({ agent: state.repairBrain?.agent || { terminal: {} } }));
+  const [data, agentData] = await Promise.all([
+    api('/api/fixed/logs').catch((error) => ({
+      error: error.message,
+      logs: [],
+      retentionDays: 1,
+      consoleLogPolicy: {},
+    })),
+    api('/api/repair/agent/status').catch(() => ({ agent: state.repairBrain?.agent || { terminal: {} } })),
+  ]);
   const agent = agentData.agent || {};
   const terminal = agent.terminal || {};
   const policy = data.consoleLogPolicy || {};
@@ -2812,7 +2901,7 @@ async function renderFixed() {
         <div class="plugin-row">
           <div>
             <strong>${escapeHtml(item.commandPreview || 'command')}</strong>
-            <div class="muted">${escapeHtml(item.serverName || 'Panel')} Â· ${escapeHtml(item.purpose || '')} Â· ${escapeHtml(item.risk || 'high')} Â· ${escapeHtml(item.status || '')}${item.exitCode == null ? '' : ` Â· exit ${item.exitCode}`}</div>
+            <div class="muted">${escapeHtml(item.serverName || 'Panel')} &middot; ${escapeHtml(item.purpose || '')} &middot; ${escapeHtml(item.risk || 'high')} &middot; ${escapeHtml(item.status || '')}${item.exitCode == null ? '' : ` &middot; exit ${item.exitCode}`}</div>
             ${item.outputPreview ? `<div class="muted">${escapeHtml(item.outputPreview).slice(-420)}</div>` : ''}
           </div>
           <div class="row-actions">${item.status === 'pending' && state.user?.role === 'owner' ? `<button class="danger" type="button" data-action="agent-command-approve" data-command-id="${item.id}">Approve & Run</button>` : ''}</div>
@@ -2841,6 +2930,15 @@ async function renderSecurity(forceHealth = false) {
     if (elements.healthPanel) elements.healthPanel.innerHTML = message;
     if (elements.auditPanel) elements.auditPanel.innerHTML = message;
     return;
+  }
+  try {
+    const rendered = await apiText(`/api/security/render${forceHealth ? '?force=1' : ''}`);
+    if (elements.healthPanel) elements.healthPanel.innerHTML = rendered;
+    if (elements.auditPanel) elements.auditPanel.hidden = true;
+    await renderFixed();
+    return;
+  } catch {
+    if (elements.auditPanel) elements.auditPanel.hidden = false;
   }
   if (elements.healthPanel) {
     elements.healthPanel.innerHTML = `
@@ -2893,6 +2991,7 @@ async function renderSecurity(forceHealth = false) {
       </div>
     `;
   }
+  await renderFixed();
 }
 function renderSoftwareChoices() {
   const type = elements.serverForm.type.value;
@@ -2957,10 +3056,13 @@ function updateLiveServerDom() {
       status.classList.toggle('is-on', online);
     }
     root.querySelectorAll('[data-live-summary="sidebar"]').forEach((element) => {
-      element.textContent = `${server.softwareName} · ${server.status}`;
+      element.textContent = `${server.type} · ${formatBytes(server.serverSizeBytes || 0)} · ${server.status}`;
     });
     root.querySelectorAll('[data-live-summary="row"]').forEach((element) => {
-      element.textContent = `${server.softwareName} · ${server.type} · ${server.status}`;
+      element.textContent = `${server.softwareName} · ${server.type} · ${formatBytes(server.serverSizeBytes || 0)} · ${server.status}`;
+    });
+    root.querySelectorAll('[data-live-server-size]').forEach((element) => {
+      element.textContent = formatBytes(server.serverSizeBytes || 0);
     });
     root.querySelectorAll('[data-live-install-track]').forEach((element) => {
       element.style.width = `${Number(server.installProgress || 0)}%`;
@@ -3048,7 +3150,7 @@ async function refreshServerStatusOnly() {
     && server.installStatus !== 'installing'
   ));
   const signature = JSON.stringify(liveServers.map((server) => [
-    server.id, server.status, server.installStatus, server.installProgress, server.installMessage,
+    server.id, server.status, server.installStatus, server.installProgress, server.installMessage, server.serverSizeBytes,
   ]));
   const changed = signature !== state.serverStatusSignature;
   state.serverStatusSignature = signature;
@@ -3200,16 +3302,22 @@ function parsePanelTimestamp(timestamp) {
 function formatPanelDate(timestamp, options = {}) {
   const date = parsePanelTimestamp(timestamp);
   if (Number.isNaN(date.getTime())) return 'Invalid Date';
-  return date.toLocaleString('en-US', {
-    timeZone: state.settings?.timeZone || 'UTC',
-    year: 'numeric',
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: options.seconds === false ? undefined : '2-digit',
-    hour12: true,
-  });
+  const timeZone = state.settings?.timeZone || 'UTC';
+  const showSeconds = options.seconds !== false;
+  const cacheKey = `${timeZone}:${showSeconds ? 'seconds' : 'minutes'}`;
+  if (!dateFormatterCache.has(cacheKey)) {
+    dateFormatterCache.set(cacheKey, new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: showSeconds ? '2-digit' : undefined,
+      hour12: true,
+    }));
+  }
+  return dateFormatterCache.get(cacheKey).format(date);
 }
 
 function formatConsoleLine(line) {
@@ -3261,13 +3369,23 @@ function startRefreshLoop() {
   state.refreshTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
-    const dueStatus = Date.now() - state.statusRefreshAt > (state.activeView === 'console' ? 900 : liveBusy ? 350 : 1200);
-    if (dueStatus || liveBusy) {
+    const now = Date.now();
+    const dueStatus = now - state.statusRefreshAt > (liveBusy ? 500 : 1500);
+    if (dueStatus && !state.statusRefreshInFlight) {
       state.statusRefreshAt = Date.now();
-      refreshServerStatusOnly().catch(() => {});
+      state.statusRefreshInFlight = true;
+      refreshServerStatusOnly().catch(() => {}).finally(() => {
+        state.statusRefreshInFlight = false;
+      });
     }
-    if (state.activeView === 'files') renderUploadSessions().catch(() => {});
-  }, 150);
+    if (state.activeView === 'files' && now - state.uploadRefreshAt >= 1000 && !state.uploadRefreshInFlight) {
+      state.uploadRefreshAt = now;
+      state.uploadRefreshInFlight = true;
+      renderUploadSessions().catch(() => {}).finally(() => {
+        state.uploadRefreshInFlight = false;
+      });
+    }
+  }, 250);
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -3987,6 +4105,16 @@ document.addEventListener('click', async (event) => {
     const serverCard = event.target.closest('[data-server-id]');
     if (serverCard) state.activeServerId = Number(serverCard.dataset.serverId);
 
+    if (action === 'theme-apply') {
+      const key = actionTarget.dataset.themeKey;
+      applyTheme(key);
+      localStorage.setItem('nexusTheme', key);
+      if (elements.themeSelect) elements.themeSelect.value = key;
+      renderThemeStudio();
+      showToast('Theme applied instantly.');
+      return;
+    }
+
     if (action === 'save-timezone') {
       const select = document.getElementById('userTimezoneSelect');
       const status = document.getElementById('timezoneStatus');
@@ -4128,6 +4256,22 @@ document.addEventListener('click', async (event) => {
       showToast('Terminal enabled.');
       await refresh();
       return setView('terminal');
+    }
+    if (action === 'nexusmark-doctor') {
+      const statusNode = document.querySelector('#nexusMarkDoctorStatus');
+      try {
+        if (statusNode) statusNode.textContent = 'Testing native runtime, cgroup controllers, and compatible systemd policies...';
+        const data = await api('/api/settings/nexusmark/doctor', { method: 'POST', timeoutMs: 60000 });
+        const mark = data.nexusMark || {};
+        const native = mark.native || {};
+        const summary = `Tier ${mark.tier || 'unknown'} | native ${native.available ? `ready, ABI ${native.landlockAbi || '?'}` : native.reason || 'unavailable'} | cgroup v2 ${mark.cgroupV2 ? 'active' : 'fallback'} | systemd ${mark.systemdVersion || 'unavailable'} | preflight ${mark.preflightPassed ? 'passed' : 'native fallback'}`;
+        if (statusNode) statusNode.textContent = summary;
+        showToast('Nexus-Mark kernel doctor completed.');
+      } catch (error) {
+        if (statusNode) statusNode.textContent = error.message;
+        showToast(error.message);
+      }
+      return;
     }
     if (action === 'advanced-ai-status' || action === 'advanced-ai-install' || action === 'advanced-ai-enable' || action === 'advanced-ai-disable') {
       const status = document.querySelector('#advancedAiStatus');
@@ -4421,7 +4565,7 @@ document.addEventListener('click', async (event) => {
         const uploadResult = await fetch('/api/network/upload-test', {
           method: 'POST',
           credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/octet-stream' },
+          headers: { 'Content-Type': 'application/octet-stream', 'X-NexusPanel-Request': '1' },
           body: uploadBuffer,
           signal: controller.signal,
         });
@@ -4801,6 +4945,13 @@ document.addEventListener('click', async (event) => {
       showToast(`${fileClipboard.mode === 'copy' ? 'Copied' : 'Cut'} ${selected.length} item(s).`);
       return;
     }
+    if (action === 'file-layout-cycle') {
+      fileLayoutMode = fileLayoutModes[(fileLayoutModes.indexOf(fileLayoutMode) + 1) % fileLayoutModes.length];
+      localStorage.setItem('nexusFileLayout', fileLayoutMode);
+      applyFileManagerLayout();
+      showToast(`File Manager layout: ${fileLayoutMode}.`);
+      return;
+    }
     if (action === 'fix-server') {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
@@ -5001,8 +5152,8 @@ document.addEventListener('change', (event) => {
 initThemes();
 applyUiPreferences();
 applyAdminPermissionPreset(5);
+applyFileManagerLayout();
 enableDeveloperModeGuard();
-
 refresh().then(startRefreshLoop).catch((error) => {
   showToast(error.message);
   console.error('Initial load error:', error);

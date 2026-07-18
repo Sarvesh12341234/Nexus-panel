@@ -1,6 +1,6 @@
 {
   "name": "nexuspanel",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Lightweight Minecraft server panel with SQLite accounts and admin permissions.",
   "main": "backend/index.js",
   "bin": {
@@ -16,18 +16,30 @@
     "service:logs": "journalctl -u nexuspanel -f",
     "cli": "node backend/cli.js",
     "update": "bash update/update.sh",
-    "test-auth": "node backend/test-auth.js",
-    "debug-users": "node backend/debug-users.js",
-    "reset-password": "node backend/reset-password.js"
+    "test": "npm run test:auth && npm run test:v3 && npm run test:nexusmark",
+    "test:auth": "node tests/auth.test.js",
+    "test:v3": "node tests/v3.test.js",
+    "test-auth": "npm run test:auth",
+    "debug-users": "node scripts/debug-users.js",
+    "reset-password": "node scripts/reset-password.js",
+    "build:nexusmark": "node backend/nexus_mark_native.js",
+    "build:host-agent": "node backend/host_agent.js",
+    "test:nexusmark": "bash native/nexusmark/tests/test.sh",
+    "audit:nexusmark": "sudo bash native/nexusmark/tests/test-audit.sh",
+    "benchmark:nexusmark": "bash native/nexusmark/tests/benchmark.sh"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "type": "commonjs",
+  "engines": {
+    "node": ">=24"
+  },
   "dependencies": {
     "express": "^4.18.2"
   },
   "optionalDependencies": {
+    "@huggingface/transformers": "^3.8.1",
     "node-pty": "^1.1.0"
   }
 }

@@ -9,6 +9,7 @@ const {
   install,
   logsService,
   changePort,
+  componentAction,
   restartService,
   serviceName,
   startService,
@@ -28,6 +29,8 @@ function help() {
   console.log(`NexusPanel CLI
 
 Usage:
+  nexuspanel version
+  nexuspanel doctor
   nexuspanel start
   nexuspanel stop
   nexuspanel restart
@@ -36,7 +39,15 @@ Usage:
   nexuspanel change panelport 8080
   nexuspanel update
   nexuspanel install
+  nexuspanel service install
   nexuspanel setup-owner
+  nexuspanel nexusmark status
+  nexuspanel nexusmark rebuild
+  nexuspanel nexusmark restart
+  nexuspanel agent status
+  nexuspanel agent restart
+  nexuspanel agent logs
+  nexuspanel users
   nexuspanel foreground
 
 Service: ${serviceName}`);
@@ -67,7 +78,7 @@ async function ensureOwnerForCli() {
   try {
     const name = (await rl.question('Owner account name [Owner]: ')).trim() || 'Owner';
     const email = (await rl.question('Owner email: ')).trim();
-    const password = await rl.question('Owner password (8+ chars): ');
+    const password = await rl.question('Owner password (12+ chars): ');
     createUser({ email, name, password, role: 'owner', accessLevel: 100 });
     console.log('Owner account created. Starting NexusPanel...');
   } finally {
@@ -141,6 +152,10 @@ async function main() {
   }
   
   if (command === 'help' || command === '--help' || command === '-h') return help();
+  if (command === 'version' || command === '--version' || command === '-v') {
+    console.log('NexusPanel 3.0.0');
+    return;
+  }
   if (command === 'setup-owner' || command === 'owner:setup') {
     await ensureOwnerForCli();
     console.log('Owner account is ready.');
@@ -149,6 +164,10 @@ async function main() {
   if (command === 'install') {
     await ensureOwnerForCli();
     return install({ start: true });
+  }
+  if (command === 'service' && process.argv[3] === 'install') {
+    await ensureOwnerForCli();
+    return install({ start: !process.argv.includes('--no-start') });
   }
   if (command === 'start') {
     await ensureOwnerForCli();
@@ -159,13 +178,41 @@ async function main() {
   if (command === 'status') return status();
   if (command === 'logs') return logsService();
   if (command === 'change' && process.argv[3] === 'panelport') return changePort(process.argv[4]);
+  if (command === 'nexusmark' && (process.argv[3] || 'status') === 'status') {
+    const { kernelStatus } = require('./nexus_mark');
+    console.log(JSON.stringify(kernelStatus({ refresh: true }), null, 2));
+    return;
+  }
+  if (command === 'nexusmark' && process.argv[3] === 'rebuild') {
+    const { nativeStatus } = require('./nexus_mark_native');
+    console.log(JSON.stringify(nativeStatus({ build: true, force: true }), null, 2));
+    return;
+  }
+  if (command === 'nexusmark' && ['start', 'stop', 'restart'].includes(process.argv[3])) return componentAction('nexusmark', process.argv[3]);
+  if (command === 'nexusmark' && process.argv[3] === 'logs') return run('journalctl', ['-u', 'nexuspanel-nexusmark', '-n', '100', '--no-pager']);
+  if (command === 'agent' && (process.argv[3] || 'status') === 'status') {
+    const { localStatus, request } = require('./host_agent');
+    console.log(JSON.stringify({ ...localStatus(), live: await request('STATUS') }, null, 2));
+    return;
+  }
+  if (command === 'agent' && ['start', 'stop', 'restart'].includes(process.argv[3])) return componentAction('agent', process.argv[3]);
+  if (command === 'agent' && process.argv[3] === 'logs') return run('journalctl', ['-u', 'nexuspanel-host-agent', '-n', '100', '--no-pager']);
   if (command === 'update') return run('bash', [path.join(__dirname, '..', 'update', 'update.sh'), process.argv[3] || ''], { cwd: path.join(__dirname, '..') });
   if (command === 'foreground') {
     await ensureOwnerForCli();
     return require('./index');
   }
   if (command === 'doctor') {
-    console.log(JSON.stringify({ systemd: hasSystemd(), service: status({ quiet: true }) }, null, 2));
+    const { kernelStatus } = require('./nexus_mark');
+    const { localStatus, request } = require('./host_agent');
+    console.log(JSON.stringify({
+      version: '3.0.0',
+      node: process.version,
+      systemd: hasSystemd(),
+      service: status({ quiet: true }),
+      nexusmark: kernelStatus({ refresh: true }),
+      hostAgent: { ...localStatus(), live: await request('STATUS') },
+    }, null, 2));
     return;
   }
   throw new Error(`Unknown command: ${command}`);

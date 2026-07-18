@@ -2,6 +2,8 @@
 
 A lightweight, powerful, and user-friendly web-based control panel for Minecraft **Bedrock and Java** servers.
 
+Repository layout and validation commands are documented in [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md).
+
 ## 🎯 Features
 
 ```bash
@@ -14,13 +16,13 @@ Open `http://localhost:3000`.
 Linux/Ubuntu one-command installer:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v2.0.0/nexuspanel-normal-v2.0.0-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v3.0.0/nexuspanel-normal-v3.0.0-linux-installer.sh | sudo bash
 ```
 
 Host edition:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/host-v2.0.0/nexuspanel-host-v2.0.0-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/host-v3.0.0/nexuspanel-host-v3.0.0-linux-installer.sh | sudo bash
 ```
 
 ## VPS Background Service
@@ -51,6 +53,13 @@ nexuspanel status
 nexuspanel logs
 nexuspanel update
 nexuspanel change panelport 8080
+nexuspanel version
+nexuspanel doctor
+nexuspanel agent status
+nexuspanel agent restart
+nexuspanel agent logs
+nexuspanel nexusmark rebuild
+nexuspanel nexusmark restart
 ```
 
 On first run, `nexuspanel start` or `nexuspanel install` asks for owner account name, email, and password before starting the panel.
@@ -65,21 +74,57 @@ On first run, `nexuspanel start` or `nexuspanel install` asks for owner account 
 NexusPanel includes a safe updater that snapshots panel code, pulls/copies updates, runs `npm install`, and restarts the service without touching Minecraft data.
 
 ```bash
-cd /root/summa/panel
+cd /opt/nexuspanel
 bash update/update.sh
 ```
 
 Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the external backup store.
 
-## v2.0.0 Editions
+## v3.0.0 Editions
 
-- `normal-v2.0.0`: advanced solo panel with normal-only tunnel helpers, DDoS Guard, faster console metrics, backups, plugin/file/software managers, shared admin visibility, and host-only features hidden.
-- `host-v2.0.0`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, assigned-user server isolation, backups, and DDoS Guard.
-- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v2.0.0` or `host-v2.0.0`.
+- `normal-v3.0.0`: advanced solo panel with normal-only tunnel helpers, DDoS Guard, faster console metrics, backups, plugin/file/software managers, shared admin visibility, and host-only features hidden.
+- `host-v3.0.0`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, assigned-user server isolation, backups, and DDoS Guard.
+- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v3.0.0` or `host-v3.0.0`.
 - The update repository is locked to `Sarvesh12341234/Nexus-panel`; users cannot change it from the panel UI.
 - If an update finds server folders such as `5-summa` missing from SQLite, NexusPanel recovers them into the server list on boot.
 
-## v2.0.0 Protection
+## v3.0.0 Protection
+
+### Native v3 host control plane
+
+Version 3 installs `nexuspanel-host-agent`, a hardened C service that answers low-latency health requests through a permission-restricted Unix socket. The public Node.js panel does not receive an unrestricted root shell. The service installer also enables a NexusMark preflight oneshot unit, so native isolation is built and verified before the panel starts.
+
+Security status is rendered and escaped on the server, then delivered under the panel CSP. The optional local AI uses Qwen2.5-Coder 0.5B Instruct in q4 ONNX mode and exposes typed tools for server information, bounded file reads, atomic file edits with recovery points, console commands, audited diagnostics, and separately approved host commands. Mutating tools require the owner to unlock a short full-access window.
+
+Theme Studio includes four composited advanced interfaces—Quantum City, Holographic Forge, Void Architect, and Solar Command—while respecting reduced-motion preferences.
+
+### Nexus-Mark native kernel runtime
+
+Nexus-Mark now includes a small C runtime for Linux x86-64, x86, arm64, ARM, RISC-V 64, PowerPC 64, and s390x. It is built automatically by Ubuntu, Debian, Kali, Fedora, Rocky, openSUSE, Arch, and compatible systemd-based installers and is placed in NexusPanel's protected data directory. It does not run a daemon: after installing its restrictions it replaces itself with the game process using `exec`, so there is no resident native-wrapper RAM cost.
+
+Each Linux server launch layers:
+
+- cgroups v2 limits for memory, swap, CPU, I/O weight, and process count;
+- systemd mount, device, temporary-directory, home, process, hostname, and cgroup isolation;
+- a native Landlock filesystem allowlist limited to the server root and required read-only runtime files;
+- a native seccomp-BPF denylist for mount, namespace, kernel-module, BPF/LSM, raw host inspection, cross-process memory, and signaling operations, including explicit clone namespace-flag filtering and safe clone3 fallback;
+- removed capabilities, `no_new_privs`, private keyrings, restricted socket families, and assigned-port-only binds on supported systemd releases;
+- a locked, non-login Linux account per game server, with inherited POSIX ACLs and a unique UID/GID applied to the actual game process; and
+- recursive removal of group/other server-file access, with private defaults for files created after migration.
+
+The preferred native build is a maximum-hardened static PIE using FORTIFY level 3, stack-clash and control-flow protection, zero automatic-variable initialization, hidden symbols, LTO, RELRO, BIND_NOW, separated executable code, and an NX stack. If a CPU architecture or older compiler cannot provide every option, the builder compiles and self-tests a compatible static PIE before considering a dynamic PIE fallback. Maximum systemd policy also adds a private user namespace and disables cross-security-domain KSM; systemd 257+ adds a PID namespace and systemd 258+ uses strict private cgroup visibility.
+
+Check the installed engine with:
+
+```bash
+nexuspanel nexusmark status
+```
+
+The same full preflight is available from Settings through **Run Kernel Doctor**. NexusMark tests Maximum, Compatible, and Core systemd policies in order and caches the strongest working tier. Unsupported distro properties therefore downgrade safely instead of breaking game startup. Native upgrades compile to a temporary PIE binary, run a real sandbox self-test, and replace the known-good runtime only after that test passes.
+
+Runtime metrics read cgroup v2 memory events, OOM counters, CPU throttling, and CPU/memory/I/O pressure directly from the kernel. Cgroup paths are cached to avoid spawning `systemctl show` on every dashboard sample.
+
+The strict native layer requires Landlock ABI 3, normally Linux 6.2 or newer, so file truncation is also confined. Older kernels retain the systemd namespace/cgroup sandbox and clearly report that the native layer is unavailable. Nexus-Mark intentionally shares the host IP namespace so Minecraft ports remain directly reachable without a proxy or NAT daemon; it is a low-overhead game-server sandbox, not an OCI image/runtime implementation.
 
 - Live collaborators show when another owner/admin is viewing the same server.
 - DDoS Guard adds a bounded 999,999-parameter defensive classifier for TCP SYN pressure, UDP/Bedrock floods, connection fanout, bandwidth drops, conntrack pressure, and firewall misconfiguration signals.

@@ -198,7 +198,10 @@ function startServer(server, software) {
       throw new Error(`${software.name} ${server.software_version || 'latest'} requires Java ${requiredMajor}, but this VPS is running Java ${javaMajor}. Reinstall with an older Minecraft version or install Java ${requiredMajor}+ on the VPS.`);
     }
     command = bundledJava || 'java';
-    args = [`-Xmx${dbMemoryMb}M`, '-jar', executable, 'nogui'];
+    const nativeReserveMb = Math.max(128, Math.min(768, Math.ceil(dbMemoryMb * 0.15)));
+    const heapMaxMb = Math.max(128, dbMemoryMb - nativeReserveMb);
+    args = [`-Xmx${heapMaxMb}M`, '-XX:+ExitOnOutOfMemoryError', '-Djava.io.tmpdir=.nexusmark-tmp', '-jar', executable, 'nogui'];
+    appendLog(server.id, `[NexusPanel] Java heap capped at ${heapMaxMb} MB with ${nativeReserveMb} MB reserved for threads, code cache, buffers, and kernel-accounted memory.`);
   } else if (software.key === 'pocketmine') {
     const header = fs.readFileSync(executable, { encoding: 'utf8', flag: 'r' }).slice(0, 80);
     if (!header.includes('<?php')) {
@@ -232,9 +235,10 @@ function startServer(server, software) {
     ...storedProfile,
     serverId: server.id,
     serverRoot: root,
+    port: Number(server.port || 25565),
     cpuCores: dbCpuCores,
     cpuQuotaPercent: dbCpuCores * 100,
-    startupCpuQuotaPercent: dbCpuCores <= 3 ? Math.min(totalCpuCores, dbCpuCores * 4) * 100 : dbCpuCores * 100,
+    startupCpuQuotaPercent: dbCpuCores <= 3 ? Math.min(totalCpuCores, dbCpuCores * 2) * 100 : dbCpuCores * 100,
     memoryMaxMb: dbMemoryMb,
     diskLimitMb: Number(server.disk_limit_mb || 0),
     pathScope: 'server-root-only',
@@ -242,6 +246,18 @@ function startServer(server, software) {
   };
   appendLog(server.id, `[NexusPanel] Nexus-Mark allocation enforced from database: ${dbMemoryMb} MB RAM, ${dbCpuCores} CPU core(s).`);
   const wrapped = wrapCommand(command, args, profile);
+  if (wrapped.identity?.available) {
+    appendLog(server.id, `[NexusPanel] Dedicated kernel identity active: ${wrapped.identity.name} (UID ${wrapped.identity.uid}), isolated from other server processes.`);
+  } else if (process.platform === 'linux') {
+    appendLog(server.id, `[NexusPanel] Per-server UID layer unavailable (${wrapped.identity?.reason || 'host compatibility'}); remaining Nexus-Mark layers stay active.`);
+  }
+  if (wrapped.engine === 'native-kernel+cgroup-v2') {
+    appendLog(server.id, `[NexusPanel] Nexus-Mark ${wrapped.policyTier || 'compatible'} policy active: cgroup v2 + namespaces + Landlock + seccomp (${wrapped.nativeDetail}).`);
+  } else if (wrapped.engine === 'native-landlock-seccomp') {
+    appendLog(server.id, `[NexusPanel] Nexus-Mark native Landlock/seccomp active; systemd cgroup policy is unavailable (${wrapped.compatibilityDetail || 'host compatibility'}).`);
+  } else if (process.platform === 'linux') {
+    appendLog(server.id, `[NexusPanel] Nexus-Mark native runtime unavailable (${wrapped.nativeDetail || 'unsupported host'}); using ${wrapped.engine}.`);
+  }
   const child = spawn(wrapped.command, wrapped.args, spawnOptions({
     cwd: root,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -268,7 +284,7 @@ function startServer(server, software) {
           if (/unit .* not found/i.test(detail)) appendLog(server.id, '[NexusPanel] Startup CPU burst unit was already collected; steady database allocation remains enforced by Nexus-Mark.');
           else appendLog(server.id, `[NexusPanel] CPU throttle update failed: ${detail}`);
         }
-      }, 90 * 1000);
+      }, 45 * 1000);
       throttleTimer.unref();
       child.nexusThrottleTimer = throttleTimer;
     } else {

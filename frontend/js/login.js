@@ -42,7 +42,7 @@ async function handleLogin(event) {
 
     const response = await fetch('/api/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-NexusPanel-Request': '1' },
       body: JSON.stringify({ email, password }),
       credentials: 'include', // Important: include credentials for cookies
     });

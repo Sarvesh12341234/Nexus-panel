@@ -1,8 +1,13 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const { externalDataRoot } = require('./paths');
 const { hostCpuCount } = require('./system_info');
+const { nativeStatus } = require('./nexus_mark_native');
+const { ensureServerIdentity, identitySupportStatus } = require('./nexus_mark_identity');
 let launchSequence = 0;
+let kernelStatusCache = { expiresAt: 0, value: null };
 
 function cpuLimitPercent(cpuCores = 1) {
   const total = Math.max(1, hostCpuCount());
@@ -13,7 +18,7 @@ function cpuLimitPercent(cpuCores = 1) {
 function startupCpuLimitPercent(cpuCores = 1) {
   const total = Math.max(1, hostCpuCount());
   const requested = Math.max(1, Math.min(total, Number(cpuCores) || 1));
-  return requested <= 3 ? Math.min(total, requested * 4) * 100 : requested * 100;
+  return requested <= 3 ? Math.min(total, requested * 2) * 100 : requested * 100;
 }
 
 function clearStaleUnits(serverId, spawnSync) {
@@ -44,10 +49,11 @@ function profileForServer(server, nexu = null) {
   const advancedIsolation = process.env.NEXUSPANEL_ADVANCED_ISOLATION !== '0';
   return {
     engine: 'nexus-mark',
-    version: 1,
-    mode: 'direct-isolated',
+    version: 2,
+    mode: process.platform === 'linux' ? 'native-kernel-isolated' : 'direct-isolated',
     platform: process.platform,
     serverId: server.id,
+    port: Number(server.port || nexu?.network?.port || 25565),
     cpuCores,
     cpuQuotaPercent: cpuLimitPercent(cpuCores),
     startupCpuQuotaPercent: startupCpuLimitPercent(cpuCores),
@@ -67,6 +73,16 @@ function profileForServer(server, nexu = null) {
       'systemd-cpuquota',
       'systemd-readwritepaths',
       'systemd-private-tmp',
+      'native-landlock-filesystem-lsm',
+      'native-seccomp-bpf',
+      'native-zero-resident-exec-runtime',
+      'assigned-game-port-bind-only',
+      'landlock-cross-domain-signal-scope',
+      'landlock-unix-socket-scope',
+      'automatic-compatible-policy-preflight',
+      'verified-native-binary-rollback',
+      'dedicated-locked-system-user',
+      'inherited-per-server-posix-acl',
       ...(advancedIsolation ? [
         'systemd-private-devices',
         'systemd-capability-drop',
@@ -79,15 +95,17 @@ function profileForServer(server, nexu = null) {
       ? {
         systemdUnit: `nexusmark-${server.id}.service`,
         memoryMax: `${ramMb}M`,
+        memoryHigh: `${Math.max(256, Math.floor(ramMb * 0.95))}M`,
+        memorySwapMax: '64M',
         cpuQuota: `${cpuLimitPercent(cpuCores)}%`,
         startupCpuQuota: `${startupCpuLimitPercent(cpuCores)}%`,
         noNewPrivileges: true,
         privateTmp: true,
         privateDevices: advancedIsolation,
         protectSystem: 'strict',
-        protectProc: 'default',
+        protectProc: 'invisible-when-supported',
         capabilityBoundingSet: advancedIsolation ? '' : 'systemd-default',
-        addressFamilies: advancedIsolation ? ['AF_INET', 'AF_INET6', 'AF_UNIX'] : ['systemd-default'],
+        addressFamilies: advancedIsolation ? ['AF_INET', 'AF_INET6'] : ['systemd-default'],
         systemCallFilter: advancedIsolation ? ['@system-service', '~@mount', '~@swap', '~@reboot', '~@raw-io', '~@privileged'] : ['systemd-default'],
       }
       : { note: 'Windows/macOS use path sandbox + process guard only.' },
@@ -104,42 +122,216 @@ function profileForServer(server, nexu = null) {
   };
 }
 
-function wrapCommand(command, args, profile) {
-  if (process.platform !== 'linux' || process.env.NEXUSPANEL_CGROUPS === '0' || !fs.existsSync('/run/systemd/system')) {
-    return { command, args, unit: '' };
+function readCgroupControllers() {
+  try {
+    return fs.readFileSync('/sys/fs/cgroup/cgroup.controllers', 'utf8').trim().split(/\s+/).filter(Boolean);
+  } catch {
+    return [];
   }
-  const { spawnSync } = require('node:child_process');
-  const probe = spawnSync('systemd-run', ['--version'], { stdio: 'ignore' });
-  if (probe.status !== 0) return { command, args, unit: '' };
+}
+
+function systemdProperties(profile, status, tier = 'maximum') {
+  const root = profile.serverRoot;
+  const properties = [
+    `MemoryMax=${profile.memoryMaxMb}M`,
+    `CPUQuota=${profile.startupCpuQuotaPercent || profile.cpuQuotaPercent}%`,
+    'TasksMax=512',
+    `WorkingDirectory=${root}`,
+    'NoNewPrivileges=yes',
+    'PrivateTmp=yes',
+    'ProtectSystem=strict',
+    `ReadWritePaths=${root}`,
+    'RestrictSUIDSGID=yes',
+    'LockPersonality=yes',
+    'UMask=0077',
+    'LimitCORE=0',
+    'CapabilityBoundingSet=',
+    'RestrictAddressFamilies=AF_INET AF_INET6',
+    'KillMode=control-group',
+    'OOMScoreAdjust=500',
+  ];
+  if (profile.nexusIdentity?.available) {
+    properties.push(`User=${profile.nexusIdentity.name}`, `Group=${profile.nexusIdentity.group}`);
+  }
+  if (status.systemdVersion >= 243) properties.push('OOMPolicy=stop');
+  if (status.controllers.includes('memory')) {
+    properties.push(`MemoryHigh=${Math.max(256, Math.floor(profile.memoryMaxMb * 0.95))}M`);
+    if (status.cgroupV2) properties.push('MemorySwapMax=64M');
+  }
+  if (status.controllers.includes('cpu')) properties.push('CPUWeight=100');
+  if (status.controllers.includes('io')) properties.push('IOAccounting=yes', 'IOWeight=100');
+  if (tier === 'core') return properties;
+
+  properties.push(
+    'PrivateDevices=yes',
+    'ProtectHome=yes',
+    'ProtectClock=yes',
+    'ProtectKernelTunables=yes',
+    'ProtectKernelModules=yes',
+    'ProtectKernelLogs=yes',
+    status.systemdVersion >= 258 ? 'ProtectControlGroups=strict' : 'ProtectControlGroups=yes',
+    'ProtectHostname=yes',
+    'RestrictNamespaces=yes',
+    'RestrictRealtime=yes',
+    'KeyringMode=private',
+    'PrivateIPC=yes',
+    'RemoveIPC=yes',
+    'PrivateMounts=yes',
+  );
+  if (status.systemdVersion >= 247) properties.push('ProtectProc=invisible');
+  if (tier === 'compatible') return properties;
+
+  properties.push(
+    'SystemCallArchitectures=native',
+    'SystemCallFilter=~@mount @swap @reboot @raw-io @privileged',
+    'PrivateUsers=yes',
+  );
+  if (status.systemdVersion >= 254) properties.push('MemoryKSM=no');
+  if (status.systemdVersion >= 257) properties.push('PrivatePIDs=yes');
+  if (status.systemdVersion >= 249 && Number(profile.port) > 0) {
+    properties.push(
+      'SocketBindDeny=any',
+      `SocketBindAllow=tcp:${Number(profile.port)}`,
+      `SocketBindAllow=udp:${Number(profile.port)}`,
+    );
+  }
+  return properties;
+}
+
+function propertyArgs(properties) {
+  return properties.flatMap((property) => ['--property', property]);
+}
+
+function kernelStatus({ refresh = false } = {}) {
+  if (process.platform !== 'linux') {
+    return { platform: process.platform, available: false, tier: 'process-guard', native: nativeStatus({ build: false }) };
+  }
+  if (!refresh && kernelStatusCache.value && kernelStatusCache.expiresAt > Date.now()) return kernelStatusCache.value;
+
+  const native = nativeStatus({ build: true });
+  const controllers = readCgroupControllers();
+  const cgroupV2 = fs.existsSync('/sys/fs/cgroup/cgroup.controllers');
+  const systemdActive = process.env.NEXUSPANEL_CGROUPS !== '0' && fs.existsSync('/run/systemd/system');
+  const versionProbe = systemdActive
+    ? spawnSync('systemd-run', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
+    : { status: 1, stdout: '', stderr: 'systemd is not active' };
+  const systemdVersion = Number(String(versionProbe.stdout || '').match(/systemd\s+(\d+)/i)?.[1] || 0);
+  const base = {
+    platform: 'linux',
+    kernel: String(require('node:os').release()),
+    native,
+    cgroupV2,
+    controllers,
+    systemdActive,
+    systemdVersion,
+    identitySupport: identitySupportStatus(),
+    testedAt: Date.now(),
+  };
+  if (versionProbe.status !== 0) {
+    const value = {
+      ...base,
+      available: native.available,
+      tier: native.available ? 'native-only' : 'process-guard',
+      reason: String(versionProbe.error?.message || versionProbe.stderr || 'systemd-run unavailable').trim().slice(0, 500),
+    };
+    kernelStatusCache = { value, expiresAt: Date.now() + 10 * 60 * 1000 };
+    return value;
+  }
+
+  const preflightParent = path.join(externalDataRoot, 'nexus-mark');
+  const preflightRoot = path.join(preflightParent, `preflight-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+  try {
+    fs.mkdirSync(preflightParent, { recursive: true, mode: 0o750 });
+    fs.mkdirSync(preflightRoot, { recursive: false, mode: 0o700 });
+  } catch (error) {
+    const value = {
+      ...base,
+      available: native.available,
+      tier: native.available ? 'native-only' : 'process-guard',
+      preflightPassed: false,
+      reason: `preflight storage unavailable: ${error.message}`,
+      failures: [],
+    };
+    kernelStatusCache = { value, expiresAt: Date.now() + 60 * 1000 };
+    return value;
+  }
+  const testProfile = {
+    serverRoot: preflightRoot,
+    serverId: 'preflight',
+    port: 65535,
+    memoryMaxMb: 256,
+    cpuQuotaPercent: 100,
+    startupCpuQuotaPercent: 100,
+  };
+  let selected = '';
+  const failures = [];
+  try {
+    for (const tier of ['maximum', 'compatible', 'core']) {
+      const unit = `nexusmark-preflight-${process.pid}-${tier}-${Date.now().toString(36)}`;
+      const payloadCommand = fs.existsSync('/usr/bin/java') ? '/usr/bin/java' : '/bin/true';
+      const payloadArgs = payloadCommand.endsWith('/java') ? ['-version'] : [];
+      const testCommand = native.available ? native.binary : payloadCommand;
+      const testArgs = native.available
+        ? ['--root', preflightRoot, '--port', '65535', '--', payloadCommand, ...payloadArgs]
+        : payloadArgs;
+      const result = spawnSync('systemd-run', [
+        '--quiet', '--wait', '--collect', '--no-ask-password', `--unit=${unit}`,
+        ...propertyArgs(systemdProperties(testProfile, base, tier)),
+        '--', testCommand, ...testArgs,
+      ], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+      if (result.status === 0) {
+        selected = tier;
+        break;
+      }
+      failures.push({ tier, detail: String(result.stderr || result.stdout || `exit ${result.status}`).trim().slice(0, 500) });
+    }
+  } finally {
+    if (path.dirname(preflightRoot) === preflightParent) {
+      fs.rmSync(preflightRoot, { recursive: true, force: true });
+    }
+  }
+  const value = {
+    ...base,
+    available: Boolean(selected || native.available),
+    tier: selected || (native.available ? 'native-only' : 'process-guard'),
+    preflightPassed: Boolean(selected),
+    failures,
+  };
+  kernelStatusCache = { value, expiresAt: Date.now() + 10 * 60 * 1000 };
+  return value;
+}
+
+function wrapCommand(command, args, profile) {
+  if (process.platform !== 'linux') return { command, args, unit: '', engine: 'process-guard', policyTier: 'process-guard' };
+
+  const status = kernelStatus();
+  const native = status.native;
+  const identity = ensureServerIdentity(profile, native.available ? native.binary : '');
+  const launchProfile = { ...profile, nexusIdentity: identity };
+  const nativeCommand = native.available ? native.binary : command;
+  const nativeArgs = native.available
+    ? [
+      '--root', profile.serverRoot,
+      '--port', String(Number(profile.port) || 25565),
+      ...(identity.available ? ['--uid', String(identity.uid), '--gid', String(identity.gid)] : []),
+      '--', command, ...args,
+    ]
+    : args;
+  if (!status.preflightPassed) {
+    return {
+      command: nativeCommand,
+      args: nativeArgs,
+      unit: '',
+      engine: native.available ? 'native-landlock-seccomp' : 'process-guard',
+      policyTier: status.tier,
+      nativeDetail: native.detail || native.reason || '',
+      compatibilityDetail: status.failures?.[0]?.detail || status.reason || '',
+      identity,
+    };
+  }
+
   clearStaleUnits(profile.serverId, spawnSync);
   launchSequence = (launchSequence + 1) % 1000000;
-  const advancedIsolation = process.env.NEXUSPANEL_ADVANCED_ISOLATION !== '0' && profile.advancedIsolation !== false;
-  const advancedProperties = advancedIsolation
-    ? [
-      '--property',
-      'PrivateDevices=yes',
-      '--property',
-      'ProtectHome=read-only',
-      '--property',
-      'ProtectClock=yes',
-      '--property',
-      'ProtectKernelTunables=yes',
-      '--property',
-      'ProtectKernelModules=yes',
-      '--property',
-      'ProtectKernelLogs=yes',
-      '--property',
-      'ProtectControlGroups=yes',
-      '--property',
-      'CapabilityBoundingSet=',
-      '--property',
-      'SystemCallArchitectures=native',
-      '--property',
-      'SystemCallFilter=@system-service ~@mount ~@swap ~@reboot ~@raw-io ~@privileged',
-      '--property',
-      'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX',
-    ]
-    : [];
   const unit = [
     'nexusmark',
     String(profile.serverId).replace(/[^a-z0-9_.-]/gi, '-'),
@@ -155,32 +347,16 @@ function wrapCommand(command, args, profile) {
       '--wait',
       '--collect',
       `--unit=${unit}`,
-      '--property',
-      `MemoryMax=${profile.memoryMaxMb}M`,
-      '--property',
-      `CPUQuota=${profile.startupCpuQuotaPercent || profile.cpuQuotaPercent}%`,
-      '--property',
-      'TasksMax=512',
-      '--property',
-      `WorkingDirectory=${profile.serverRoot}`,
-      '--property',
-      'NoNewPrivileges=yes',
-      '--property',
-      'PrivateTmp=yes',
-      '--property',
-      'ProtectSystem=strict',
-      '--property',
-      `ReadWritePaths=${profile.serverRoot}`,
-      '--property',
-      'RestrictSUIDSGID=yes',
-      '--property',
-      'LockPersonality=yes',
-      ...advancedProperties,
+      ...propertyArgs(systemdProperties(launchProfile, status, status.tier)),
       '--',
-      command,
-      ...args,
+      nativeCommand,
+      ...nativeArgs,
     ],
     unit: `${unit}.service`,
+    engine: native.available ? 'native-kernel+cgroup-v2' : 'systemd-kernel-fallback',
+    policyTier: status.tier,
+    nativeDetail: native.detail || native.reason || '',
+    identity,
   };
 }
 
@@ -193,10 +369,16 @@ function writeProfile(server, root, nexu = null) {
 }
 
 function spawnOptions(baseOptions, profile) {
+  const environment = { ...process.env };
+  for (const variable of [
+    'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT', 'LD_DEBUG', 'LD_PROFILE',
+    'GLIBC_TUNABLES', 'GCONV_PATH', 'BASH_ENV', 'ENV', 'PYTHONPATH',
+    'PYTHONHOME', 'PERL5LIB', 'PERLLIB', 'RUBYLIB', 'NODE_OPTIONS',
+  ]) delete environment[variable];
   return {
     ...baseOptions,
     env: {
-      ...process.env,
+      ...environment,
       NEXUS_MARK: '1',
       NEXUS_MARK_CPU_CORES: String(profile.cpuCores),
       NEXUS_MARK_MEMORY_MB: String(profile.memoryMaxMb),
@@ -211,4 +393,6 @@ module.exports = {
   spawnOptions,
   wrapCommand,
   writeProfile,
+  nativeStatus,
+  kernelStatus,
 };

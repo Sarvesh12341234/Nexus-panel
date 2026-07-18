@@ -10,7 +10,7 @@ function showMessage(text, isError = false) {
 
 async function requestJson(url, options) {
   const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-NexusPanel-Request': '1' },
     ...options,
   });
   const data = await response.json().catch(() => ({}));

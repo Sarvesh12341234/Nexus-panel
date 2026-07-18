@@ -58,7 +58,7 @@
           <button class="nav-item" type="button" data-view="network">Network</button>
           <button class="nav-item" type="button" data-view="admins">Admins</button>
           <button class="nav-item" type="button" data-view="security">Security</button>
-          <button class="nav-item" type="button" data-view="fixed">Fixed</button>
+          <button class="nav-item" type="button" data-view="themes">Theme Studio</button>
           <button class="nav-item" type="button" data-view="settings">Settings</button>
           <button class="nav-item" type="button" data-view="terminal" id="terminalNav" hidden>Terminal</button>
         </nav>
@@ -180,6 +180,7 @@
           <div class="surface tool-surface">
             <div class="section-head"><div><p class="eyebrow">Files</p><h2>Server file manager</h2></div></div>
             <div class="file-toolbar">
+              <button type="button" data-action="file-layout-cycle" id="fileLayoutButton">Layout: Default</button>
               <button class="secondary" type="button" data-action="file-up">Up</button>
               <button class="secondary" type="button" data-action="file-select-all">Select All</button>
               <button class="secondary" type="button" data-action="file-clear-selection">Clear</button>
@@ -209,6 +210,7 @@
               <div class="upload-session-list" id="uploadSessionList"></div>
             </div>
             <div class="file-list" id="fileList"></div>
+            <div class="file-preview" id="filePreview" hidden></div>
             <form class="file-editor" id="fileEditor" hidden>
               <label>Editing <input name="path" readonly></label>
               <textarea name="content" spellcheck="false"></textarea>
@@ -268,7 +270,7 @@
             <form class="admin-form" id="adminForm">
               <input name="name" placeholder="Admin name" required>
               <input name="email" type="email" placeholder="Admin email" required>
-              <input name="password" type="password" placeholder="Password" minlength="8" required>
+              <input name="password" type="password" placeholder="Password (12+ characters)" minlength="12" required>
               <select name="assignedServerId" id="adminServerAssign"><option value="">No server assignment</option></select>
               <select name="adminDurationMode"><option value="permanent">Permanent</option><option value="temporary">Temporary</option></select>
               <input name="adminDurationValue" type="number" min="1" max="525600" value="60">
@@ -326,10 +328,11 @@
         <section class="view-section" id="view-security" hidden>
           <div class="surface tool-surface" id="healthPanel"></div>
           <div class="surface tool-surface" id="auditPanel"></div>
+          <div class="surface tool-surface" id="fixedPanel"></div>
         </section>
 
-        <section class="view-section" id="view-fixed" hidden>
-          <div class="surface tool-surface" id="fixedPanel"></div>
+        <section class="view-section" id="view-themes" hidden>
+          <div class="surface tool-surface theme-studio" id="themeStudio"></div>
         </section>
 
         <section class="view-section" id="view-settings" hidden>

@@ -4,7 +4,8 @@ const path = require('node:path');
 const { db } = require('./db');
 
 const SESSION_COOKIE = 'np_session';
-const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
+const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+const SESSION_IDLE_MS = 1000 * 60 * 60 * 2;
 const secretPath = path.join(__dirname, '..', 'data', 'cookie_secret');
 
 function loadCookieSecret() {
@@ -103,7 +104,9 @@ function encodeSession(id) {
 function decodeSession(cookieValue) {
   const [id, signature] = String(cookieValue || '').split('.');
   if (!id || !signature) return null;
-  return signature === sign(id) ? id : null;
+  const provided = Buffer.from(signature);
+  const expected = Buffer.from(sign(id));
+  return provided.length === expected.length && crypto.timingSafeEqual(provided, expected) ? id : null;
 }
 
 function parseCookies(header) {
@@ -136,7 +139,7 @@ function createUser({ email, name, password, role = 'admin', accessLevel = 0, pe
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail.includes('@')) throw new Error('A valid email is required.');
   if (!name || String(name).trim().length < 2) throw new Error('Name must be at least 2 characters.');
-  if (!password || String(password).length < 8) throw new Error('Password must be at least 8 characters.');
+  if (!password || String(password).length < 12) throw new Error('Password must be at least 12 characters.');
 
   const cleanRole = role === 'owner' ? 'owner' : 'admin';
   const cleanAccessLevel = cleanRole === 'owner' ? 100 : Math.max(0, Math.min(100, Number(accessLevel) || 0));
@@ -159,10 +162,14 @@ function createUser({ email, name, password, role = 'admin', accessLevel = 0, pe
   return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid));
 }
 
-function createSession(userId) {
+function createSession(userId, { userAgent = '' } = {}) {
   const id = crypto.randomBytes(32).toString('base64url');
   const expiresAt = Date.now() + SESSION_TTL_MS;
-  db.prepare('INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)').run(id, userId, expiresAt);
+  const now = Date.now();
+  const userAgentHash = userAgent ? crypto.createHash('sha256').update(String(userAgent)).digest('hex') : '';
+  db.prepare('DELETE FROM sessions WHERE user_id = ? AND id NOT IN (SELECT id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 4)').run(userId, userId);
+  db.prepare('INSERT INTO sessions (id, user_id, expires_at, last_seen_at, user_agent_hash) VALUES (?, ?, ?, ?, ?)')
+    .run(id, userId, expiresAt, now, userAgentHash);
   return encodeSession(id);
 }
 
@@ -171,12 +178,12 @@ function clearSession(cookieValue) {
   if (id) db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
 }
 
-function setSessionCookie(res, value) {
-  const useSecureCookie = process.env.NEXUSPANEL_SECURE_COOKIE === '1';
+function setSessionCookie(res, value, { secure = false } = {}) {
+  const useSecureCookie = secure || process.env.NEXUSPANEL_SECURE_COOKIE === '1';
   const maxAge = SESSION_TTL_MS;
   const expiresDate = new Date(Date.now() + maxAge);
   
-  let cookieStr = `${SESSION_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax`;
+  let cookieStr = `${SESSION_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Strict`;
   if (useSecureCookie) cookieStr += '; Secure';
   cookieStr += `; Expires=${expiresDate.toUTCString()}; Max-Age=${Math.floor(maxAge / 1000)}`;
   
@@ -184,7 +191,7 @@ function setSessionCookie(res, value) {
 }
 
 function clearSessionCookie(res) {
-  const cookieStr = `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0`;
+  const cookieStr = `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0`;
   res.setHeader('Set-Cookie', cookieStr);
 }
 
@@ -194,17 +201,27 @@ function authMiddleware(req, _res, next) {
   if (!sessionId) return next();
 
   const row = db.prepare(`
-    SELECT users.*
+    SELECT users.*, sessions.id AS session_id, sessions.last_seen_at AS session_last_seen_at,
+      sessions.user_agent_hash AS session_user_agent_hash
     FROM sessions
     JOIN users ON users.id = sessions.user_id
     WHERE sessions.id = ? AND sessions.expires_at > ?
   `).get(sessionId, Date.now());
 
-  if (row && row.expires_at && row.expires_at <= Date.now()) {
+  const now = Date.now();
+  const requestAgentHash = crypto.createHash('sha256').update(String(req.headers['user-agent'] || '')).digest('hex');
+  const idleExpired = row && Number(row.session_last_seen_at || 0) && now - Number(row.session_last_seen_at) > SESSION_IDLE_MS;
+  const agentMismatch = row?.session_user_agent_hash && row.session_user_agent_hash !== requestAgentHash;
+  if (row && row.expires_at && row.expires_at <= now) {
     db.prepare('DELETE FROM users WHERE id = ? AND role != ?').run(row.id, 'owner');
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+  } else if (row && (idleExpired || agentMismatch)) {
     db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
   } else if (row) {
     req.user = row;
+    if (now - Number(row.session_last_seen_at || 0) > 5 * 60 * 1000) {
+      db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').run(now, sessionId);
+    }
   }
   next();
 }

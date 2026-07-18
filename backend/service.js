@@ -4,9 +4,13 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const serviceName = process.env.NEXUSPANEL_SERVICE_NAME || 'nexuspanel';
+const hostAgentServiceName = `${serviceName}-host-agent`;
+const nexusMarkServiceName = `${serviceName}-nexusmark`;
 const repoRoot = path.resolve(__dirname, '..');
 const nodePath = process.execPath;
 const servicePath = `/etc/systemd/system/${serviceName}.service`;
+const hostAgentServicePath = `/etc/systemd/system/${hostAgentServiceName}.service`;
+const nexusMarkServicePath = `/etc/systemd/system/${nexusMarkServiceName}.service`;
 
 function hasSystemd() {
   return process.platform === 'linux'
@@ -80,6 +84,8 @@ function serviceContent() {
 Description=NexusPanel Minecraft Server Panel
 After=network-online.target
 Wants=network-online.target
+Wants=${hostAgentServiceName}.service ${nexusMarkServiceName}.service
+After=${hostAgentServiceName}.service ${nexusMarkServiceName}.service
 
 [Service]
 Type=simple
@@ -101,6 +107,62 @@ WantedBy=multi-user.target
 `;
 }
 
+function hostAgentServiceContent() {
+  const user = serviceUser();
+  const group = serviceGroup(user);
+  return `[Unit]
+Description=NexusPanel v3 Native Host Agent
+After=local-fs.target
+Before=${serviceName}.service
+
+[Service]
+Type=simple
+User=root
+Group=${group}
+RuntimeDirectory=nexuspanel
+RuntimeDirectoryMode=0750
+ExecStart=/var/lib/nexuspanel/nexus-host-agent
+Restart=on-failure
+RestartSec=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @module @obsolete @privileged @raw-io @reboot @swap
+
+[Install]
+WantedBy=multi-user.target
+`;
+}
+
+function nexusMarkServiceContent() {
+  return `[Unit]
+Description=NexusMark Native Isolation Preflight
+After=local-fs.target
+Before=${serviceName}.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=${repoRoot}
+ExecStart=${nodePath} ${path.join(repoRoot, 'backend', 'nexus_mark_native.js')}
+RemainAfterExit=yes
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target
+`;
+}
+
 function requireLinuxSystemd() {
   if (!hasSystemd()) throw new Error('Systemd is required for VPS background service mode.');
 }
@@ -115,11 +177,19 @@ function install({ start = true } = {}) {
   requireLinuxSystemd();
   requireRoot();
   ensureRuntimePermissions();
+  const { build: buildHostAgent } = require('./host_agent');
+  buildHostAgent();
   fs.writeFileSync(servicePath, serviceContent(), 'utf8');
+  fs.writeFileSync(hostAgentServicePath, hostAgentServiceContent(), 'utf8');
+  fs.writeFileSync(nexusMarkServicePath, nexusMarkServiceContent(), 'utf8');
   installCliCommand();
   runSystemctl(['daemon-reload']);
-  runSystemctl(['enable', serviceName]);
-  if (start) runSystemctl(['restart', serviceName]);
+  runSystemctl(['enable', hostAgentServiceName, nexusMarkServiceName, serviceName]);
+  if (start) {
+    runSystemctl(['restart', nexusMarkServiceName]);
+    runSystemctl(['restart', hostAgentServiceName]);
+    runSystemctl(['restart', serviceName]);
+  }
   console.log(`${serviceName} installed and ${start ? 'started' : 'enabled'}.`);
 }
 
@@ -133,9 +203,11 @@ function installCliCommand() {
 function uninstall() {
   requireLinuxSystemd();
   requireRoot();
-  spawnSync('systemctl', ['stop', serviceName], { stdio: 'inherit' });
-  spawnSync('systemctl', ['disable', serviceName], { stdio: 'inherit' });
+  spawnSync('systemctl', ['stop', serviceName, hostAgentServiceName, nexusMarkServiceName], { stdio: 'inherit' });
+  spawnSync('systemctl', ['disable', serviceName, hostAgentServiceName, nexusMarkServiceName], { stdio: 'inherit' });
   if (fs.existsSync(servicePath)) fs.rmSync(servicePath, { force: true });
+  if (fs.existsSync(hostAgentServicePath)) fs.rmSync(hostAgentServicePath, { force: true });
+  if (fs.existsSync(nexusMarkServicePath)) fs.rmSync(nexusMarkServicePath, { force: true });
   fs.rmSync('/usr/local/bin/nexuspanel', { force: true });
   runSystemctl(['daemon-reload']);
   console.log(`${serviceName} service removed.`);
@@ -150,10 +222,21 @@ function status({ quiet = false } = {}) {
   const installed = fs.existsSync(servicePath);
   const active = spawnSync('systemctl', ['is-active', '--quiet', serviceName], { stdio: 'ignore' }).status === 0;
   const enabled = spawnSync('systemctl', ['is-enabled', '--quiet', serviceName], { stdio: 'ignore' }).status === 0;
+  const hostAgentActive = spawnSync('systemctl', ['is-active', '--quiet', hostAgentServiceName], { stdio: 'ignore' }).status === 0;
+  const nexusMarkActive = spawnSync('systemctl', ['is-active', '--quiet', nexusMarkServiceName], { stdio: 'ignore' }).status === 0;
   if (!quiet) {
-    console.log(JSON.stringify({ available: true, installed, active, enabled, serviceName, servicePath }, null, 2));
+    console.log(JSON.stringify({ available: true, installed, active, enabled, hostAgentActive, nexusMarkActive, serviceName, servicePath }, null, 2));
   }
-  return { available: true, installed, active, enabled, serviceName, servicePath };
+  return { available: true, installed, active, enabled, hostAgentActive, nexusMarkActive, serviceName, servicePath };
+}
+
+function componentAction(component, action) {
+  requireLinuxSystemd();
+  const units = { panel: serviceName, agent: hostAgentServiceName, nexusmark: nexusMarkServiceName };
+  const unit = units[component];
+  if (!unit || !['start', 'stop', 'restart', 'status'].includes(action)) throw new Error('Use panel, agent, or nexusmark with start, stop, restart, or status.');
+  if (action === 'status') return runSystemctl(['status', unit, '--no-pager']);
+  runSystemctl([action, unit]);
 }
 
 function startService() {
@@ -216,6 +299,7 @@ function main() {
   if (command === 'stop') return stopService();
   if (command === 'restart') return restartService();
   if (command === 'logs') return logsService();
+  if (command === 'component') return componentAction(process.argv[3], process.argv[4] || 'status');
   if (command === 'change' && process.argv[3] === 'panelport') return changePort(process.argv[4]);
   throw new Error(`Unknown service command: ${command}`);
 }
@@ -233,11 +317,16 @@ module.exports = {
   hasSystemd,
   install,
   serviceName,
+  hostAgentServiceName,
+  nexusMarkServiceName,
   startService,
   stopService,
   restartService,
   logsService,
   changePort,
   serviceContent,
+  hostAgentServiceContent,
+  nexusMarkServiceContent,
   status,
+  componentAction,
 };

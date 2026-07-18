@@ -77,6 +77,8 @@ db.exec(`
     id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL DEFAULT 0,
+    user_agent_hash TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
@@ -212,6 +214,14 @@ db.exec(`
     FOREIGN KEY (source_server_id) REFERENCES servers(id) ON DELETE CASCADE,
     FOREIGN KEY (target_server_id) REFERENCES servers(id) ON DELETE CASCADE,
     FOREIGN KEY (requester_user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS auth_throttle (
+    key TEXT PRIMARY KEY,
+    failures INTEGER NOT NULL DEFAULT 0,
+    window_started_at INTEGER NOT NULL DEFAULT 0,
+    blocked_until INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS backup_public_links (
@@ -427,6 +437,11 @@ const uploadColumns = {
   chunks_json: "TEXT NOT NULL DEFAULT '[]'",
 };
 
+const sessionColumns = {
+  last_seen_at: 'INTEGER NOT NULL DEFAULT 0',
+  user_agent_hash: "TEXT NOT NULL DEFAULT ''",
+};
+
 const repairPlaybookColumns = {
   pending_validation: 'INTEGER NOT NULL DEFAULT 0',
   validated_at: 'INTEGER NOT NULL DEFAULT 0',
@@ -461,6 +476,11 @@ for (const [name, definition] of Object.entries(uploadColumns)) {
 
 function getUserCount() {
   return db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
+}
+
+const existingSessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map((column) => column.name));
+for (const [name, definition] of Object.entries(sessionColumns)) {
+  if (!existingSessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${definition}`);
 }
 
 const existingRepairPlaybookColumns = new Set(db.prepare('PRAGMA table_info(repair_playbooks)').all().map((column) => column.name));
