@@ -383,6 +383,12 @@ function spawnOptions(baseOptions, profile) {
       NEXUS_MARK_CPU_CORES: String(profile.cpuCores),
       NEXUS_MARK_MEMORY_MB: String(profile.memoryMaxMb),
       NEXUS_MARK_SCOPE: profile.pathScope,
+      HOME: profile.envHome || profile.serverRoot || environment.HOME,
+      TMPDIR: profile.envTemp || path.join(profile.serverRoot || '.', '.nexusmark-tmp'),
+      TEMP: profile.envTemp || path.join(profile.serverRoot || '.', '.nexusmark-tmp'),
+      TMP: profile.envTemp || path.join(profile.serverRoot || '.', '.nexusmark-tmp'),
+      XDG_CACHE_HOME: profile.envCache || path.join(profile.serverRoot || '.', 'runtime', 'cache'),
+      XDG_CONFIG_HOME: profile.envConfig || path.join(profile.serverRoot || '.', 'runtime', 'config'),
     },
     windowsHide: true,
   };

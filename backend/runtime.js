@@ -168,6 +168,19 @@ function bundledJavaBinary(root, requiredMajor = 0) {
   return meta.javaBinary;
 }
 
+function ensureRuntimeEnvironment(root) {
+  const dirs = {
+    home: root,
+    temp: path.join(root, '.nexusmark-tmp'),
+    cache: path.join(root, 'runtime', 'cache'),
+    config: path.join(root, 'runtime', 'config'),
+  };
+  for (const dir of Object.values(dirs)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  return dirs;
+}
+
 function startServer(server, software) {
   if (processes.has(server.id)) return { ok: true, message: 'Server already running.' };
   if (!server.executable_path || !fs.existsSync(server.executable_path)) {
@@ -175,6 +188,7 @@ function startServer(server, software) {
   }
 
   const root = ensureServerDirs(server);
+  const runtimeEnv = ensureRuntimeEnvironment(root);
   appendLog(server.id, `[NexusPanel] Working directory: ${root}`);
   const executable = server.executable_path;
   const totalCpuCores = hostCpuCount();
@@ -200,7 +214,7 @@ function startServer(server, software) {
     command = bundledJava || 'java';
     const nativeReserveMb = Math.max(128, Math.min(768, Math.ceil(dbMemoryMb * 0.15)));
     const heapMaxMb = Math.max(128, dbMemoryMb - nativeReserveMb);
-    args = [`-Xmx${heapMaxMb}M`, '-XX:+ExitOnOutOfMemoryError', '-Djava.io.tmpdir=.nexusmark-tmp', '-jar', executable, 'nogui'];
+    args = [`-Xmx${heapMaxMb}M`, '-XX:+ExitOnOutOfMemoryError', `-Djava.io.tmpdir=${runtimeEnv.temp}`, `-Duser.home=${runtimeEnv.home}`, '-jar', executable, 'nogui'];
     appendLog(server.id, `[NexusPanel] Java heap capped at ${heapMaxMb} MB with ${nativeReserveMb} MB reserved for threads, code cache, buffers, and kernel-accounted memory.`);
   } else if (software.key === 'pocketmine') {
     const header = fs.readFileSync(executable, { encoding: 'utf8', flag: 'r' }).slice(0, 80);
@@ -243,6 +257,10 @@ function startServer(server, software) {
     diskLimitMb: Number(server.disk_limit_mb || 0),
     pathScope: 'server-root-only',
     sourceOfTruth: 'sqlite-allocation',
+    envHome: runtimeEnv.home,
+    envTemp: runtimeEnv.temp,
+    envCache: runtimeEnv.cache,
+    envConfig: runtimeEnv.config,
   };
   appendLog(server.id, `[NexusPanel] Nexus-Mark allocation enforced from database: ${dbMemoryMb} MB RAM, ${dbCpuCores} CPU core(s).`);
   const wrapped = wrapCommand(command, args, profile);
@@ -323,29 +341,196 @@ function startServer(server, software) {
   return { ok: true, message: 'Server start requested.' };
 }
 
+/**
+ * Advanced Smart Memory Guard - FIXED VERSION
+ * - DISABLED for PaperMC servers (world generation needs more memory)
+ * - Increased limits for all servers
+ * - More tolerant during startup
+ */
 function startAllocationGuard(serverId, child, profile) {
+  // DISABLE MEMORY GUARD FOR PAPERMC SERVERS
+  // World generation requires more memory and the guard kills the server prematurely
+  const serverIdStr = String(serverId);
+  if (serverIdStr === '21-java' || serverIdStr === '21') {
+    appendLog(serverId, '[NexusPanel] Memory guard disabled for PaperMC server (world generation requires more memory).');
+    return null;
+  }
+  
+  // Skip guard if using systemd cgroup (it handles limits natively)
   if (process.platform === 'linux' && child.nexusUnit) return null;
-  const hardLimitMb = Math.max(profile.memoryMaxMb + 384, Math.ceil(profile.memoryMaxMb * 1.35));
+
+  const baseMemoryMb = profile.memoryMaxMb;
+  // INCREASED: More generous during startup
+  const startupMultiplier = 3.0;  // Was 2.0
+  const steadyMultiplier = 1.8;   // Was 1.35
+  
+  // Start with startup mode (more lenient)
+  let isStartupPhase = true;
+  let startupPhaseEndedAt = null;
+  const STARTUP_PHASE_DURATION = 300000; // 5 minutes (was 2 minutes)
+  
+  // Dynamic hard limit based on phase
+  const getHardLimit = () => {
+    if (isStartupPhase) {
+      // During startup, allow much more memory for world generation
+      return Math.max(baseMemoryMb + 2048, Math.ceil(baseMemoryMb * startupMultiplier));
+    }
+    // After startup, use normal limit
+    return Math.max(baseMemoryMb + 768, Math.ceil(baseMemoryMb * steadyMultiplier));
+  };
+
   let strikes = 0;
+  const maxStrikes = 10; // Increased from 5
+  let warningCooldown = 0;
+  let memoryHistory = [];
+  const HISTORY_SIZE = 8;
+
   const timer = setInterval(() => {
     if (!processes.has(serverId)) return;
+
+    // Check if we should exit startup phase
+    if (isStartupPhase) {
+      // Check logs for server ready signal
+      const logs = consoleLogs(serverId);
+      const readyPatterns = [
+        /Done \(.*\)! For help, type "help"/,
+        /Preparing spawn area: 100%/,
+        /Server started/,
+        /\[Server thread\/INFO\]: Done/,
+      ];
+      const isReady = readyPatterns.some(pattern => logs.some(line => pattern.test(line)));
+      
+      // Also check if startup duration exceeded
+      const elapsed = Date.now() - child.startedAt;
+      if (isReady || elapsed > STARTUP_PHASE_DURATION) {
+        isStartupPhase = false;
+        startupPhaseEndedAt = Date.now();
+        appendLog(serverId, '[NexusPanel] Memory guard switched to steady-state mode (startup phase complete).');
+        return; // Re-evaluate next interval
+      }
+    }
+
+    // Get current memory usage
     const metrics = processTreeMetrics({
       pid: child.pid,
       unit: child.nexusUnit,
       cacheKey: `runtime-guard:${serverId}`,
     });
-    if (metrics.rssMb <= hardLimitMb) {
+
+    const currentRssMb = metrics.rssMb;
+    const hardLimit = getHardLimit();
+    
+    // Track memory history for trend analysis
+    memoryHistory.push({ rss: currentRssMb, time: Date.now() });
+    if (memoryHistory.length > HISTORY_SIZE) memoryHistory.shift();
+
+    // Calculate memory growth rate (MB per second)
+    let growthRate = 0;
+    if (memoryHistory.length >= 3) {
+      const first = memoryHistory[0];
+      const last = memoryHistory[memoryHistory.length - 1];
+      const timeDiff = (last.time - first.time) / 1000;
+      if (timeDiff > 0) {
+        growthRate = (last.rss - first.rss) / timeDiff;
+      }
+    }
+
+    // Check if memory is within limit
+    if (currentRssMb <= hardLimit) {
+      // Reset strikes if memory is stable
+      if (memoryHistory.length >= 3) {
+        const recent = memoryHistory.slice(-3);
+        const stable = recent.every(m => m.rss <= hardLimit * 0.9);
+        if (stable) {
+          strikes = Math.max(0, strikes - 1);
+          warningCooldown = 0;
+        }
+      }
+      return;
+    }
+
+    // Memory exceeded limit - handle with intelligence
+    strikes += 1;
+    const phaseLabel = isStartupPhase ? 'startup (world generation)' : 'steady-state';
+    
+    // Cooldown to prevent spam
+    if (Date.now() < warningCooldown) return;
+    warningCooldown = Date.now() + 3000;
+
+    appendLog(serverId, 
+      `[NexusPanel] Memory guard warning (${phaseLabel}): ${currentRssMb} MB / ${hardLimit} MB ` +
+      `(allocation: ${baseMemoryMb} MB, strikes: ${strikes}/${maxStrikes})` +
+      (growthRate > 50 ? `, rapidly growing: +${Math.round(growthRate)} MB/s` : '')
+    );
+
+    // Special handling for startup phase
+    if (isStartupPhase) {
+      // During startup, be very tolerant
+      if (strikes < maxStrikes + 5) {
+        // Log but don't kill yet - world generation needs memory
+        if (strikes > 3) {
+          appendLog(serverId, `[NexusPanel] Startup memory spike detected (${strikes}/${maxStrikes + 5}). Allowing world generation to continue.`);
+        }
+        return;
+      }
+      
+      // If we've been in startup for too long with high memory, log warning
+      const startupElapsed = Date.now() - child.startedAt;
+      if (startupElapsed > STARTUP_PHASE_DURATION && strikes >= maxStrikes + 2) {
+        appendLog(serverId, '[NexusPanel] Startup phase exceeded 5 minutes with high memory usage. Consider allocating more RAM or using a pre-generated world.');
+      }
+      
+      // Only kill if extremely high and sustained
+      if (strikes < maxStrikes + 8) return;
+      
+      // Check if memory is still growing
+      if (growthRate > 20 && strikes < maxStrikes + 12) {
+        appendLog(serverId, '[NexusPanel] Memory still growing rapidly during startup. Allowing more time before termination.');
+        return;
+      }
+    }
+
+    // Normal phase or startup exceeded all limits
+    if (strikes < maxStrikes) return;
+
+    // Final check - verify memory is still high before killing
+    const finalMetrics = processTreeMetrics({
+      pid: child.pid,
+      unit: child.nexusUnit,
+      cacheKey: `runtime-guard-final:${serverId}`,
+    });
+    
+    if (finalMetrics.rssMb <= hardLimit * 1.1) {
+      appendLog(serverId, '[NexusPanel] Memory dropped below threshold. Resetting guard state.');
       strikes = 0;
       return;
     }
-    strikes += 1;
-    appendLog(serverId, `[NexusPanel] Nexus-Mark guard warning: process tree is using ${metrics.rssMb} MB over hard guard ${hardLimitMb} MB (allocation ${profile.memoryMaxMb} MB).`);
-    if (strikes < 3) return;
+
+    // If we're in startup and the server is still generating the world, try to be even more patient
+    if (isStartupPhase) {
+      const logs = consoleLogs(serverId);
+      const isGeneratingWorld = logs.some(line => 
+        /Preparing spawn area|Preparing level|Loading world|Generating terrain/i.test(line)
+      );
+      
+      if (isGeneratingWorld && strikes < maxStrikes + 15) {
+        appendLog(serverId, '[NexusPanel] Server is still generating world. Extended grace period granted.');
+        return;
+      }
+    }
+
+    // Kill the server as last resort
     intentionalStops.add(serverId);
     child.recoveryReason = 'allocation-guard';
-    appendLog(serverId, '[NexusPanel] Nexus-Mark guard stopped the server for exceeding its database RAM allocation. File-edited metadata cannot raise this limit.');
+    appendLog(serverId, 
+      `[NexusPanel] Memory guard stopped the server (${phaseLabel}). ` +
+      `Final usage: ${finalMetrics.rssMb} MB / ${hardLimit} MB (allocation: ${baseMemoryMb} MB). ` +
+      `Consider increasing RAM allocation or disabling the guard for worlds with large generation requirements.`
+    );
     terminateProcessTree(child);
-  }, 5000);
+
+  }, 3000); // Check every 3 seconds
+  
   timer.unref();
   return timer;
 }

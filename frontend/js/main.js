@@ -2517,7 +2517,7 @@ async function fetchTunnelPlan() {
   const protocol = document.querySelector('#normalTunnelProtocol')?.value || 'auto';
   const params = new URLSearchParams({ protocol });
   if (server && !['http', 'https'].includes(protocol)) params.set('serverId', server.id);
-  return api(`/api/tunnels/normal-plan?${params}`);
+  return api(`/api/tunnels/normal-plan?${params}`, { timeoutMs: 4500 });
 }
 
 async function refreshTunnelOutput(prefix = '') {
@@ -3016,7 +3016,7 @@ async function getSoftwareVersions(key, force = false) {
   if (!force && versionCache.has(key)) return versionCache.get(key);
   let versions = [];
   try {
-    const data = await api(`/api/software/${encodeURIComponent(key)}/versions`);
+    const data = await api(`/api/software/${encodeURIComponent(key)}/versions`, { timeoutMs: 5000 });
     versions = Array.isArray(data.versions) ? data.versions.filter(Boolean) : [];
   } catch (error) {
     showToast(`Version lookup failed for ${key}: ${error.message}`);
@@ -3244,6 +3244,8 @@ function restoreShellScrollSoon(position = state.shellScroll) {
   restoreShellScroll(position);
   window.requestAnimationFrame(() => restoreShellScroll(position));
   window.setTimeout(() => restoreShellScroll(position), 90);
+  window.setTimeout(() => restoreShellScroll(position), 240);
+  window.setTimeout(() => restoreShellScroll(position), 600);
 }
 
 function accessName(level) {
@@ -4529,8 +4531,13 @@ document.addEventListener('click', async (event) => {
         }
       }
       showToast(`${op} requested.`);
-      await refresh();
-      if (state.activeView === 'console') await renderConsole({ force: true });
+      if (op === 'stop' || op === 'kill') server.status = 'offline';
+      if (op === 'start' || op === 'restart') server.status = 'online';
+      syncConsoleActionButtons(server, server.status);
+      renderStats();
+      updateLiveServerDom();
+      refreshServerStatusOnly().catch(() => {});
+      if (state.activeView === 'console') renderConsole({ force: true, timeoutMs: 500 }).catch(() => {});
       return;
     }
     if (action === 'agree-eula') {

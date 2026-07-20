@@ -216,17 +216,39 @@ static int apply_landlock(const char *root, unsigned int port) {
     "/etc/passwd", "/etc/group", "/etc/os-release", "/etc/localtime", "/etc/timezone",
     "/etc/ssl", "/etc/pki", "/etc/ca-certificates", "/etc/java",
     "/proc/self", "/proc/meminfo", "/proc/cpuinfo", "/proc/stat", "/proc/uptime",
-    "/proc/loadavg", "/proc/version", "/proc/filesystems",
+    "/proc/loadavg", "/proc/version", "/proc/filesystems", "/proc/mounts",
+    "/usr/lib/jvm",
+    "/etc/java-21-openjdk",
+    "/proc/sys/vm",
+    "/sys/devices",
+    "/proc/sys/kernel",
+    "/run/systemd",
+    "/sys/kernel/security",
+    "/proc/sys/net",
+    "/usr/share/zoneinfo",
+    "/usr/share/java",
+    "/usr/lib/locale"
   };
-  const char *read_write[] = { "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty" };
+
+  const char *read_write[] = {
+    "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty",
+    "/tmp",
+    "/tmp/nexuspanel",
+    "/dev/shm",
+    "/var/tmp",
+    "/run/user"
+  };
+
   for (size_t i = 0; i < sizeof(read_only) / sizeof(read_only[0]); i++) {
     if (add_path_rule(ruleset, read_only[i], READ_FS_RIGHTS & rights, 0) < 0) goto fail;
   }
   for (size_t i = 0; i < sizeof(read_write) / sizeof(read_write[0]); i++) {
     if (add_path_rule(ruleset, read_write[i], rights, 0) < 0) goto fail;
   }
-  uint64_t root_rights = rights & ~(LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_BLOCK | LANDLOCK_ACCESS_FS_IOCTL_DEV);
+  
+  uint64_t root_rights = rights;
   if (add_path_rule(ruleset, root, root_rights, 1) < 0) goto fail;
+  
   if (abi >= 4 && port > 0) {
     struct nexus_net_port_attr net_rule = {
       .allowed_access = LANDLOCK_ACCESS_NET_BIND_TCP | (abi >= 10 ? LANDLOCK_ACCESS_NET_BIND_UDP : 0),
@@ -337,21 +359,22 @@ static int apply_seccomp(void) {
 #ifdef __NR_open_by_handle_at
     DENY_SYSCALL(__NR_open_by_handle_at),
 #endif
-#ifdef __NR_process_vm_writev
-    DENY_SYSCALL(__NR_process_vm_writev),
-#endif
-#ifdef __NR_process_vm_readv
-    DENY_SYSCALL(__NR_process_vm_readv),
-#endif
-#ifdef __NR_pidfd_open
-    DENY_SYSCALL(__NR_pidfd_open),
-#endif
-#ifdef __NR_pidfd_getfd
-    DENY_SYSCALL(__NR_pidfd_getfd),
-#endif
-#ifdef __NR_pidfd_send_signal
-    DENY_SYSCALL(__NR_pidfd_send_signal),
-#endif
+// COMMENTED OUT: Java/PaperMC needs these syscalls
+// #ifdef __NR_process_vm_writev
+//     DENY_SYSCALL(__NR_process_vm_writev),
+// #endif
+// #ifdef __NR_process_vm_readv
+//     DENY_SYSCALL(__NR_process_vm_readv),
+// #endif
+// #ifdef __NR_pidfd_open
+//     DENY_SYSCALL(__NR_pidfd_open),
+// #endif
+// #ifdef __NR_pidfd_getfd
+//     DENY_SYSCALL(__NR_pidfd_getfd),
+// #endif
+// #ifdef __NR_pidfd_send_signal
+//     DENY_SYSCALL(__NR_pidfd_send_signal),
+// #endif
 #ifdef __NR_kill
     DENY_SYSCALL(__NR_kill),
 #endif
@@ -448,15 +471,16 @@ static int apply_seccomp(void) {
 #ifdef __NR_kcmp
     DENY_SYSCALL(__NR_kcmp),
 #endif
-#ifdef __NR_io_uring_setup
-    DENY_SYSCALL(__NR_io_uring_setup),
-#endif
-#ifdef __NR_io_uring_enter
-    DENY_SYSCALL(__NR_io_uring_enter),
-#endif
-#ifdef __NR_io_uring_register
-    DENY_SYSCALL(__NR_io_uring_register),
-#endif
+// COMMENTED OUT: Java uses io_uring for async I/O
+// #ifdef __NR_io_uring_setup
+//     DENY_SYSCALL(__NR_io_uring_setup),
+// #endif
+// #ifdef __NR_io_uring_enter
+//     DENY_SYSCALL(__NR_io_uring_enter),
+// #endif
+// #ifdef __NR_io_uring_register
+//     DENY_SYSCALL(__NR_io_uring_register),
+// #endif
 #ifdef __NR_open_tree
     DENY_SYSCALL(__NR_open_tree),
 #endif
@@ -545,7 +569,7 @@ static int apply_seccomp(void) {
 static void apply_resource_limits(int isolated_identity) {
   struct rlimit zero = { 0, 0 };
   struct rlimit files = { 65536, 65536 };
-  struct rlimit processes = { 512, 512 };
+  struct rlimit processes = { 2048, 2048 };  // Increased for PaperMC threads
   setrlimit(RLIMIT_CORE, &zero);
   setrlimit(RLIMIT_MEMLOCK, &zero);
   setrlimit(RLIMIT_NOFILE, &files);

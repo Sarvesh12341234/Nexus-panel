@@ -1709,7 +1709,7 @@ const propertySchema = [
   { key: 'motd', label: 'MOTD', type: 'text', editions: ['java'] },
   { key: 'level-name', label: 'World Name', type: 'text', editions: ['bedrock'] },
   { key: 'level-seed', label: 'World Seed', type: 'text', editions: ['bedrock'] },
-  { key: 'level-type', label: 'World Type', type: 'select', options: ['DEFAULT', 'FLAT', 'LEGACY'], editions: ['bedrock'] },
+  { key: 'level-type', label: 'World Type', type: 'select', options: ['minecraft:normal', 'minecraft:flat', 'minecraft:large_biomes', 'DEFAULT', 'FLAT', 'LEGACY'], editions: ['java', 'bedrock'] },
   { key: 'gamemode', label: 'Gamemode', type: 'select', options: ['survival', 'creative', 'adventure'], editions: ['java', 'bedrock'] },
   { key: 'difficulty', label: 'Difficulty', type: 'select', options: ['peaceful', 'easy', 'normal', 'hard'], editions: ['java', 'bedrock'] },
   { key: 'max-players', label: 'Max Players', type: 'number', editions: ['java', 'bedrock'] },
@@ -3603,8 +3603,8 @@ function commandExists(command) {
   const resolved = resolveCommand(command);
   if (!resolved || resolved === command) {
     const check = process.platform === 'win32'
-      ? spawnSync('where.exe', [command], { encoding: 'utf8', windowsHide: true, env: commandEnv() })
-      : spawnSync('/bin/sh', ['-lc', `command -v ${command}`], { encoding: 'utf8', windowsHide: true, env: commandEnv() });
+      ? spawnSync('where.exe', [command], { encoding: 'utf8', windowsHide: true, env: commandEnv(), timeout: 1200 })
+      : spawnSync('/bin/sh', ['-lc', `command -v ${command}`], { encoding: 'utf8', windowsHide: true, env: commandEnv(), timeout: 1200 });
     return !check.error && check.status === 0;
   }
   return true;
@@ -3677,7 +3677,7 @@ async function startNgrokTunnel(server, requestedProtocol = '') {
   const existing = tunnelProcesses.get(key);
   if (processRunning(existing)) return ngrokStatus(server);
   const env = commandEnv();
-  const auth = spawnSync(ngrokCommand, ['config', 'add-authtoken', token], { encoding: 'utf8', windowsHide: true, env });
+  const auth = spawnSync(ngrokCommand, ['config', 'add-authtoken', token], { encoding: 'utf8', windowsHide: true, env, timeout: 8000 });
   if (auth.error || auth.status !== 0) {
     const detail = (auth.stderr || auth.stdout || auth.error?.message || '').slice(-800);
     const hint = /ERR_NGROK_107|authentication failed|invalid/i.test(detail)
@@ -3854,6 +3854,7 @@ function readPlayitOutput() {
       encoding: 'utf8',
       windowsHide: true,
       env: commandEnv(),
+      timeout: 1500,
       maxBuffer: 1024 * 1024,
     });
     output = `${output}\n${logs.stdout || ''}\n${logs.stderr || ''}`;
@@ -3927,8 +3928,8 @@ function playitStatus() {
   let service = { active: false, enabled: false, detail: '' };
   if (process.platform === 'linux' && commandExists('systemctl')) {
     const systemctl = resolveCommand('systemctl');
-    const active = spawnSync(systemctl, ['is-active', 'playit'], { encoding: 'utf8', windowsHide: true, env: commandEnv() });
-    const enabled = spawnSync(systemctl, ['is-enabled', 'playit'], { encoding: 'utf8', windowsHide: true, env: commandEnv() });
+    const active = spawnSync(systemctl, ['is-active', 'playit'], { encoding: 'utf8', windowsHide: true, env: commandEnv(), timeout: 1200 });
+    const enabled = spawnSync(systemctl, ['is-enabled', 'playit'], { encoding: 'utf8', windowsHide: true, env: commandEnv(), timeout: 1200 });
     service = {
       active: active.status === 0,
       enabled: enabled.status === 0,
@@ -5658,88 +5659,95 @@ app.post('/api/servers/:id/software/install', requirePermission(capabilities.SOF
   }
 
   const root = ensureServerDirs({ ...target, server_path: target.server_path || serverPath(target.id, target.name) });
-  const executablePath = path.join(root, 'software', selectedSoftware.executable);
-  const downloadPath = selectedSoftware.key === 'forge'
-    ? path.join(root, 'runtime', 'forge-installer.jar')
-    : selectedSoftware.key === 'bedrock-vanilla'
-    ? path.join(root, 'software', `${selectedSoftware.folder}.zip`)
-    : executablePath;
-  const version = String(req.body.softwareVersion || target.software_version || 'latest').trim().slice(0, 32) || 'latest';
-  db.prepare(`
-    UPDATE servers
-    SET server_path = ?, software_key = ?, software_version = ?, executable_path = ?,
-        install_status = 'installing', install_progress = 10,
-        install_message = 'Resolving downloadable version'
-    WHERE id = ?
-  `).run(root, selectedSoftware.key, version, executablePath, id);
+const executablePath = path.join(root, selectedSoftware.executable);
 
-  resolveDownload(selectedSoftware, version)
-    .then(async (download) => {
-      await ensureSoftwareRequirements(selectedSoftware, id, (progress, message) => {
+// Ensure the server root exists
+await fs.promises.mkdir(path.dirname(executablePath), { recursive: true });
+
+const downloadPath = selectedSoftware.key === 'forge'
+  ? path.join(root, 'runtime', 'forge-installer.jar')
+  : selectedSoftware.key === 'bedrock-vanilla'
+  ? path.join(root, 'software', `${selectedSoftware.folder}.zip`)
+  : executablePath;  // ✅ Download directly to server root
+
+const version = String(req.body.softwareVersion || target.software_version || 'latest').trim().slice(0, 32) || 'latest';
+db.prepare(`
+  UPDATE servers
+  SET server_path = ?, software_key = ?, software_version = ?, executable_path = ?,
+      install_status = 'installing', install_progress = 10,
+      install_message = 'Resolving downloadable version'
+  WHERE id = ?
+`).run(root, selectedSoftware.key, version, executablePath, id);
+
+resolveDownload(selectedSoftware, version)
+  .then(async (download) => {
+    await ensureSoftwareRequirements(selectedSoftware, id, (progress, message) => {
+      db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);
+    }, download.version || version, root);
+    if (selectedSoftware.key === 'pocketmine') {
+      await installPocketMineRuntime(root, id, (progress, message) => {
         db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);
-      }, download.version || version, root);
-      if (selectedSoftware.key === 'pocketmine') {
-        await installPocketMineRuntime(root, id, (progress, message) => {
-          db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);
-        });
-      }
-      const baseProgress = selectedSoftware.key === 'pocketmine' ? 55 : 18;
-      db.prepare('UPDATE servers SET software_version = ?, install_progress = ?, install_message = ? WHERE id = ?')
-        .run(download.version, baseProgress, `Downloading ${selectedSoftware.name} ${download.version}`, id);
-      if (selectedSoftware.key === 'forge') {
-        await installForgeServer(root, id, download, executablePath, (progress, message) => {
-          db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);
-        });
-      } else {
-        await downloadToFile(download.url, downloadPath, (progress) => {
-          db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?')
-            .run(selectedSoftware.key === 'pocketmine' ? Math.max(55, Math.min(98, 55 + Math.round(progress * 0.43))) : Math.max(18, progress), `Downloading ${selectedSoftware.name} ${download.version}`, id);
-        });
-      }
-      if (['java-vanilla', 'paper', 'purpur', 'fabric'].includes(selectedSoftware.key)) {
-        await verifyJarDownload(executablePath, selectedSoftware.name);
-      }
-      if (selectedSoftware.key === 'bedrock-vanilla' && download.archive) {
-        const extractDir = path.join(root, 'software', 'bedrock-extract');
-        db.prepare('UPDATE servers SET install_progress = 96, install_message = ? WHERE id = ?').run('Extracting Bedrock server zip', id);
-        extractArchive(downloadPath, extractDir);
-        copyDirectoryContents(extractDir, root);
-        const bedrockBinary = findFile(root, selectedSoftware.executable);
-        if (!bedrockBinary) throw new Error('Bedrock archive extracted but server executable was not found.');
-        await fs.promises.rm(downloadPath, { force: true }).catch(() => {});
-        await fs.promises.rm(extractDir, { recursive: true, force: true }).catch(() => {});
-        db.prepare('UPDATE servers SET executable_path = ? WHERE id = ?').run(bedrockBinary, id);
-      }
-      if (process.platform !== 'win32' && selectedSoftware.key === 'bedrock-vanilla') {
-        await fs.promises.chmod(db.prepare('SELECT executable_path FROM servers WHERE id = ?').get(id).executable_path, 0o755).catch(() => {});
-      }
-      if (selectedSoftware.key === 'pocketmine') {
-        const runtimeMeta = JSON.parse(await fs.promises.readFile(path.join(root, 'runtime', 'pocketmine-php.json'), 'utf8'));
-        await fs.promises.writeFile(
-          path.join(root, process.platform === 'win32' ? 'start-pocketmine.bat' : 'start-pocketmine.sh'),
-          process.platform === 'win32'
-            ? `@echo off\r\n"${runtimeMeta.phpBinary}" "${executablePath}" --no-wizard --disable-ansi\r\npause\r\n`
-            : `#!/bin/sh\n"${runtimeMeta.phpBinary}" "${executablePath}" --no-wizard --disable-ansi\n`,
-          'utf8',
-        );
-      }
-      db.prepare(`
-        UPDATE servers
-        SET install_status = 'installed', install_progress = 100, install_message = ?
-        WHERE id = ?
-      `).run(`Installed ${selectedSoftware.name} ${download.version}`, id);
-      appendLog(id, `[NexusPanel] Installed ${selectedSoftware.name} ${download.version}.`);
-    })
-    .catch((error) => {
-      db.prepare(`
-        UPDATE servers
-        SET install_status = 'failed', install_progress = 0, install_message = ?
-        WHERE id = ?
-      `).run(error.message, id);
-      appendLog(id, `[NexusPanel] Install failed: ${error.message}`);
-    });
+      });
+    }
+    const baseProgress = selectedSoftware.key === 'pocketmine' ? 55 : 18;
+    db.prepare('UPDATE servers SET software_version = ?, install_progress = ?, install_message = ? WHERE id = ?')
+      .run(download.version, baseProgress, `Downloading ${selectedSoftware.name} ${download.version}`, id);
+    if (selectedSoftware.key === 'forge') {
+      await installForgeServer(root, id, download, executablePath, (progress, message) => {
+        db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?').run(progress, message, id);
+      });
+    } else {
+      await downloadToFile(download.url, downloadPath, (progress) => {
+        db.prepare('UPDATE servers SET install_progress = ?, install_message = ? WHERE id = ?')
+          .run(selectedSoftware.key === 'pocketmine' ? Math.max(55, Math.min(98, 55 + Math.round(progress * 0.43))) : Math.max(18, progress), `Downloading ${selectedSoftware.name} ${download.version}`, id);
+      });
+    }
+    if (['java-vanilla', 'paper', 'purpur', 'fabric'].includes(selectedSoftware.key)) {
+      // ✅ FIXED: Verify the download exists and is valid in the server root
+      await verifyJarDownload(executablePath, selectedSoftware.name);
+      // No copy needed - it's already in the right place!
+    }
+    if (selectedSoftware.key === 'bedrock-vanilla' && download.archive) {
+      const extractDir = path.join(root, 'software', 'bedrock-extract');
+      db.prepare('UPDATE servers SET install_progress = 96, install_message = ? WHERE id = ?').run('Extracting Bedrock server zip', id);
+      extractArchive(downloadPath, extractDir);
+      copyDirectoryContents(extractDir, root);
+      const bedrockBinary = findFile(root, selectedSoftware.executable);
+      if (!bedrockBinary) throw new Error('Bedrock archive extracted but server executable was not found.');
+      await fs.promises.rm(downloadPath, { force: true }).catch(() => {});
+      await fs.promises.rm(extractDir, { recursive: true, force: true }).catch(() => {});
+      db.prepare('UPDATE servers SET executable_path = ? WHERE id = ?').run(bedrockBinary, id);
+    }
+    if (process.platform !== 'win32' && selectedSoftware.key === 'bedrock-vanilla') {
+      await fs.promises.chmod(db.prepare('SELECT executable_path FROM servers WHERE id = ?').get(id).executable_path, 0o755).catch(() => {});
+    }
+    if (selectedSoftware.key === 'pocketmine') {
+      const runtimeMeta = JSON.parse(await fs.promises.readFile(path.join(root, 'runtime', 'pocketmine-php.json'), 'utf8'));
+      await fs.promises.writeFile(
+        path.join(root, process.platform === 'win32' ? 'start-pocketmine.bat' : 'start-pocketmine.sh'),
+        process.platform === 'win32'
+          ? `@echo off\r\n"${runtimeMeta.phpBinary}" "${executablePath}" --no-wizard --disable-ansi\r\npause\r\n`
+          : `#!/bin/sh\n"${runtimeMeta.phpBinary}" "${executablePath}" --no-wizard --disable-ansi\n`,
+        'utf8',
+      );
+    }
+    db.prepare(`
+      UPDATE servers
+      SET install_status = 'installed', install_progress = 100, install_message = ?
+      WHERE id = ?
+    `).run(`Installed ${selectedSoftware.name} ${download.version}`, id);
+    appendLog(id, `[NexusPanel] Installed ${selectedSoftware.name} ${download.version}.`);
+  })
+  .catch((error) => {
+    db.prepare(`
+      UPDATE servers
+      SET install_status = 'failed', install_progress = 0, install_message = ?
+      WHERE id = ?
+    `).run(error.message, id);
+    appendLog(id, `[NexusPanel] Install failed: ${error.message}`);
+  });
 
-  res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(id)) });
+res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(id)) });
 }));
 
 app.get('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
@@ -5948,7 +5956,7 @@ app.get('/api/servers/:id/console/stream', requirePermission(capabilities.CONSOL
   };
   writeEvent('snapshot', { status: runtimeStatus(id), lines: consoleLogs(id) });
   const unsubscribe = subscribeConsole(id, (line) => writeEvent('line', { line, status: runtimeStatus(id) }));
-  const heartbeat = setInterval(() => writeEvent('ping', { status: runtimeStatus(id), at: Date.now() }), 15000);
+  const heartbeat = setInterval(() => writeEvent('ping', { status: runtimeStatus(id), at: Date.now() }), 2000);
   heartbeat.unref();
   req.on('close', () => {
     clearInterval(heartbeat);
@@ -7274,4 +7282,3 @@ start().catch((error) => {
   console.error(error.message);
   process.exit(1);
 });
-

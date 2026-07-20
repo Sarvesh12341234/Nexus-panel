@@ -78,6 +78,12 @@ const SOFTWARE = [
 const CACHE_MS = 10 * 60 * 1000;
 const CACHE_SECONDS = Math.round(CACHE_MS / 1000);
 const cache = new Map();
+const FALLBACK_MINECRAFT_VERSIONS = [
+  '1.21.8', '1.21.7', '1.21.6', '1.21.5', '1.21.4', '1.21.3', '1.21.2', '1.21.1',
+  '1.20.6', '1.20.4', '1.20.2', '1.20.1', '1.19.4', '1.19.2', '1.18.2', '1.17.1',
+  '1.16.5', '1.12.2', '1.8.9',
+];
+const FALLBACK_BEDROCK_VERSIONS = ['1.21.100.6', '1.21.93.1', '1.21.90.3', '1.21.84.1', '1.21.80.3'];
 
 async function cached(key, loader) {
   const hit = cache.get(key);
@@ -110,6 +116,7 @@ async function fetchJson(url) {
       const response = await fetch(url, {
         redirect: 'follow',
         headers: { 'User-Agent': 'NexusPanel/2.0 (+https://github.com/Sarvesh12341234/Nexus-panel)' },
+        signal: AbortSignal.timeout(3500),
       });
       if (response.status === 404) throw new Error(`Upstream file not found: ${url}`);
       if (!response.ok) throw new Error(`Upstream request failed: ${response.status}`);
@@ -213,6 +220,7 @@ async function forgeArtifactVersions() {
   const xml = await cached('forge-maven-metadata', async () => {
     const response = await fetch('https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml', {
       headers: { 'User-Agent': 'NexusPanel/2.0 (+https://github.com/Sarvesh12341234/Nexus-panel)' },
+      signal: AbortSignal.timeout(4500),
     });
     if (!response.ok) throw new Error(`Forge metadata failed: ${response.status}`);
     return response.text();
@@ -237,42 +245,100 @@ async function softwareVersions(key) {
   if (!software) throw new Error('Unknown software.');
 
   if (software.versionMode === 'papermc') {
-    const project = await cached('papermc-paper-v3', () => fetchJson('https://fill.papermc.io/v3/projects/paper'));
-    const groupedVersions = project.versions && typeof project.versions === 'object' && !Array.isArray(project.versions)
-      ? Object.values(project.versions).flat()
-      : project.versions;
-    const versions = [...new Set((Array.isArray(groupedVersions) ? groupedVersions : [])
-      .map((version) => String(version || '').trim())
-      .filter(Boolean))];
-    const compatible = hostJavaCompatibleVersions(versions);
-    return compatible.length ? compatible : ['manual'];
+    try {
+      const project = await cached('papermc-paper-v3', () => fetchJson('https://fill.papermc.io/v3/projects/paper'));
+      
+      let versions = [];
+      if (project.versions) {
+        if (Array.isArray(project.versions)) {
+          versions = project.versions;
+        } else if (typeof project.versions === 'object') {
+          // Flatten grouped versions from v3 API
+          for (const group of Object.values(project.versions)) {
+            if (Array.isArray(group)) {
+              versions.push(...group);
+            }
+          }
+        }
+      }
+      
+      versions = [...new Set(versions.map(v => String(v).trim()).filter(Boolean))];
+      const compatible = hostJavaCompatibleVersions(versions);
+      if (compatible.length) return compatible;
+    } catch (error) {
+      console.error(`Failed to fetch Paper versions: ${error.message}`);
+    }
+    try {
+      const project = await cached('papermc-paper-v2', () => fetchJson('https://api.papermc.io/v2/projects/paper'));
+      const compatible = hostJavaCompatibleVersions([...(project.versions || [])].reverse());
+      if (compatible.length) return compatible;
+    } catch (error) {
+      console.error(`Failed to fetch Paper v2 versions: ${error.message}`);
+    }
+    return hostJavaCompatibleVersions(FALLBACK_MINECRAFT_VERSIONS);
   }
 
   if (software.versionMode === 'purpur') {
-    const project = await cached('purpur-project', () => fetchJson('https://api.purpurmc.org/v2/purpur'));
-    const compatible = hostJavaCompatibleVersions([...project.versions].reverse());
-    return compatible.length ? compatible : ['manual'];
+    try {
+      const project = await cached('purpur-project', () => fetchJson('https://api.purpurmc.org/v2/purpur'));
+      const compatible = hostJavaCompatibleVersions([...project.versions].reverse());
+      return compatible.length ? compatible : hostJavaCompatibleVersions(FALLBACK_MINECRAFT_VERSIONS);
+    } catch (error) {
+      console.error(`Failed to fetch Purpur versions: ${error.message}`);
+      return hostJavaCompatibleVersions(FALLBACK_MINECRAFT_VERSIONS);
+    }
   }
 
-  if (software.versionMode === 'fabric') return fabricGameVersions();
-  if (software.versionMode === 'forge') return forgeMinecraftVersions();
-  if (software.versionMode === 'mojang') return minecraftVersions();
+  if (software.versionMode === 'fabric') {
+    try {
+      return await fabricGameVersions();
+    } catch (error) {
+      console.error(`Failed to fetch Fabric versions: ${error.message}`);
+      return hostJavaCompatibleVersions(FALLBACK_MINECRAFT_VERSIONS);
+    }
+  }
+  if (software.versionMode === 'forge') {
+    try {
+      return await forgeMinecraftVersions();
+    } catch (error) {
+      console.error(`Failed to fetch Forge versions: ${error.message}`);
+      return hostJavaCompatibleVersions(FALLBACK_MINECRAFT_VERSIONS);
+    }
+  }
+  if (software.versionMode === 'mojang') {
+    try {
+      return await minecraftVersions();
+    } catch (error) {
+      console.error(`Failed to fetch Minecraft versions: ${error.message}`);
+      return hostJavaCompatibleVersions(FALLBACK_MINECRAFT_VERSIONS);
+    }
+  }
   if (software.versionMode === 'bedrock') {
-    const urls = await bedrockDownloadUrls();
-    const versions = [...new Set(urls
-      .filter((url) => !url.includes('preview'))
-      .map((url) => url.match(/bedrock-server-([0-9.]+)\.zip/i)?.[1])
-      .filter(Boolean))];
-    return versions.length ? versions : ['latest'];
+    try {
+      const urls = await bedrockDownloadUrls();
+      const versions = [...new Set(urls
+        .filter((url) => !url.includes('preview'))
+        .map((url) => url.match(/bedrock-server-([0-9.]+)\.zip/i)?.[1])
+        .filter(Boolean))];
+      return versions.length ? versions : FALLBACK_BEDROCK_VERSIONS;
+    } catch (error) {
+      console.error(`Failed to fetch Bedrock versions: ${error.message}`);
+      return FALLBACK_BEDROCK_VERSIONS;
+    }
   }
   if (software.key === 'pocketmine') {
-    const releases = await cached('github-pocketmine-releases', () => fetchJson('https://api.github.com/repos/pmmp/PocketMine-MP/releases?per_page=80'));
-    const versions = releases
-      .filter((release) => !release.draft && !release.prerelease)
-      .filter((release) => (release.assets || []).some((asset) => asset.name === 'PocketMine-MP.phar'))
-      .map((release) => String(release.tag_name || '').replace(/^v/i, ''))
-      .filter(Boolean);
-    return versions.length ? versions : ['latest'];
+    try {
+      const releases = await cached('github-pocketmine-releases', () => fetchJson('https://api.github.com/repos/pmmp/PocketMine-MP/releases?per_page=80'));
+      const versions = releases
+        .filter((release) => !release.draft && !release.prerelease)
+        .filter((release) => (release.assets || []).some((asset) => asset.name === 'PocketMine-MP.phar'))
+        .map((release) => String(release.tag_name || '').replace(/^v/i, ''))
+        .filter(Boolean);
+      return versions.length ? versions : ['latest'];
+    } catch (error) {
+      console.error(`Failed to fetch PocketMine versions: ${error.message}`);
+      return ['latest'];
+    }
   }
   if (software.versionMode === 'github-latest') return ['latest'];
   return ['manual'];
@@ -282,6 +348,7 @@ async function bedrockDownloadUrls() {
   return cached('vexyhost-bedrock-urls', async () => {
     const html = await fetch('https://jars.vexyhost.com/', {
       headers: { 'User-Agent': 'Mozilla/5.0 NexusPanel/1.0' },
+      signal: AbortSignal.timeout(5000),
     }).then((response) => response.text()).catch(() => '');
     const category = '6668191354eeb517d83f59e2';
     const start = html.indexOf(`x-show="selectedCategory === '${category}'"`);
@@ -303,6 +370,7 @@ async function resolveBedrockUrl(platform, requestedVersion = 'latest') {
   if (vexyLatest) return vexyLatest;
   const html = await fetch('https://www.minecraft.net/en-us/download/server/bedrock', {
     headers: { 'User-Agent': 'Mozilla/5.0 NexusPanel/1.0' },
+    signal: AbortSignal.timeout(5000),
   }).then((response) => response.text()).catch(() => '');
   const pattern = /https?:[^"'\s]+bedrock-server-[0-9.]+\.zip/gi;
   const found = (html.match(pattern) || []).find((item) => item.includes(channel));
@@ -327,21 +395,41 @@ async function resolveDownload(software, requestedVersion = 'latest') {
   }
 
   if (software.versionMode === 'papermc') {
-    const builds = await fetchJson(`https://fill.papermc.io/v3/projects/paper/versions/${encodeURIComponent(version)}/builds`);
-    const rows = Array.isArray(builds) ? builds : (builds.builds || []);
-    const build = rows.find((item) => item.channel === 'RECOMMENDED')
-      || rows.find((item) => item.channel === 'STABLE')
-      || rows[0];
-    if (!build) throw new Error('No Paper build is available for this version.');
-    const downloadUrl = build.downloads?.['server:default']?.url
-      || build.downloads?.application?.url
-      || '';
-    if (!downloadUrl) throw new Error('No Paper server download is available for this version.');
-    return {
-      version,
-      url: downloadUrl,
-      fileName: software.executable,
-    };
+    try {
+      // v3 API returns an array directly
+      const builds = await fetchJson(`https://fill.papermc.io/v3/projects/paper/versions/${encodeURIComponent(version)}/builds`);
+      
+      // builds is already an array of build objects
+      const rows = Array.isArray(builds) ? builds : (builds.builds || []);
+      
+      if (!rows.length) {
+        throw new Error(`No Paper builds found for version ${version}`);
+      }
+      
+      // Find the latest stable build
+      let build = rows.find((item) => item.channel === 'STABLE')
+        || rows.find((item) => item.channel === 'RECOMMENDED')
+        || rows[rows.length - 1]; // Latest build
+      
+      if (!build) {
+        throw new Error(`No Paper build available for ${version}`);
+      }
+      
+      // The download info is under 'server:default' key
+      const downloadInfo = build.downloads?.['server:default'];
+      if (!downloadInfo || !downloadInfo.url) {
+        throw new Error(`No download URL for Paper ${version}`);
+      }
+      
+      return {
+        version,
+        url: downloadInfo.url,
+        fileName: software.executable,
+      };
+    } catch (error) {
+      console.error(`Paper download failed: ${error.message}`);
+      throw error;
+    }
   }
 
   if (software.versionMode === 'purpur') {
