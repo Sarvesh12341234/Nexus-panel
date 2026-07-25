@@ -105,7 +105,6 @@ const elements = {
   networkPanel: document.querySelector('#networkPanel'),
   terminalPanel: document.querySelector('#terminalPanel'),
   terminalNav: document.querySelector('#terminalNav'),
-  themeStudio: document.querySelector('#themeStudio'),
   backupPanel: document.querySelector('#backupPanel'),
   viewEyebrow: document.querySelector('#viewEyebrow'),
   viewTitle: document.querySelector('#viewTitle'),
@@ -142,7 +141,7 @@ const layoutEditor = {
   controlSnapshot: null,
 };
 let lastCreateSoftwareKey = '';
-const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
+const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024;
 const UPLOAD_PARALLELISM = 3;
 const timeZones = [...new Set([
   ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : ['UTC']),
@@ -254,7 +253,6 @@ const viewTitles = {
   network: ['Host', 'Network'],
   admins: ['Owner', 'Admin Access'],
   security: ['Security', 'Health, Audit and Repairs'],
-  themes: ['Interface', 'Advanced Theme Studio'],
   settings: ['Panel', 'Settings'],
   terminal: ['Owner', 'VPS Terminal'],
 };
@@ -273,7 +271,6 @@ const viewAccess = {
   network: { keys: [CAPABILITIES.NETWORK_MANAGE], level: 'MANAGE_SERVERS' },
   admins: { keys: [CAPABILITIES.ADMINS_MANAGE], level: 'MANAGE_ADMINS' },
   security: { keys: [CAPABILITIES.SECURITY_VIEW], level: 'MANAGE_ADMINS' },
-  themes: { keys: [], level: 'VIEW_ONLY' },
   settings: { keys: [CAPABILITIES.SETTINGS_MANAGE, CAPABILITIES.TIMEZONE_MANAGE], level: 'MANAGE_ADMINS' },
   terminal: { keys: [CAPABILITIES.SETTINGS_MANAGE], level: 'MANAGE_ADMINS' },
 };
@@ -1214,6 +1211,14 @@ async function api(path, options = {}) {
     } catch {
       data = {};
     }
+    if (response.status === 401 && data.code === 'AUTH_REQUIRED') {
+      closeConsoleStream();
+      state.user = null;
+      window.location.replace('/login.html?expired=1');
+      const authError = new Error(data.error || 'Your session expired. Sign in again.');
+      authError.code = 'AUTH_REQUIRED';
+      throw authError;
+    }
     if (!response.ok) throw new Error(data.error || raw.slice(0, 500) || 'Request failed.');
     return data;
   } catch (error) {
@@ -1226,18 +1231,6 @@ async function api(path, options = {}) {
   } finally {
     if (timeout) window.clearTimeout(timeout);
   }
-}
-
-function renderThemeStudio() {
-  if (!elements.themeStudio) return;
-  const current = document.body.dataset.theme || 'nexus';
-  elements.themeStudio.innerHTML = `
-    <div class="section-head"><div><p class="eyebrow">Theme Studio</p><h2>Architectural interfaces</h2></div><span class="badge is-on">GPU-light CSS</span></div>
-    <p class="muted">Advanced themes use composited transforms, gradients and restrained motion. Reduced-motion preferences disable animation automatically.</p>
-    <div class="theme-gallery">
-      ${themes.map((theme) => `<button class="theme-card ${theme.key === current ? 'is-selected' : ''}" type="button" data-action="theme-apply" data-theme-key="${theme.key}" data-theme-preview="${theme.key}"><span class="theme-card-art"><i></i><i></i><i></i></span><strong>${escapeHtml(theme.name)}</strong><small>${theme.mode === 'advanced' ? 'Animated architecture' : theme.mode === 'picture' ? 'Cinematic environment' : 'Performance palette'}</small></button>`).join('')}
-    </div>
-  `;
 }
 
 async function apiText(path) {
@@ -1336,11 +1329,6 @@ function ensureFileControls() {
     elements.uploadProgress = panel.querySelector('#uploadProgress');
     elements.uploadSessionList = panel.querySelector('#uploadSessionList');
   }
-  if (elements.adminServerAssign) {
-    elements.adminServerAssign.innerHTML = '<option value="">No server assignment</option>' + state.servers
-      .map((item) => `<option value="${item.id}">${escapeHtml(item.name)}</option>`)
-      .join('');
-  }
 }
 
 async function renderUploadSessions() {
@@ -1399,32 +1387,6 @@ function startFastDownload(url) {
   document.body.append(link);
   link.click();
   link.remove();
-}
-
-function enableDeveloperModeGuard() {
-  const redirect = () => {
-    window.location.replace('https://www.google.com/');
-  };
-  window.addEventListener('keydown', (event) => {
-    const key = event.key.toLowerCase();
-    if (event.key === 'F12' || (event.ctrlKey && event.shiftKey && ['i', 'j', 'c'].includes(key)) || (event.ctrlKey && key === 'u')) {
-      event.preventDefault();
-      redirect();
-    }
-  });
-  window.addEventListener('contextmenu', (event) => {
-    event.preventDefault();
-    redirect();
-  });
-  let lastWidth = window.outerWidth - window.innerWidth;
-  let lastHeight = window.outerHeight - window.innerHeight;
-  window.setInterval(() => {
-    const widthGap = window.outerWidth - window.innerWidth;
-    const heightGap = window.outerHeight - window.innerHeight;
-    if ((widthGap > 170 && widthGap > lastWidth + 80) || (heightGap > 170 && heightGap > lastHeight + 80)) redirect();
-    lastWidth = widthGap;
-    lastHeight = heightGap;
-  }, 3000);
 }
 
 function childPath(name) {
@@ -1564,6 +1526,7 @@ async function uploadFiles(files) {
   }
   elements.uploadLabel.textContent = `Uploaded ${queue.length} file(s).`;
   elements.uploadProgress.style.width = '100%';
+  currentUpload = { path: '', size: 0, paused: false, canceled: false };
   showToast('Upload complete.');
   await renderFiles();
   await renderUploadSessions();
@@ -1843,10 +1806,9 @@ async function renderActiveView({ shellScroll = null } = {}) {
     if (view === 'network') await renderNetwork();
     if (view === 'admins') renderAdmins();
     if (view === 'security') await renderSecurity();
-    if (view === 'themes') renderThemeStudio();
     if (view === 'settings') renderSettings();
     if (view === 'terminal') renderTerminal();
-    applyUiPreferences(alphaDraft);
+    reapplyDynamicLayout();
   } finally {
     if (state.activeView === view) {
       restoreShellScrollSoon(preservedShellScroll);
@@ -1866,8 +1828,10 @@ function renderPlugins() {
   const canManagePlugins = can(CAPABILITIES.PLUGINS_MANAGE, state.permissions.MANAGE_FILES);
   if (elements.pluginForm) elements.pluginForm.hidden = true;
   elements.pluginAccessNote.hidden = canManagePlugins;
-  if (elements.pluginServerSelect) elements.pluginServerSelect.innerHTML = state.servers.map((server) => `<option value="${server.id}">${escapeHtml(server.name)} (${escapeHtml(server.softwareName)})</option>`).join('') || '<option value="">Create a server first</option>';
   const server = activeServer();
+  if (elements.pluginServerSelect) {
+    elements.pluginServerSelect.innerHTML = state.servers.map((item) => `<option value="${item.id}" ${item.id === server?.id ? 'selected' : ''}>${escapeHtml(item.name)} (${escapeHtml(item.softwareName)})</option>`).join('') || '<option value="">Create a server first</option>';
+  }
 
   if (!canManagePlugins) {
     elements.pluginList.innerHTML = '<p class="empty-state">Plugin manager is locked until file access level 80.</p>';
@@ -1878,25 +1842,44 @@ function renderPlugins() {
     elements.pluginList.innerHTML = '<p class="empty-state">Create a server to install plugins.</p>';
     return;
   }
+  const projectTypeSelect = elements.modrinthForm.querySelector('[name="projectType"]');
+  const loaderSelect = elements.modrinthForm.querySelector('[name="loader"]');
 
   if (server.softwareKey === 'bedrock-vanilla') {
     elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Bedrock packs: upload .mcpack or .mcaddon';
-    elements.modrinthForm.querySelector('[name="projectType"]').disabled = true;
-    elements.modrinthForm.querySelector('[name="loader"]').disabled = true;
+    projectTypeSelect.innerHTML = '<option value="">Behavior / resource pack</option>';
+    projectTypeSelect.disabled = true;
+    loaderSelect.innerHTML = '<option value="">Bedrock</option>';
+    loaderSelect.disabled = true;
     elements.modrinthGrid.innerHTML = '<p class="empty-state">Bedrock Dedicated Server supports resource and behavior packs, but automatic marketplace install needs manifest registration. Upload .mcpack or .mcaddon in File Manager for now.</p>';
   } else if (server.softwareKey === 'pocketmine') {
     elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Poggit: PurePerms, ScoreHud, Worlds';
-    elements.modrinthForm.querySelector('[name="projectType"]').disabled = true;
-    elements.modrinthForm.querySelector('[name="loader"]').disabled = true;
+    projectTypeSelect.innerHTML = '<option value="plugin">Plugin</option>';
+    projectTypeSelect.disabled = true;
+    loaderSelect.innerHTML = '<option value="pocketmine">PocketMine / Poggit</option>';
+    loaderSelect.disabled = true;
+    loadPluginMarketplace({ featured: true }).catch(() => {});
+  } else if (['fabric', 'forge'].includes(server.softwareKey)) {
+    const loaderName = server.softwareKey === 'fabric' ? 'Fabric' : 'Forge';
+    projectTypeSelect.innerHTML = '<option value="mod">Mod</option>';
+    projectTypeSelect.disabled = true;
+    loaderSelect.innerHTML = `<option value="${server.softwareKey}">${loaderName}</option>`;
+    loaderSelect.disabled = true;
+    elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Modrinth mods: Lithium, FerriteCore, Create';
+    loadPluginMarketplace({ featured: true }).catch(() => {});
+  } else if (['paper', 'purpur'].includes(server.softwareKey)) {
+    projectTypeSelect.innerHTML = '<option value="plugin">Plugin</option>';
+    projectTypeSelect.disabled = true;
+    loaderSelect.innerHTML = '<option value="paper">Paper / Purpur / Spigot</option>';
+    loaderSelect.disabled = true;
+    elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Modrinth plugins: Geyser, LuckPerms, ViaVersion';
     loadPluginMarketplace({ featured: true }).catch(() => {});
   } else {
-    const isModded = ['fabric', 'forge'].includes(server.softwareKey);
-    elements.modrinthForm.querySelector('input[name="query"]').placeholder = isModded ? 'Search Modrinth mods: Lithium, FerriteCore, Create' : 'Search Modrinth plugins: Geyser, LuckPerms, ViaVersion';
-    elements.modrinthForm.querySelector('[name="projectType"]').disabled = false;
-    elements.modrinthForm.querySelector('[name="loader"]').disabled = false;
-    elements.modrinthForm.querySelector('[name="projectType"]').value = isModded ? 'mod' : 'plugin';
-    elements.modrinthForm.querySelector('[name="loader"]').value = server.softwareKey === 'purpur' ? 'paper' : server.softwareKey;
-    loadPluginMarketplace({ featured: true }).catch(() => {});
+    projectTypeSelect.innerHTML = '<option value="">Unavailable</option>';
+    loaderSelect.innerHTML = '<option value="">No compatible loader</option>';
+    projectTypeSelect.disabled = true;
+    loaderSelect.disabled = true;
+    elements.modrinthGrid.innerHTML = '<p class="empty-state">Select Paper/Purpur for plugins or Fabric/Forge for mods.</p>';
   }
 
   const plugins = state.plugins.filter((plugin) => plugin.serverId === server.id);
@@ -1954,6 +1937,16 @@ function closeConsoleStream() {
   state.consoleStreamReady = false;
 }
 
+function showConsoleSwitchImmediately() {
+  const server = activeServer();
+  if (!elements.consoleBox || state.activeView !== 'console' || !server) return;
+  elements.consoleBox.dataset.rendered = '';
+  elements.consoleBox.dataset.serverId = '';
+  const cached = state.consoleLineCache[server.id];
+  if (cached?.length) renderConsoleLines(cached, server);
+  else elements.consoleBox.innerHTML = `<div>[NexusPanel] Opening live console for ${escapeHtml(server.name)}...</div>`;
+}
+
 function openConsoleStream(server) {
   if (!server || typeof EventSource !== 'function') return false;
   if (state.consoleStream && state.consoleStreamServerId === server.id) return true;
@@ -1999,6 +1992,18 @@ function openConsoleStream(server) {
     const payload = JSON.parse(event.data || '{}');
     if (payload.status) syncConsoleActionButtons(server, payload.status);
   });
+  stream.addEventListener('metrics', (event) => {
+    if (state.activeView !== 'console' || state.activeServerId !== server.id) return;
+    state.consoleStreamReady = true;
+    const payload = JSON.parse(event.data || '{}');
+    if (payload.server?.status && server.status !== payload.server.status) {
+      server.status = payload.server.status;
+      renderStats();
+      updateLiveServerDom();
+    }
+    renderConsoleMetrics(server, payload.host, payload.server);
+    syncConsoleActionButtons(server, payload.server?.status || server.status);
+  });
   stream.onerror = () => {
     state.consoleStreamReady = false;
   };
@@ -2022,7 +2027,7 @@ async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
   const renderToken = ++consoleRenderToken;
   state.consoleInFlight[serverId] = true;
   try {
-    const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 5000;
+    const needsMetrics = now - Number(state.consoleMetricsAt[serverId] || 0) >= 1000;
     const data = await api(`/api/servers/${server.id}/console`, { timeoutMs }).catch((error) => {
       if (error.code === 'timeout') return { lines: state.consoleLineCache[serverId] || [], timedOut: true };
       return { lines: [], error: error.message };
@@ -2156,8 +2161,15 @@ function renderConsoleMetrics(server, metrics, serverMetrics) {
     if (elements.consoleMetrics) elements.consoleMetrics.innerHTML = '';
     return;
   }
-  const ramPercent = metrics.ramTotalMb ? Math.min(100, Math.round((metrics.ramUsedMb / metrics.ramTotalMb) * 100)) : 0;
-  const serverRamPercent = serverMetrics?.maxMemoryMb ? Math.min(100, Math.round((serverMetrics.rssMb / serverMetrics.maxMemoryMb) * 100)) : 0;
+  const hostUsedBytes = Number(metrics.ramUsedBytes ?? Number(metrics.ramUsedMb || 0) * 1024 * 1024);
+  const hostTotalBytes = Number(metrics.ramTotalBytes ?? Number(metrics.ramTotalMb || 0) * 1024 * 1024);
+  const serverUsedBytes = Number(serverMetrics?.rssBytes ?? Number(serverMetrics?.rssMb || 0) * 1024 * 1024);
+  const serverLimitBytes = Number(serverMetrics?.maxMemoryMb || 0) * 1024 * 1024;
+  const ramPercent = hostTotalBytes ? Math.min(100, Math.round((hostUsedBytes / hostTotalBytes) * 100)) : 0;
+  const serverRamPercent = serverLimitBytes ? Math.min(100, Math.round((serverUsedBytes / serverLimitBytes) * 100)) : 0;
+  const serverCpuLabel = serverMetrics?.status === 'online' && serverMetrics?.metricSource !== 'unavailable'
+    ? `${Number(serverMetrics.cpuPercent || 0).toFixed(1).replace(/\.0$/, '')}%`
+    : serverMetrics?.status === 'online' ? 'Sampling...' : 'Offline';
   const history = state.metricHistory[server.id] || [];
   history.push({
     cpu: Number(metrics.cpuPercent || 0),
@@ -2171,9 +2183,9 @@ function renderConsoleMetrics(server, metrics, serverMetrics) {
 
   elements.consoleMetrics.innerHTML = `
     ${metricCard('Host CPU', `${metrics.cpuPercent}%`, metrics.cpuPercent, history, 'cpu')}
-    ${metricCard('Host RAM', `${formatBytes(metrics.ramUsedMb * 1024 * 1024)} / ${formatBytes(metrics.ramTotalMb * 1024 * 1024)}`, ramPercent, history, 'ram')}
-    ${metricCard('Server RAM', `${serverMetrics ? `${formatBytes(serverMetrics.rssMb * 1024 * 1024)} / ${formatBytes(serverMetrics.maxMemoryMb * 1024 * 1024)}` : 'Offline'}`, serverRamPercent, history, 'serverRam')}
-    ${metricCard('Server CPU', `${serverMetrics ? `${serverMetrics.cpuPercent}%` : '0%'}`, serverMetrics?.cpuPercent || 0, history, 'serverCpu')}
+    ${metricCard('Host RAM', `${formatBytes(hostUsedBytes)} / ${formatBytes(hostTotalBytes)}`, ramPercent, history, 'ram')}
+    ${metricCard('Server RAM', `${serverMetrics?.status === 'online' ? `${formatBytes(serverUsedBytes)} / ${formatBytes(serverLimitBytes)}` : 'Offline'}`, serverRamPercent, history, 'serverRam')}
+    ${metricCard('Server CPU', serverCpuLabel, serverMetrics?.cpuPercent || 0, history, 'serverCpu')}
     ${metricCard('Players', `${serverMetrics ? serverMetrics.playerCount : 0}`, Math.min(100, (serverMetrics?.playerCount || 0) * 8), history, 'players')}
     ${metricCard('Load', `${metrics.load}`, Math.min(100, Number(metrics.load || 0) * 18), history, 'cpu')}
   `;
@@ -2829,6 +2841,15 @@ async function renderNetwork(speed = null) {
 }
 
 function renderAdmins() {
+  if (elements.adminServerAssign) {
+    const selected = elements.adminServerAssign.value;
+    elements.adminServerAssign.innerHTML = '<option value="">No server assignment</option><option value="all">Assign all current servers</option>' + state.servers
+      .map((item) => `<option value="${item.id}">${escapeHtml(item.name)}</option>`)
+      .join('');
+    if ([...elements.adminServerAssign.options].some((option) => option.value === selected)) {
+      elements.adminServerAssign.value = selected;
+    }
+  }
   elements.adminPanel.hidden = !can(CAPABILITIES.ADMINS_MANAGE, state.permissions.MANAGE_ADMINS);
   if (!can(CAPABILITIES.ADMINS_MANAGE, state.permissions.MANAGE_ADMINS)) return;
 
@@ -3009,18 +3030,18 @@ async function hydrateCreateVersionSelect() {
   const versions = await getSoftwareVersions(key);
   elements.softwareVersionSelect.innerHTML = versions.length
     ? versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('')
-    : '<option value="manual">Version lookup failed - manual</option>';
+    : '<option value="latest">Latest compatible</option>';
 }
 
 async function getSoftwareVersions(key, force = false) {
   if (!force && versionCache.has(key)) return versionCache.get(key);
   let versions = [];
   try {
-    const data = await api(`/api/software/${encodeURIComponent(key)}/versions`, { timeoutMs: 5000 });
+    const data = await api(`/api/software/${encodeURIComponent(key)}/versions`, { timeoutMs: 6500 });
     versions = Array.isArray(data.versions) ? data.versions.filter(Boolean) : [];
-  } catch (error) {
-    showToast(`Version lookup failed for ${key}: ${error.message}`);
-    return versionCache.get(key) || [];
+  } catch {
+    const selected = state.servers.find((server) => server.softwareKey === key)?.softwareVersion;
+    versions = versionCache.get(key) || [selected || 'latest'];
   }
   if (!versions.length) versions = ['manual'];
   versionCache.set(key, versions);
@@ -3037,7 +3058,7 @@ async function hydrateSoftwareVersionSelects() {
     const versions = await getSoftwareVersions(key);
     select.innerHTML = versions.length
       ? versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('')
-      : '<option value="manual">Version lookup failed - manual</option>';
+      : '<option value="latest">Latest compatible</option>';
     select.value = versions.includes(selected) ? selected : (versions[0] || 'manual');
   }));
   state.pendingSoftwareSelection = null;
@@ -3243,9 +3264,6 @@ function restoreShellScroll(position = state.shellScroll) {
 function restoreShellScrollSoon(position = state.shellScroll) {
   restoreShellScroll(position);
   window.requestAnimationFrame(() => restoreShellScroll(position));
-  window.setTimeout(() => restoreShellScroll(position), 90);
-  window.setTimeout(() => restoreShellScroll(position), 240);
-  window.setTimeout(() => restoreShellScroll(position), 600);
 }
 
 function accessName(level) {
@@ -3380,7 +3398,7 @@ function startRefreshLoop() {
         state.statusRefreshInFlight = false;
       });
     }
-    if (state.activeView === 'files' && now - state.uploadRefreshAt >= 1000 && !state.uploadRefreshInFlight) {
+    if (state.activeView === 'files' && now - state.uploadRefreshAt >= 400 && !state.uploadRefreshInFlight) {
       state.uploadRefreshAt = now;
       state.uploadRefreshInFlight = true;
       renderUploadSessions().catch(() => {}).finally(() => {
@@ -3453,11 +3471,7 @@ elements.activeServerSelect.addEventListener('change', () => {
   consoleStickToBottom = true;
   closeConsoleStream();
   if (elements.serverConfigForm) elements.serverConfigForm.dataset.dirty = '0';
-  if (elements.consoleBox && state.activeView === 'console') {
-    elements.consoleBox.dataset.rendered = '';
-    elements.consoleBox.dataset.serverId = String(state.activeServerId || '');
-    elements.consoleBox.innerHTML = '<div>[NexusPanel] Switching server console...</div>';
-  }
+  showConsoleSwitchImmediately();
   renderServerSwitcher();
   renderActiveView().catch((error) => showToast(error.message));
 });
@@ -3465,6 +3479,15 @@ elements.activeServerSelect.addEventListener('change', () => {
 if (elements.pluginForm) {
   elements.pluginForm.addEventListener('submit', async (event) => {
     event.preventDefault();
+  });
+}
+
+if (elements.pluginServerSelect) {
+  elements.pluginServerSelect.addEventListener('change', () => {
+    state.activeServerId = Number(elements.pluginServerSelect.value) || null;
+    state.pluginSearchSignature = '';
+    renderServerSwitcher();
+    renderPlugins();
   });
 }
 
@@ -4107,16 +4130,6 @@ document.addEventListener('click', async (event) => {
     const serverCard = event.target.closest('[data-server-id]');
     if (serverCard) state.activeServerId = Number(serverCard.dataset.serverId);
 
-    if (action === 'theme-apply') {
-      const key = actionTarget.dataset.themeKey;
-      applyTheme(key);
-      localStorage.setItem('nexusTheme', key);
-      if (elements.themeSelect) elements.themeSelect.value = key;
-      renderThemeStudio();
-      showToast('Theme applied instantly.');
-      return;
-    }
-
     if (action === 'save-timezone') {
       const select = document.getElementById('userTimezoneSelect');
       const status = document.getElementById('timezoneStatus');
@@ -4412,11 +4425,7 @@ document.addEventListener('click', async (event) => {
       consoleStickToBottom = true;
       closeConsoleStream();
       if (elements.serverConfigForm) elements.serverConfigForm.dataset.dirty = '0';
-      if (elements.consoleBox && state.activeView === 'console') {
-        elements.consoleBox.dataset.rendered = '';
-        elements.consoleBox.dataset.serverId = String(state.activeServerId || '');
-        elements.consoleBox.innerHTML = '<div>[NexusPanel] Switching server console...</div>';
-      }
+      showConsoleSwitchImmediately();
       renderServerSwitcher();
       await renderActiveView();
       return;
@@ -4520,6 +4529,12 @@ document.addEventListener('click', async (event) => {
       if (!server) return showToast('Create a server first.');
       animateCommandButton(actionTarget);
       const op = action.replace('-server', '');
+      const previousStatus = server.status;
+      server.status = op === 'stop' || op === 'kill' ? 'offline' : 'online';
+      syncConsoleActionButtons(server, server.status);
+      renderStats();
+      updateLiveServerDom();
+      showToast(`${op} requested.`);
       try {
         await api(`/api/servers/${server.id}/${op}`, { method: 'POST' });
       } catch (error) {
@@ -4527,15 +4542,13 @@ document.addEventListener('click', async (event) => {
           await api(`/api/servers/${server.id}/eula`, { method: 'POST' });
           await api(`/api/servers/${server.id}/${op}`, { method: 'POST' });
         } else {
+          server.status = previousStatus;
+          syncConsoleActionButtons(server, server.status);
+          renderStats();
+          updateLiveServerDom();
           throw error;
         }
       }
-      showToast(`${op} requested.`);
-      if (op === 'stop' || op === 'kill') server.status = 'offline';
-      if (op === 'start' || op === 'restart') server.status = 'online';
-      syncConsoleActionButtons(server, server.status);
-      renderStats();
-      updateLiveServerDom();
       refreshServerStatusOnly().catch(() => {});
       if (state.activeView === 'console') renderConsole({ force: true, timeoutMs: 500 }).catch(() => {});
       return;
@@ -4685,9 +4698,18 @@ document.addEventListener('click', async (event) => {
       const research = (result.agent?.webResearch?.results || []).slice(0, 5)
         .map((item) => `- ${item.source}: ${item.title}${item.codeSnippets?.length ? ` (${item.codeSnippets.length} redacted code snippet(s))` : ''}\n  ${item.url}`)
         .join('\n');
+      const advanced = result.agent?.advancedReasoning || '';
+      const advancedSuggestions = (result.agent?.advancedSuggestions || []).slice(0, 6)
+        .map((item) => {
+          const command = item.command ? `${item.command} ${(item.args || []).join(' ')}`.trim() : `${item.tool}${item.path ? ` ${item.path}` : ''}`;
+          return `- ${command}: ${item.reason || 'Audited next check'}`;
+        })
+        .join('\n');
       const summary = [
         diagnoses || `No known cause matched ${result.knowledge?.diagnosticSignals || 0} signals.`,
         actions ? `\nSafe plan:\n${actions}` : '',
+        advanced ? `\nAdvanced AI:\n${advanced}` : '',
+        advancedSuggestions ? `\nSuggested audited commands/tools:\n${advancedSuggestions}` : '',
         optimizations ? `\nOptimization plan:\n${optimizations}` : '',
         research ? `\nUntrusted web references (never auto-executed):\n${research}` : '',
       ].join('');
@@ -4860,7 +4882,7 @@ document.addEventListener('click', async (event) => {
         body: JSON.stringify({ projectId: actionTarget.dataset.projectId, name: actionTarget.dataset.projectName }),
       });
       if (fill) fill.style.width = '100%';
-      showToast('Modrinth plugin installed. Restart server to load it.');
+      showToast(`Modrinth ${['fabric', 'forge'].includes(server.softwareKey) ? 'mod' : 'plugin'} installed. Restart server to load it.`);
       await refresh();
       return;
     }
@@ -5160,7 +5182,6 @@ initThemes();
 applyUiPreferences();
 applyAdminPermissionPreset(5);
 applyFileManagerLayout();
-enableDeveloperModeGuard();
 refresh().then(startRefreshLoop).catch((error) => {
   showToast(error.message);
   console.error('Initial load error:', error);

@@ -231,12 +231,7 @@ static int apply_landlock(const char *root, unsigned int port) {
   };
 
   const char *read_write[] = {
-    "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty",
-    "/tmp",
-    "/tmp/nexuspanel",
-    "/dev/shm",
-    "/var/tmp",
-    "/run/user"
+    "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty"
   };
 
   for (size_t i = 0; i < sizeof(read_only) / sizeof(read_only[0]); i++) {
@@ -289,7 +284,11 @@ fail:
   BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (nr), 0, 1), \
   BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
 
-static int apply_seccomp(void) {
+#define DENY_UNLESS_ISOLATED(nr, isolated) \
+  BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (nr), (isolated) ? 1 : 0, 1), \
+  BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
+
+static int apply_seccomp(int isolated_identity) {
   struct sock_filter filter[] = {
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)offsetof(struct seccomp_data, arch)),
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NEXUS_AUDIT_ARCH, 1, 0),
@@ -376,7 +375,7 @@ static int apply_seccomp(void) {
 //     DENY_SYSCALL(__NR_pidfd_send_signal),
 // #endif
 #ifdef __NR_kill
-    DENY_SYSCALL(__NR_kill),
+    DENY_UNLESS_ISOLATED(__NR_kill, isolated_identity),
 #endif
 #ifdef __NR_mknod
     DENY_SYSCALL(__NR_mknod),
@@ -385,16 +384,16 @@ static int apply_seccomp(void) {
     DENY_SYSCALL(__NR_mknodat),
 #endif
 #ifdef __NR_chmod
-    DENY_SYSCALL(__NR_chmod),
+    DENY_UNLESS_ISOLATED(__NR_chmod, isolated_identity),
 #endif
 #ifdef __NR_fchmod
-    DENY_SYSCALL(__NR_fchmod),
+    DENY_UNLESS_ISOLATED(__NR_fchmod, isolated_identity),
 #endif
 #ifdef __NR_fchmodat
-    DENY_SYSCALL(__NR_fchmodat),
+    DENY_UNLESS_ISOLATED(__NR_fchmodat, isolated_identity),
 #endif
 #ifdef __NR_fchmodat2
-    DENY_SYSCALL(__NR_fchmodat2),
+    DENY_UNLESS_ISOLATED(__NR_fchmodat2, isolated_identity),
 #endif
 #ifdef __NR_chown
     DENY_SYSCALL(__NR_chown),
@@ -728,7 +727,7 @@ int main(int argc, char **argv) {
   apply_resource_limits(target_uid != 0);
   int abi = apply_landlock(resolved_root, port);
   if (abi < 0) return 77;
-  if (apply_seccomp() < 0) return 77;
+  if (apply_seccomp(target_uid != 0) < 0) return 77;
   close_inherited_fds();
 
   fprintf(stderr, "[NexusMark] native kernel sandbox active (Landlock ABI %d, seccomp, no_new_privs).\n", abi);

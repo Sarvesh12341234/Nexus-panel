@@ -58,7 +58,6 @@
           <button class="nav-item" type="button" data-view="network">Network</button>
           <button class="nav-item" type="button" data-view="admins">Admins</button>
           <button class="nav-item" type="button" data-view="security">Security</button>
-          <button class="nav-item" type="button" data-view="themes">Theme Studio</button>
           <button class="nav-item" type="button" data-view="settings">Settings</button>
           <button class="nav-item" type="button" data-view="terminal" id="terminalNav" hidden>Terminal</button>
         </nav>
@@ -95,13 +94,13 @@
         <section class="view-section" id="view-dashboard">
           <div class="promise-strip">
             <article><strong>Direct Processes</strong><span>No Docker layer, built for low RAM hosts.</span></article>
-            <article><strong>Bedrock First</strong><span>Packs, PocketMine, templates, and UDP-friendly options.</span></article>
+            <article><strong>Java + Bedrock</strong><span>Paper, Fabric, Forge, PocketMine, packs, plugins, and mods.</span></article>
             <article><strong>Smart Paths</strong><span>Server files and plugins stay in safe folders.</span></article>
           </div>
 
           <form class="server-create surface" id="serverForm">
             <div class="field-grid">
-              <label>Server name <input name="name" placeholder="Survival Bedrock" required></label>
+              <label>Server name <input name="name" placeholder="Survival Server" required></label>
               <label>Edition <select name="type"><option value="bedrock">Bedrock</option><option value="java">Java</option></select></label>
               <label>Software <select name="softwareKey" id="softwareSelect"></select></label>
               <label>Version <select name="softwareVersion" id="softwareVersionSelect"><option value="latest">Latest</option></select></label>
@@ -270,8 +269,8 @@
             <form class="admin-form" id="adminForm">
               <input name="name" placeholder="Admin name" required>
               <input name="email" type="email" placeholder="Admin email" required>
-              <input name="password" type="password" placeholder="Password (12+ characters)" minlength="12" required>
-              <select name="assignedServerId" id="adminServerAssign"><option value="">No server assignment</option></select>
+              <input name="password" type="password" placeholder="Password (12+ characters)" minlength="12" autocomplete="new-password" required>
+              <select name="assignedServerId" id="adminServerAssign"><option value="">No server assignment</option><option value="all">Assign all current servers</option></select>
               <select name="adminDurationMode"><option value="permanent">Permanent</option><option value="temporary">Temporary</option></select>
               <input name="adminDurationValue" type="number" min="1" max="525600" value="60">
               <select name="adminDurationUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select>
@@ -329,10 +328,6 @@
           <div class="surface tool-surface" id="healthPanel"></div>
           <div class="surface tool-surface" id="auditPanel"></div>
           <div class="surface tool-surface" id="fixedPanel"></div>
-        </section>
-
-        <section class="view-section" id="view-themes" hidden>
-          <div class="surface tool-surface theme-studio" id="themeStudio"></div>
         </section>
 
         <section class="view-section" id="view-settings" hidden>

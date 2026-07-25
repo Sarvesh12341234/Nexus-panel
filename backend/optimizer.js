@@ -134,6 +134,9 @@ function isRoot() {
 
 function currentSysctl(key) {
   if (!isLinux()) return null;
+  const directPath = `/proc/sys/${String(key).replaceAll('.', '/')}`;
+  const direct = readText(directPath);
+  if (direct) return direct.replace(/\s+/g, ' ').trim();
   const value = run('sysctl', ['-n', key]);
   return value || null;
 }
@@ -187,7 +190,7 @@ function tweakRows() {
       current,
       description,
       ready: isLinux() && current !== null,
-      optimized: current !== null && String(current).trim() === target,
+      optimized: current !== null && String(current).replace(/\s+/g, ' ').trim() === target,
       command: `sysctl -w ${key}="${target}"`,
     };
   });
@@ -199,6 +202,10 @@ function optimizerStatus() {
   const vps = detectVps();
   const kernel = isLinux() ? os.release() : os.type();
 
+  const tweaks = tweakRows();
+  const readyTweaks = tweaks.filter((tweak) => tweak.ready);
+  const optimizedCount = readyTweaks.filter((tweak) => tweak.optimized).length;
+  const applied = readyTweaks.length > 0 && optimizedCount === readyTweaks.length;
   return {
     platform,
     supported,
@@ -208,11 +215,16 @@ function optimizerStatus() {
     cpuCount: hostCpuCount(),
     totalMemoryMb: Math.round(os.totalmem() / 1024 / 1024),
     dns: dnsStatus(),
-    tweaks: tweakRows(),
+    applied,
+    optimizedCount,
+    readyCount: readyTweaks.length,
+    tweaks,
     techniques: TECHNIQUE_PACK,
     plan: planCommands(),
     message: supported
-      ? 'Linux optimization is available. Apply requires running NexusPanel as root.'
+      ? applied
+        ? `All ${readyTweaks.length} supported VPS tuning values are active.`
+        : `${optimizedCount}/${readyTweaks.length} supported VPS tuning values are active.${isRoot() ? '' : ' Applying changes requires root.'}`
       : 'Windows detected. NexusPanel will not run OS/network optimization here.',
   };
 }

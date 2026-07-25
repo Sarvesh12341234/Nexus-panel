@@ -150,6 +150,24 @@ function verifyIdentity(name, serverRoot, nativeBinary = '') {
   return { ok: true, verification: 'runuser' };
 }
 
+function grantWritableRuntimePaths(name, profile) {
+  const targets = [
+    profile.envTemp,
+    profile.envCache,
+    profile.envConfig,
+    profile.envTemp && path.join(profile.envTemp, 'natives'),
+  ].filter((entry, index, values) => entry && values.indexOf(entry) === index);
+  if (!targets.length) return { ok: true };
+  for (const target of targets) fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+  const result = run('setfacl', [
+    '-m', `u:${name}:rwx,g::---,o::---,m::rwx,d:u:${name}:rwx,d:g::---,d:o::---,d:m::rwx`,
+    '--', ...targets,
+  ], 10000);
+  return result.status === 0
+    ? { ok: true }
+    : { ok: false, reason: 'runtime-path-acl-failed', error: String(result.stderr || result.stdout || '').trim().slice(0, 800) };
+}
+
 function ensureServerIdentity(profile, nativeBinary = '') {
   if (process.platform !== 'linux') return { available: false, reason: 'linux-only' };
   if (process.env.NEXUSPANEL_PER_SERVER_USERS === '0') return { available: false, reason: 'disabled' };
@@ -162,7 +180,10 @@ function ensureServerIdentity(profile, nativeBinary = '') {
   const name = identityName(profile.serverId);
   const cacheKey = `${profile.serverId}:${serverRoot}:${nativeBinary}`;
   const cached = cache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now() && accountUid(name)) return cached.value;
+  if (cached && cached.expiresAt > Date.now() && accountUid(name)) {
+    const runtimeAccess = grantWritableRuntimePaths(name, profile);
+    return runtimeAccess.ok ? cached.value : { available: false, ...runtimeAccess, name, uid: accountUid(name) };
+  }
 
   const account = createAccount(name, serverRoot);
   if (!account.ok) return { available: false, ...account, name };
@@ -180,6 +201,8 @@ function ensureServerIdentity(profile, nativeBinary = '') {
     verification = verifyIdentity(name, serverRoot, nativeBinary);
   }
   if (!verification.ok) return { available: false, ...verification, name, uid: accountUid(name) };
+  const runtimeAccess = grantWritableRuntimePaths(name, profile);
+  if (!runtimeAccess.ok) return { available: false, ...runtimeAccess, name, uid: accountUid(name) };
 
   const value = {
     available: true,

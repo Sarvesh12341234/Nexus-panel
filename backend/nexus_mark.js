@@ -184,8 +184,8 @@ function systemdProperties(profile, status, tier = 'maximum') {
   properties.push(
     'SystemCallArchitectures=native',
     'SystemCallFilter=~@mount @swap @reboot @raw-io @privileged',
-    'PrivateUsers=yes',
   );
+  if (!profile.nexusIdentity?.available) properties.push('PrivateUsers=yes');
   if (status.systemdVersion >= 254) properties.push('MemoryKSM=no');
   if (status.systemdVersion >= 257) properties.push('PrivatePIDs=yes');
   if (status.systemdVersion >= 249 && Number(profile.port) > 0) {
@@ -308,8 +308,9 @@ function wrapCommand(command, args, profile) {
   const native = status.native;
   const identity = ensureServerIdentity(profile, native.available ? native.binary : '');
   const launchProfile = { ...profile, nexusIdentity: identity };
-  const nativeCommand = native.available ? native.binary : command;
-  const nativeArgs = native.available
+  const nativeUsable = native.available && (identity.available || status.preflightPassed);
+  const nativeCommand = nativeUsable ? native.binary : command;
+  const nativeArgs = nativeUsable
     ? [
       '--root', profile.serverRoot,
       '--port', String(Number(profile.port) || 25565),
@@ -322,9 +323,9 @@ function wrapCommand(command, args, profile) {
       command: nativeCommand,
       args: nativeArgs,
       unit: '',
-      engine: native.available ? 'native-landlock-seccomp' : 'process-guard',
+      engine: nativeUsable ? 'native-landlock-seccomp' : 'process-guard',
       policyTier: status.tier,
-      nativeDetail: native.detail || native.reason || '',
+      nativeDetail: nativeUsable ? (native.detail || '') : (identity.reason || native.reason || ''),
       compatibilityDetail: status.failures?.[0]?.detail || status.reason || '',
       identity,
     };
@@ -353,7 +354,7 @@ function wrapCommand(command, args, profile) {
       ...nativeArgs,
     ],
     unit: `${unit}.service`,
-    engine: native.available ? 'native-kernel+cgroup-v2' : 'systemd-kernel-fallback',
+    engine: nativeUsable ? 'native-kernel+cgroup-v2' : 'systemd-kernel-fallback',
     policyTier: status.tier,
     nativeDetail: native.detail || native.reason || '',
     identity,

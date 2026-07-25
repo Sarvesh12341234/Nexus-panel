@@ -88,9 +88,14 @@ const FALLBACK_BEDROCK_VERSIONS = ['1.21.100.6', '1.21.93.1', '1.21.90.3', '1.21
 async function cached(key, loader) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.time < CACHE_MS) return hit.value;
-  const value = await loader();
-  cache.set(key, { time: Date.now(), value });
-  return value;
+  try {
+    const value = await loader();
+    cache.set(key, { time: Date.now(), value });
+    return value;
+  } catch (error) {
+    if (hit?.value) return hit.value;
+    throw error;
+  }
 }
 
 function clearSoftwareVersionCache() {
@@ -104,19 +109,20 @@ function clearSoftwareVersionCache() {
       || key.startsWith('github-')
       || key.startsWith('vexyhost-')
     ) {
-      cache.delete(key);
+      const hit = cache.get(key);
+      if (hit) hit.time = 0;
     }
   }
 }
 
 async function fetchJson(url) {
   let lastError;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       const response = await fetch(url, {
         redirect: 'follow',
         headers: { 'User-Agent': 'NexusPanel/2.0 (+https://github.com/Sarvesh12341234/Nexus-panel)' },
-        signal: AbortSignal.timeout(3500),
+        signal: AbortSignal.timeout(2200),
       });
       if (response.status === 404) throw new Error(`Upstream file not found: ${url}`);
       if (!response.ok) throw new Error(`Upstream request failed: ${response.status}`);

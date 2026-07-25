@@ -195,28 +195,36 @@ function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', cookieStr);
 }
 
-function authMiddleware(req, _res, next) {
+function authMiddleware(req, res, next) {
   const cookies = parseCookies(req.headers.cookie);
   const sessionId = decodeSession(cookies[SESSION_COOKIE]);
-  if (!sessionId) return next();
+  if (!sessionId) {
+    if (cookies[SESSION_COOKIE]) clearSessionCookie(res);
+    return next();
+  }
 
   const row = db.prepare(`
     SELECT users.*, sessions.id AS session_id, sessions.last_seen_at AS session_last_seen_at,
-      sessions.user_agent_hash AS session_user_agent_hash
+      sessions.user_agent_hash AS session_user_agent_hash,
+      sessions.expires_at AS session_expires_at
     FROM sessions
     JOIN users ON users.id = sessions.user_id
-    WHERE sessions.id = ? AND sessions.expires_at > ?
-  `).get(sessionId, Date.now());
+    WHERE sessions.id = ?
+  `).get(sessionId);
 
   const now = Date.now();
   const requestAgentHash = crypto.createHash('sha256').update(String(req.headers['user-agent'] || '')).digest('hex');
   const idleExpired = row && Number(row.session_last_seen_at || 0) && now - Number(row.session_last_seen_at) > SESSION_IDLE_MS;
   const agentMismatch = row?.session_user_agent_hash && row.session_user_agent_hash !== requestAgentHash;
-  if (row && row.expires_at && row.expires_at <= now) {
+  const sessionExpired = row && Number(row.session_expires_at || 0) <= now;
+  const accountExpired = row && row.role !== 'owner' && Number(row.expires_at || 0) > 0 && Number(row.expires_at) <= now;
+  if (accountExpired) {
     db.prepare('DELETE FROM users WHERE id = ? AND role != ?').run(row.id, 'owner');
     db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
-  } else if (row && (idleExpired || agentMismatch)) {
+    clearSessionCookie(res);
+  } else if (!row || sessionExpired || idleExpired || agentMismatch) {
     db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+    clearSessionCookie(res);
   } else if (row) {
     req.user = row;
     if (now - Number(row.session_last_seen_at || 0) > 5 * 60 * 1000) {
@@ -226,14 +234,19 @@ function authMiddleware(req, _res, next) {
   next();
 }
 
+function authRequired(res) {
+  clearSessionCookie(res);
+  return res.status(401).json({ error: 'Your session expired. Sign in again.', code: 'AUTH_REQUIRED' });
+}
+
 function requireAuth(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Login required.' });
+  if (!req.user) return authRequired(res);
   next();
 }
 
 function requireAccess(level) {
   return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: 'Login required.' });
+    if (!req.user) return authRequired(res);
     if (req.user.access_level < level) return res.status(403).json({ error: 'Not enough access.' });
     next();
   };
@@ -241,7 +254,7 @@ function requireAccess(level) {
 
 function requirePermission(permission, fallbackLevel = 0) {
   return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: 'Login required.' });
+    if (!req.user) return authRequired(res);
     if (!hasPermission(req.user, permission, fallbackLevel)) {
       return res.status(403).json({ error: 'This account does not have that permission.' });
     }

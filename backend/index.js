@@ -1617,7 +1617,7 @@ async function firstProtectedServerTreeEntry(root, relative = '') {
 }
 
 function uploadRows(serverId) {
-  return db.prepare('SELECT relative_path, file_name, size, uploaded_bytes, status, message, chunks_json, updated_at FROM upload_sessions WHERE server_id = ? ORDER BY updated_at DESC LIMIT 25')
+  return db.prepare("SELECT relative_path, file_name, size, uploaded_bytes, status, message, chunks_json, updated_at FROM upload_sessions WHERE server_id = ? AND status != 'complete' ORDER BY updated_at DESC LIMIT 25")
     .all(serverId)
     .map((row) => ({
       path: row.relative_path,
@@ -1715,7 +1715,7 @@ const propertySchema = [
   { key: 'max-players', label: 'Max Players', type: 'number', editions: ['java', 'bedrock'] },
   { key: 'server-port', label: 'IPv4 Port', type: 'number', editions: ['java', 'bedrock'] },
   { key: 'server-portv6', label: 'IPv6 Port', type: 'number', editions: ['bedrock'] },
-  { key: 'online-mode', label: 'Online Mode', type: 'boolean', editions: ['java'] },
+  { key: 'online-mode', label: 'Online Mode', type: 'boolean', editions: ['java', 'bedrock'] },
   { key: 'white-list', label: 'Whitelist', type: 'boolean', editions: ['java'] },
   { key: 'allow-list', label: 'Allowlist', type: 'boolean', editions: ['bedrock'] },
   { key: 'allow-cheats', label: 'Allow Cheats', type: 'boolean', editions: ['bedrock'] },
@@ -1772,6 +1772,7 @@ function defaultPropertyValues(server) {
     gamemode: 'survival',
     difficulty: 'normal',
     pvp: 'true',
+    'online-mode': 'true',
     'white-list': 'false',
     'allow-list': 'false',
     'allow-cheats': 'false',
@@ -2041,14 +2042,36 @@ async function writeProperties(server, values) {
   if (process.platform !== 'win32') await fs.promises.chmod(filePath, 0o644);
 }
 
-async function javaUuidForName(name) {
-  const response = await fetch(`https://api.mojang.com/users/profiles/minecraft/${encodeURIComponent(name)}`, {
-    headers: { 'User-Agent': 'NexusPanel/1.0' },
-  }).catch(() => null);
-  if (!response || response.status === 204 || !response.ok) return '00000000-0000-0000-0000-000000000000';
-  const profile = await response.json();
-  const raw = profile.id || '';
-  return raw.length === 32 ? `${raw.slice(0, 8)}-${raw.slice(8, 12)}-${raw.slice(12, 16)}-${raw.slice(16, 20)}-${raw.slice(20)}` : '00000000-0000-0000-0000-000000000000';
+function dashedUuid(raw) {
+  const value = String(raw || '').replaceAll('-', '').toLowerCase();
+  return /^[a-f0-9]{32}$/.test(value)
+    ? `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`
+    : '';
+}
+
+function offlineJavaUuid(name) {
+  const bytes = crypto.createHash('md5').update(`OfflinePlayer:${name}`, 'utf8').digest();
+  bytes[6] = (bytes[6] & 0x0f) | 0x30;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return dashedUuid(bytes.toString('hex'));
+}
+
+async function javaUuidForName(name, onlineMode = true) {
+  if (!onlineMode) return offlineJavaUuid(name);
+  const endpoints = [
+    `https://api.minecraftservices.com/minecraft/profile/lookup/name/${encodeURIComponent(name)}`,
+    `https://api.mojang.com/users/profiles/minecraft/${encodeURIComponent(name)}`,
+  ];
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      headers: { 'User-Agent': 'NexusPanel/3.0' },
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => null);
+    if (!response || response.status === 204 || response.status === 404 || !response.ok) continue;
+    const uuid = dashedUuid((await response.json().catch(() => null))?.id);
+    if (uuid) return uuid;
+  }
+  return '';
 }
 
 async function whitelistPath(server) {
@@ -2067,7 +2090,7 @@ async function readWhitelist(server) {
 }
 
 async function writeWhitelist(server, rows) {
-  await fs.promises.writeFile(await whitelistPath(server), JSON.stringify(rows, null, 2), 'utf8');
+  await atomicWriteText(await whitelistPath(server), `${JSON.stringify(rows, null, 2)}\n`);
 }
 
 function reloadWhitelistIfRunning(server, software) {
@@ -2477,7 +2500,7 @@ async function quarantinePluginFile(server, root, plugin, reason) {
   const source = assertInside(root, path.join(root, relative));
   const stats = await fs.promises.stat(source).catch(() => null);
   if (!stats?.isFile()) {
-    db.prepare('UPDATE plugins SET enabled = 0 WHERE id = ?').run(plugin.id);
+    if (plugin.id) db.prepare('UPDATE plugins SET enabled = 0 WHERE id = ?').run(plugin.id);
     return `Disabled plugin record ${plugin.name || plugin.fileName || plugin.id}; file was already absent.`;
   }
   const quarantineDir = assertInside(root, path.join(root, 'runtime', 'plugin-quarantine'));
@@ -2488,7 +2511,7 @@ async function quarantinePluginFile(server, root, plugin, reason) {
     await fs.promises.copyFile(source, target);
     await fs.promises.rm(source, { force: true });
   });
-  db.prepare('UPDATE plugins SET enabled = 0 WHERE id = ?').run(plugin.id);
+  if (plugin.id) db.prepare('UPDATE plugins SET enabled = 0 WHERE id = ?').run(plugin.id);
   appendLog(server.id, `[NexusPanel] Advanced agent quarantined ${displayPath(source)} because ${reason}.`);
   return `Quarantined ${plugin.name || path.basename(relative)} to ${displayPath(target)}`;
 }
@@ -2501,6 +2524,7 @@ async function applyAdvancedAgentActions(server, software, root, diagnostics, re
   const needle = logNeedleText(logs, diagnostics);
   const pluginProblem = [...ids].some((id) => [
     'plugin-exception',
+    'plugin-archive-corrupt',
     'plugin-dependency',
     'duplicate-plugin',
     'plugin-api-version',
@@ -2524,7 +2548,17 @@ async function applyAdvancedAgentActions(server, software, root, diagnostics, re
         if (action) actions.push(action);
       }
     } else {
-      warnings.push('Plugin/mod diagnosis found, but logs did not name a registered plugin file clearly enough to quarantine automatically.');
+      const corruptMatch = String(logs.join('\n')).match(/failed to open plugin jar\s+([^\r\n]+?\.jar)\b/i);
+      const relative = corruptMatch?.[1]?.trim().replaceAll('\\', '/').replace(/^\.?\//, '');
+      if (ids.has('plugin-archive-corrupt') && relative && !path.isAbsolute(relative)) {
+        const action = await quarantinePluginFile(server, root, {
+          name: path.basename(relative),
+          relativePath: relative,
+        }, 'Java reported that this plugin archive is corrupt');
+        if (action) actions.push(action);
+      } else {
+        warnings.push('Plugin/mod diagnosis found, but logs did not name a registered plugin file clearly enough to quarantine automatically.');
+      }
     }
   }
 
@@ -3089,9 +3123,11 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   };
   let advancedReasoning = '';
   try {
-    advancedReasoning = await advancedAi.reason({ server, diagnostics, logs: consoleLogs(server.id), context: repairContext });
+    const advancedPlan = await advancedAi.reasonPlan({ server, diagnostics, logs: consoleLogs(server.id), context: repairContext });
+    advancedReasoning = advancedPlan?.summary || '';
     if (advancedReasoning) {
       agentAnalysis.advancedReasoning = advancedReasoning;
+      agentAnalysis.advancedSuggestions = advancedPlan.suggestions || [];
       logFixed({
         serverId: server.id,
         category: 'advanced-ai',
@@ -4362,6 +4398,25 @@ function renderEscape(value) {
     .replaceAll("'", '&#39;');
 }
 
+function renderUserDate(user, value) {
+  const raw = typeof value === 'number' ? value : String(value || '');
+  const normalized = typeof raw === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(raw)
+    ? `${raw.replace(' ', 'T')}Z`
+    : raw;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return String(value || '');
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: getUserTimezone(user.id),
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }).format(date);
+}
+
 app.get('/api/host-agent/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (_req, res) => {
   res.json({ hostAgent: { ...hostAgent.localStatus(), live: await hostAgent.request('STATUS') } });
 }));
@@ -4379,7 +4434,7 @@ app.get('/api/security/render', requirePermission(capabilities.SECURITY_VIEW, pe
   const logins = events.map((event) => `
     <article class="audit-row">
       <div><strong>${renderEscape(event.email)}</strong><span>${renderEscape(event.browser)} - ${renderEscape(event.device)}</span></div>
-      <code>${renderEscape(event.ip || 'unknown IP')}</code><time>${renderEscape(event.createdAt)}</time>
+      <code>${renderEscape(event.ip || 'unknown IP')}</code><time>${renderEscape(renderUserDate(req.user, event.createdAt))}</time>
     </article>`).join('');
   const agentState = liveAgent.available && liveAgent.ok ? 'online' : 'unavailable';
   res.type('html').send(`
@@ -4393,7 +4448,7 @@ app.get('/api/security/render', requirePermission(capabilities.SECURITY_VIEW, pe
       <article><span>Response mode</span><strong>SSR + CSP</strong></article>
       <article><span>Panel version</span><strong>${PANEL_VERSION}</strong></article>
     </div>
-    <p class="muted">Generated and escaped on the server at ${renderEscape(new Date().toISOString())}.</p>
+    <p class="muted">Generated at ${renderEscape(renderUserDate(req.user, Date.now()))} (${renderEscape(getUserTimezone(req.user.id))}).</p>
     <div class="health-grid">${checks || '<p class="empty-state">No checks available.</p>'}</div>
     <div class="section-head"><div><p class="eyebrow">Audit</p><h2>Recent logins</h2></div></div>
     <div class="audit-list">${logins || '<p class="empty-state">No login events recorded yet.</p>'}</div>
@@ -4701,6 +4756,21 @@ app.post('/api/servers/:id/repair-preview', requirePermission(capabilities.SERVE
   const diagnostics = diagnoseRuntime(consoleLogs(server.id));
   const software = softwareForServer(server);
   const agent = await analyzeServerWithAgent(server, software, diagnostics, { allowWeb: true });
+  const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  const context = await advancedRepairContext(server, software, root).catch((error) => ({ error: error.message }));
+  const advancedPlan = await advancedAi.reasonPlan({
+    server,
+    diagnostics,
+    logs: consoleLogs(server.id),
+    context,
+  }).catch((error) => ({
+    summary: `Advanced AI reasoning unavailable: ${error.message}`,
+    suggestions: [],
+  }));
+  if (advancedPlan?.summary) {
+    agent.advancedReasoning = advancedPlan.summary;
+    agent.advancedSuggestions = advancedPlan.suggestions || [];
+  }
   res.json({
     server: server.name,
     signature: crashSignature(server, software, null, null).signature.slice(0, 12),
@@ -4810,7 +4880,11 @@ app.post('/api/host/provision', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/users', requirePermission(capabilities.ADMINS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  const assignedServerId = Number(req.body.assignedServerId || 0);
+  const assignAllServers = String(req.body.assignedServerId || '') === 'all';
+  if (assignAllServers && !ownerOnly(req)) {
+    return res.status(403).json({ error: 'Only the owner can assign every server.' });
+  }
+  const assignedServerId = assignAllServers ? 0 : Number(req.body.assignedServerId || 0);
   const assignedServer = assignedServerId
     ? db.prepare('SELECT * FROM servers WHERE id = ?').get(assignedServerId)
     : null;
@@ -4828,6 +4902,9 @@ app.post('/api/users', requirePermission(capabilities.ADMINS_MANAGE, permissions
   });
   if (assignedServer && user.role !== 'owner') {
     db.prepare('UPDATE servers SET owner_user_id = ? WHERE id = ?').run(user.id, assignedServer.id);
+  }
+  if (assignAllServers && user.role !== 'owner') {
+    db.prepare('UPDATE servers SET owner_user_id = ?').run(user.id);
   }
 
   res.status(201).json({ user });
@@ -4899,10 +4976,10 @@ app.get('/api/software/:key/versions', requireAuth, asyncRoute(async (req, res) 
 
 app.post('/api/software/check-updates', requirePermission(capabilities.SOFTWARE_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (_req, res) => {
   clearSoftwareVersionCache();
-  const versions = {};
-  for (const item of softwareCatalog()) {
-    versions[item.key] = await softwareVersions(item.key).catch(() => []);
-  }
+  const versions = Object.fromEntries(await Promise.all(softwareCatalog().map(async (item) => [
+    item.key,
+    await softwareVersions(item.key).catch(() => []),
+  ])));
   res.json({ checkedAt: Date.now(), versions });
 }));
 
@@ -5790,11 +5867,13 @@ app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
   if (software && !['paper', 'purpur', 'fabric', 'forge'].includes(software.key)) {
     return res.json({ hits: [], source: 'modrinth', message: 'Modrinth installs are available for Paper/Purpur plugins and Fabric/Forge mods.' });
   }
-  const defaultLoader = software?.key === 'purpur' ? 'paper' : ['paper', 'fabric', 'forge'].includes(software?.key) ? software.key : '';
-  const loader = String(req.query.loader || defaultLoader).trim().toLowerCase();
-  const projectType = ['mod', 'plugin'].includes(String(req.query.projectType || '').toLowerCase())
-    ? String(req.query.projectType).toLowerCase()
-    : ['fabric', 'forge'].includes(software?.key) ? 'mod' : 'plugin';
+  const modded = ['fabric', 'forge'].includes(software?.key);
+  const loader = modded
+    ? software.key
+    : ['paper', 'purpur'].includes(software?.key)
+      ? 'paper'
+      : String(req.query.loader || '').trim().toLowerCase();
+  const projectType = modded ? 'mod' : 'plugin';
   const version = String(req.query.version || server?.software_version || '').trim();
   const query = String(req.query.query || '').trim();
   const facets = [[`project_type:${projectType}`], ['server_side:required', 'server_side:optional']];
@@ -5814,6 +5893,8 @@ app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
   const data = await response.json();
   res.json({
     source: 'modrinth',
+    projectType,
+    loader,
     hits: (data.hits || []).map((project) => ({
       projectId: project.project_id,
       slug: project.slug,
@@ -5938,8 +6019,51 @@ app.get('/api/servers/:id/console', requirePermission(capabilities.CONSOLE_VIEW,
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ status: runtimeStatus(id), lines: consoleLogs(id) });
+  const details = runtimeDetails(id);
+  res.json({ status: details.status, players: details.players, lines: consoleLogs(id).slice(-300) });
 });
+
+function serverMetricsPayload(server) {
+  const details = runtimeDetails(server.id);
+  const processMetrics = processTreeMetrics({
+    pid: details.pid,
+    unit: details.unit,
+    cacheKey: `server:${server.id}`,
+  });
+  return {
+    status: details.status,
+    pid: details.pid,
+    unit: details.unit,
+    startedAt: details.startedAt,
+    metricSource: processMetrics.source,
+    processCount: processMetrics.pids.length,
+    players: details.players,
+    playerCount: details.players.length,
+    maxMemoryMb: server.max_memory_mb,
+    rssBytes: processMetrics.rssBytes,
+    rssMb: processMetrics.rssMb,
+    cpuPercent: processMetrics.cpuPercent,
+    metricSource: processMetrics.source,
+    kernelPressure: processMetrics.pressure,
+    memoryEvents: processMetrics.memoryEvents,
+    cpuThrottledCount: processMetrics.nrThrottled,
+    cpuThrottledUsec: processMetrics.throttledUsec,
+  };
+}
+
+function hostMetricsPayload() {
+  const memory = hostMemoryStats();
+  const load = os.loadavg()[0] || 0;
+  return {
+    cpuPercent: hostCpuPercent(),
+    ramUsedBytes: memory.used,
+    ramTotalBytes: memory.total,
+    ramUsedMb: Math.round(memory.used / 1024 / 1024),
+    ramTotalMb: Math.round(memory.total / 1024 / 1024),
+    load: Number(load.toFixed(2)),
+    cores: hostCpuCount(),
+  };
+}
 
 app.get('/api/servers/:id/console/stream', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
   const id = Number(req.params.id);
@@ -5954,9 +6078,16 @@ app.get('/api/servers/:id/console/stream', requirePermission(capabilities.CONSOL
     res.write(`event: ${event}\n`);
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
-  writeEvent('snapshot', { status: runtimeStatus(id), lines: consoleLogs(id) });
-  const unsubscribe = subscribeConsole(id, (line) => writeEvent('line', { line, status: runtimeStatus(id) }));
-  const heartbeat = setInterval(() => writeEvent('ping', { status: runtimeStatus(id), at: Date.now() }), 2000);
+  writeEvent('snapshot', { status: runtimeStatus(id), players: runtimeDetails(id).players, lines: consoleLogs(id).slice(-300) });
+  const unsubscribe = subscribeConsole(id, (line) => {
+    const details = runtimeDetails(id);
+    writeEvent('line', { line, status: details.status, players: details.players });
+  });
+  const heartbeat = setInterval(() => writeEvent('metrics', {
+    at: Date.now(),
+    server: serverMetricsPayload(target),
+    host: hostMetricsPayload(),
+  }), 1000);
   heartbeat.unref();
   req.on('close', () => {
     clearInterval(heartbeat);
@@ -5966,41 +6097,11 @@ app.get('/api/servers/:id/console/stream', requirePermission(capabilities.CONSOL
 
 app.get('/api/servers/:id/metrics', requireAuth, (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
-  const details = runtimeDetails(server.id);
-  const processMetrics = processTreeMetrics({
-    pid: details.pid,
-    unit: details.unit,
-    cacheKey: `server:${server.id}`,
-  });
-  res.json({
-    status: details.status,
-    pid: details.pid,
-    unit: details.unit,
-    startedAt: details.startedAt,
-    metricSource: processMetrics.source,
-    processCount: processMetrics.pids.length,
-    players: details.players,
-    playerCount: details.players.length,
-    maxMemoryMb: server.max_memory_mb,
-    rssMb: processMetrics.rssMb,
-    cpuPercent: processMetrics.cpuPercent,
-    kernelPressure: processMetrics.pressure,
-    memoryEvents: processMetrics.memoryEvents,
-    cpuThrottledCount: processMetrics.nrThrottled,
-    cpuThrottledUsec: processMetrics.throttledUsec,
-  });
+  res.json(serverMetricsPayload(server));
 });
 
 app.get('/api/system/metrics', requireAuth, (_req, res) => {
-  const memory = hostMemoryStats();
-  const load = os.loadavg()[0] || 0;
-  res.json({
-    cpuPercent: hostCpuPercent(),
-    ramUsedMb: Math.round(memory.used / 1024 / 1024),
-    ramTotalMb: Math.round(memory.total / 1024 / 1024),
-    load: Number(load.toFixed(2)),
-    cores: hostCpuCount(),
-  });
+  res.json(hostMetricsPayload());
 });
 
 app.use('/api/servers/:id/timeline', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
@@ -6168,13 +6269,42 @@ app.post('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_
   const software = findSoftware(server.software_key) || defaultSoftware(server.type);
   const name = String(req.body.name || '').trim();
   if (name.length < 2) return res.status(400).json({ error: 'Player name is required.' });
-  const rows = await readWhitelist(server);
-  if (rows.some((row) => String(row.name || '').toLowerCase() === name.toLowerCase())) {
-    return res.json({ players: rows });
+  if (software.edition === 'java' && !/^[A-Za-z0-9_]{3,16}$/.test(name)) {
+    return res.status(400).json({ error: 'Java usernames must be 3-16 letters, numbers, or underscores.' });
   }
-  rows.push(software.edition === 'java'
-    ? { uuid: await javaUuidForName(name), name }
-    : { name, xuid: String(req.body.xuid || ''), ignoresPlayerLimit: Boolean(req.body.ignoresPlayerLimit) });
+  let rows = await readWhitelist(server);
+  const existing = rows.find((row) => String(row.name || '').toLowerCase() === name.toLowerCase());
+  if (software.edition === 'java') {
+    const properties = await readProperties(server);
+    const onlineMode = String(properties['online-mode'] ?? 'true').toLowerCase() === 'true';
+    const uuid = await javaUuidForName(name, onlineMode);
+    if (!uuid) {
+      if (runtimeStatus(server.id) === 'online') {
+        await writeProperties(server, { 'white-list': 'true' });
+        sendCommand(server.id, 'whitelist on');
+        sendCommand(server.id, `whitelist add ${name}`);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        rows = await readWhitelist(server);
+        if (rows.some((row) => String(row.name || '').toLowerCase() === name.toLowerCase())) {
+          appendLog(server.id, `[NexusPanel] Whitelisted ${name} through the running Java server.`);
+          return res.status(201).json({ players: rows });
+        }
+      }
+      return res.status(404).json({
+        error: `No paid Java profile named "${name}" was found. Check the spelling, or disable Online Mode before adding an offline player.`,
+      });
+    }
+    if (existing) {
+      if (existing.uuid !== uuid || existing.name !== name) {
+        existing.uuid = uuid;
+        existing.name = name;
+      }
+    } else {
+      rows.push({ uuid, name });
+    }
+  } else {
+    if (!existing) rows.push({ name, xuid: String(req.body.xuid || ''), ignoresPlayerLimit: Boolean(req.body.ignoresPlayerLimit) });
+  }
   await writeWhitelist(server, rows);
   const key = software.edition === 'java' ? 'white-list' : 'allow-list';
   await writeProperties(server, { [key]: 'true' });
@@ -6569,9 +6699,8 @@ app.get('/api/servers/:id/files/upload-status', requirePermission(capabilities.F
         return res.status(409).json({ error: 'Existing upload checksum mismatch. Retry the file.' });
       }
     }
-    const fullChunk = [{ start: 0, end: complete.size }];
-    upsertUploadSession(server.id, target.relative, totalSize, complete.size, 'complete', 'Uploaded', fullChunk);
-    return res.json({ uploadedBytes: complete.size, uploadedChunks: fullChunk, complete: true, sha256: expectedFileHash || '' });
+    db.prepare('DELETE FROM upload_sessions WHERE server_id = ? AND relative_path = ?').run(server.id, target.relative);
+    return res.json({ uploadedBytes: complete.size, uploadedChunks: [{ start: 0, end: complete.size }], complete: true, sha256: expectedFileHash || '' });
   }
   const uploadedBytes = partial ? uploadedRangeBytes(chunks) : 0;
   upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, uploadedBytes ? 'paused' : 'waiting', uploadedBytes ? 'Ready to resume exact chunks' : 'Waiting for upload', chunks);
@@ -6618,7 +6747,7 @@ app.post('/api/servers/:id/files/upload-chunk', requirePermission(capabilities.F
       return res.status(409).json({ error: 'Final file checksum mismatch. Retry the upload.' });
     }
     await fs.promises.rename(partialPath, target.absolute);
-    upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'complete', expectedFileHash ? `Uploaded sha256:${finalHash}` : 'Uploaded', [{ start: 0, end: totalSize }]);
+    db.prepare('DELETE FROM upload_sessions WHERE server_id = ? AND relative_path = ?').run(server.id, target.relative);
     return res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true, sha256: finalHash });
   }
   upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, 'active', 'Uploading', chunks);
@@ -6653,7 +6782,7 @@ app.post('/api/servers/:id/files/upload-complete', requirePermission(capabilitie
     return res.status(409).json({ error: 'Final file checksum mismatch. Retry the upload.' });
   }
   await fs.promises.rename(partialPath, target.absolute);
-  upsertUploadSession(server.id, target.relative, totalSize, totalSize, 'complete', expectedFileHash ? `Uploaded sha256:${finalHash}` : 'Uploaded', [{ start: 0, end: totalSize }]);
+  db.prepare('DELETE FROM upload_sessions WHERE server_id = ? AND relative_path = ?').run(server.id, target.relative);
   res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true, sha256: finalHash });
 }));
 
@@ -6924,7 +7053,7 @@ function liveAgentDiagnosisKey(diagnostics) {
     .join('|');
 }
 
-function recentLiveAgentEpisode(serverId, signature, diagnosisKey, cooldownMs = 24 * 60 * 60 * 1000) {
+function recentLiveAgentEpisode(serverId, signature, diagnosisKey, cooldownMs = 7 * 24 * 60 * 60 * 1000) {
   const rows = db.prepare(`
     SELECT id, diagnoses_json, created_at
     FROM repair_agent_episodes
@@ -7006,6 +7135,20 @@ async function runLiveAgentSweep() {
         continue;
       }
       const analysis = await analyzeServerWithAgent(server, software, diagnostics, { allowWeb: true });
+      const repairContext = await advancedRepairContext(server, software, root).catch((error) => ({ error: error.message }));
+      const advancedPlan = await advancedAi.reasonPlan({
+        server,
+        diagnostics,
+        logs,
+        context: repairContext,
+      }).catch((error) => ({
+        summary: `Advanced AI reasoning unavailable: ${error.message}`,
+        suggestions: [],
+      }));
+      if (advancedPlan?.summary) {
+        analysis.advancedReasoning = advancedPlan.summary;
+        analysis.advancedSuggestions = advancedPlan.suggestions || [];
+      }
       const episodeId = repairAgent.recordEpisode({
         serverId: server.id,
         signature,
@@ -7017,7 +7160,10 @@ async function runLiveAgentSweep() {
         serverId: server.id,
         category: 'live-agent',
         title: 'Live agent analyzed console',
-        detail: `Episode ${episodeId}: ${diagnostics.map((item) => item.summary).join('; ')}`,
+        detail: [
+          `Episode ${episodeId}: ${diagnostics.map((item) => item.summary).join('; ')}`,
+          advancedPlan?.summary || '',
+        ].filter(Boolean).join('\n').slice(0, 1200),
         source: 'live-agent',
       });
       if (runtimeStatus(server.id) === 'offline' && diagnostics.some((item) => ['properties-path', 'properties-syntax', 'properties-value', 'properties-encoding'].includes(item.id))) {
@@ -7047,7 +7193,6 @@ async function runLiveAgentSweep() {
         }
       }
       if (runtimeStatus(server.id) === 'offline') {
-        const repairContext = await advancedRepairContext(server, software, root).catch(() => ({ plugins: [], files: [] }));
         const advancedActions = await applyAdvancedAgentActions(server, software, root, diagnostics, repairContext, logs);
         if (advancedActions.actions.length) {
           actions.push(`Live agent applied ${advancedActions.actions.length} safe action(s) for ${server.name}`);

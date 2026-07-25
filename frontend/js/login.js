@@ -9,6 +9,13 @@ async function checkAuth() {
   }
 }
 
+const loginParams = new URLSearchParams(window.location.search);
+if (loginParams.get('expired') === '1') {
+  const errorMsg = document.getElementById('errorMsg');
+  errorMsg.textContent = 'Your session expired. Sign in again.';
+  errorMsg.hidden = false;
+}
+
 async function checkSetup() {
   try {
     const response = await fetch('/api/bootstrap', { method: 'GET' });

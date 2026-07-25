@@ -111,6 +111,32 @@ function evidenceRank(text, diagnostics) {
   });
 }
 
+function suggestedTools(ranked, server) {
+  const modDirectory = ['fabric', 'forge'].includes(String(server?.software_key || '').toLowerCase()) ? 'mods' : 'plugins';
+  const candidates = {
+    java: { tool: 'diagnostic_command', command: 'java', args: ['-version'], reason: 'Verify the Java runtime actually used by the panel.' },
+    memory: { tool: 'diagnostic_command', command: 'free', args: ['-m'], reason: 'Check host memory pressure before changing the server allocation.' },
+    permission: { tool: 'diagnostic_command', command: 'getfacl', args: ['-p', '.'], reason: 'Inspect the isolated server root permissions and ACL.' },
+    network: { tool: 'diagnostic_command', command: 'ss', args: ['-lntup'], reason: 'Check listening sockets and port conflicts.' },
+    world: { tool: 'list_files', path: server?.type === 'bedrock' ? 'worlds' : 'world', reason: 'Inspect world storage before any repair or restore.' },
+    plugin: { tool: 'list_files', path: modDirectory, reason: `Inspect installed ${modDirectory} for loader or version conflicts.` },
+    configuration: { tool: 'read_file', path: 'server.properties', reason: 'Review the effective server configuration.' },
+    storage: { tool: 'diagnostic_command', command: 'df', args: ['-h', '.'], reason: 'Verify free storage in the server filesystem.' },
+    systemd: { tool: 'server_info', reason: 'Inspect the live process, cgroup allocation, and Nexus-Mark profile.' },
+    sandbox: { tool: 'diagnostic_command', command: 'namei', args: ['-l', '.'], reason: 'Verify every server-root path component is accessible.' },
+  };
+  const seen = new Set();
+  return ranked
+    .map((item) => candidates[item.token])
+    .filter((item) => {
+      const key = JSON.stringify(item || {});
+      if (!item || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 4);
+}
+
 async function install() {
   const result = packageInstalled() ? { code: 0, output: 'Package already installed.' } : await installPackage();
   if (result.code !== 0) {
@@ -133,7 +159,7 @@ async function setEnabled(enabled) {
   return status();
 }
 
-async function reason({ server, diagnostics = [], logs = [], context = null }) {
+async function reasonPlan({ server, diagnostics = [], logs = [], context = null }) {
   if (!status().ready) return null;
   const contextText = context
     ? JSON.stringify({
@@ -186,13 +212,28 @@ async function reason({ server, diagnostics = [], logs = [], context = null }) {
     .filter((item) => item.score >= 0.04 || item.evidenceCount > 0)
     .sort((left, right) => right.score - left.score || right.evidenceCount - left.evidenceCount)
     .slice(0, 4);
+  const suggestions = suggestedTools(ranked, server);
   if (!ranked.length) {
-    return modelText.trim()
+    const summary = modelText.trim()
       ? `Advanced AI found no corroborated failure signature. Model assessment: ${modelText.replace(/\s+/g, ' ').trim().slice(0, 600)} Deterministic checks retain control.`
       : 'Advanced AI found no corroborated failure signature. Deterministic repair checks retain control.';
+    return { summary, suggestions: [], modelAssessment: modelText.replace(/\s+/g, ' ').trim().slice(0, 600) };
   }
   const summary = ranked.map((item) => `${item.detail} ${Math.round(item.score * 100)}% (${item.evidenceCount} evidence match${item.evidenceCount === 1 ? '' : 'es'})`);
-  return `Advanced AI ensemble: ${summary.join(', ')}. Planner: ${modelText.replace(/\s+/g, ' ').trim().slice(0, 600)} Policy checks choose every action.`;
+  const next = suggestions.map((item) => {
+    if (item.command) return `${item.command} ${(item.args || []).join(' ')}`.trim();
+    return `${item.tool}${item.path ? ` ${item.path}` : ''}`;
+  });
+  return {
+    summary: `Advanced AI ensemble: ${summary.join(', ')}.${next.length ? ` Audited next checks: ${next.join('; ')}.` : ''} Model output is never executed directly.`,
+    suggestions,
+    modelAssessment: modelText.replace(/\s+/g, ' ').trim().slice(0, 600),
+  };
+}
+
+async function reason(input) {
+  const plan = await reasonPlan(input);
+  return plan?.summary || null;
 }
 
 if (require.main === module) {
@@ -209,6 +250,7 @@ if (require.main === module) {
 module.exports = {
   install,
   reason,
+  reasonPlan,
   setEnabled,
   status,
 };

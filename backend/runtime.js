@@ -10,6 +10,7 @@ const { installedJavaMajor, requiredJavaMajorForMinecraftVersion } = require('./
 const processes = new Map();
 const logs = new Map();
 const players = new Map();
+const partialLines = new Map();
 const logSubscribers = new Map();
 const intentionalStops = new Set();
 const pendingLogWrites = new Map();
@@ -81,7 +82,11 @@ function appendLog(serverId, line) {
 }
 
 function splitLines(serverId, chunk) {
-  String(chunk).split(/\r?\n/).filter(Boolean).forEach((line) => {
+  const id = Number(serverId);
+  const combined = `${partialLines.get(id) || ''}${String(chunk)}`;
+  const lines = combined.split(/\r?\n/);
+  partialLines.set(id, lines.pop() || '');
+  lines.filter(Boolean).forEach((line) => {
     trackPlayerLine(serverId, line);
     appendLog(serverId, line);
     detectRecoverableStartupFailure(serverId, line);
@@ -125,12 +130,21 @@ function subscribeConsole(serverId, send) {
 
 function trackPlayerLine(serverId, line) {
   const set = players.get(serverId) || new Set();
-  const joined = line.match(/(?:INFO\]: )?([A-Za-z0-9_]{2,16}) joined the game/i)
-    || line.match(/Player connected:\s*([A-Za-z0-9_ ]+)/i);
-  const left = line.match(/(?:INFO\]: )?([A-Za-z0-9_]{2,16}) left the game/i)
-    || line.match(/Player disconnected:\s*([A-Za-z0-9_ ]+)/i);
+  const joined = line.match(/(?:INFO\]:\s*)?([A-Za-z0-9_]{2,16}) joined the game\b/i)
+    || line.match(/\b([A-Za-z0-9_]{2,16}) logged in with entity id\b/i)
+    || line.match(/Player connected:\s*([A-Za-z0-9_ ]+?)(?:,|\s+xuid:|$)/i);
+  const left = line.match(/(?:INFO\]:\s*)?([A-Za-z0-9_]{2,16}) left the game\b/i)
+    || line.match(/\b([A-Za-z0-9_]{2,16}) lost connection\b/i)
+    || line.match(/Player disconnected:\s*([A-Za-z0-9_ ]+?)(?:,|\s+xuid:|$)/i);
+  const javaList = line.match(/There are \d+ of a max of \d+ players online:\s*(.*)$/i);
   if (joined) set.add(joined[1].trim());
   if (left) set.delete(left[1].trim());
+  if (javaList) {
+    set.clear();
+    for (const name of javaList[1].split(',').map((value) => value.trim()).filter((value) => /^[A-Za-z0-9_]{2,16}$/.test(value))) {
+      set.add(name);
+    }
+  }
   players.set(serverId, set);
 }
 
@@ -172,6 +186,7 @@ function ensureRuntimeEnvironment(root) {
   const dirs = {
     home: root,
     temp: path.join(root, '.nexusmark-tmp'),
+    natives: path.join(root, '.nexusmark-tmp', 'natives'),
     cache: path.join(root, 'runtime', 'cache'),
     config: path.join(root, 'runtime', 'config'),
   };
@@ -214,7 +229,18 @@ function startServer(server, software) {
     command = bundledJava || 'java';
     const nativeReserveMb = Math.max(128, Math.min(768, Math.ceil(dbMemoryMb * 0.15)));
     const heapMaxMb = Math.max(128, dbMemoryMb - nativeReserveMb);
-    args = [`-Xmx${heapMaxMb}M`, '-XX:+ExitOnOutOfMemoryError', `-Djava.io.tmpdir=${runtimeEnv.temp}`, `-Duser.home=${runtimeEnv.home}`, '-jar', executable, 'nogui'];
+    args = [
+      `-Xmx${heapMaxMb}M`,
+      '-XX:+ExitOnOutOfMemoryError',
+      `-Djava.io.tmpdir=${runtimeEnv.temp}`,
+      `-Djna.tmpdir=${runtimeEnv.natives}`,
+      `-Dio.netty.native.workdir=${runtimeEnv.natives}`,
+      `-Dorg.lwjgl.system.SharedLibraryExtractPath=${runtimeEnv.natives}`,
+      `-Duser.home=${runtimeEnv.home}`,
+      '-jar',
+      executable,
+      'nogui',
+    ];
     appendLog(server.id, `[NexusPanel] Java heap capped at ${heapMaxMb} MB with ${nativeReserveMb} MB reserved for threads, code cache, buffers, and kernel-accounted memory.`);
   } else if (software.key === 'pocketmine') {
     const header = fs.readFileSync(executable, { encoding: 'utf8', flag: 'r' }).slice(0, 80);
@@ -324,6 +350,7 @@ function startServer(server, software) {
     appendLog(server.id, `[NexusPanel] Process exited code=${code ?? 'none'} signal=${signal ?? 'none'}`);
     processes.delete(server.id);
     players.delete(server.id);
+    partialLines.delete(Number(server.id));
     if (exitHandler) {
       Promise.resolve(exitHandler({
         server,

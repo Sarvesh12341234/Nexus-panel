@@ -335,6 +335,10 @@ code {
   display: grid;
   gap: 0.5rem;
   margin-bottom: 0.75rem;
+  max-height: min(30vh, 300px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .server-list-item {
@@ -1189,12 +1193,15 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 .modrinth-card {
   display: grid;
   gap: 0.75rem;
+  grid-template-rows: auto minmax(3.2em, auto) auto 1fr auto;
   padding: 1rem;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 8px;
   position: relative;
   overflow: hidden;
+  min-width: 0;
+  min-height: 260px;
 }
 
 .plugin-icon {
@@ -1203,7 +1210,7 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   top: 1rem;
   width: 48px;
   height: 48px;
-  border-radius: 12px;
+  border-radius: 8px;
   object-fit: cover;
   border: 1px solid var(--line);
 }
@@ -1756,13 +1763,16 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 
 .setting-inline {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto minmax(120px, .5fr);
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, auto) minmax(0, .5fr);
   gap: .8rem;
-  align-items: end;
+  align-items: stretch;
 }
 
 .setting-inline button {
   min-width: 150px;
+  min-height: 44px;
+  align-self: end;
+  margin: 0;
 }
 
 .setting-row label {
@@ -1934,8 +1944,14 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 }
 
 .setting-inline #timezoneStatus {
-  align-self: end;
+  align-self: center;
   width: 100%;
+}
+
+body[data-theme] {
+  --panel: color-mix(in srgb, var(--sidebar) 82%, white 4%);
+  --panel-2: color-mix(in srgb, var(--bg) 82%, var(--cyan) 5%);
+  --line: color-mix(in srgb, var(--text) 17%, transparent);
 }
 
 #timezoneStatus[style*="color: #4CAF50"],

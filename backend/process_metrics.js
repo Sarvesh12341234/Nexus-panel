@@ -57,11 +57,17 @@ function linuxCgroupMetrics(unit) {
   const now = Date.now();
   let cachedGroup = unitCgroupCache.get(unit);
   if (!cachedGroup || cachedGroup.expiresAt <= now) {
-    const show = spawnSync('systemctl', ['show', unit, '-p', 'ControlGroup', '--value'], {
-      encoding: 'utf8',
-      windowsHide: true,
-    });
-    cachedGroup = { value: String(show.stdout || '').trim(), expiresAt: now + 30000 };
+    const direct = `/system.slice/${String(unit).replace(/^\/+/, '')}`;
+    if (fs.existsSync(path.join('/sys/fs/cgroup', direct, 'cgroup.procs'))) {
+      cachedGroup = { value: direct, expiresAt: now + 5 * 60 * 1000 };
+    } else {
+      const show = spawnSync('systemctl', ['show', unit, '-p', 'ControlGroup', '--value'], {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 450,
+      });
+      cachedGroup = { value: String(show.stdout || '').trim(), expiresAt: now + 30000 };
+    }
     unitCgroupCache.set(unit, cachedGroup);
   }
   const controlGroup = cachedGroup.value;
@@ -119,7 +125,7 @@ function processTreeMetrics({ pid, unit, cacheKey }) {
   const key = cacheKey || `${pid || 0}:${unit || ''}`;
   const now = Date.now();
   const previous = cache.get(key);
-  if (previous && now - previous.sampledAt < 1200) return previous.payload;
+  if (previous && now - previous.sampledAt < 250) return previous.payload;
   let sample = null;
   if (process.platform === 'linux') {
     sample = linuxCgroupMetrics(unit);
@@ -138,11 +144,12 @@ function processTreeMetrics({ pid, unit, cacheKey }) {
   let cpuPercent = 0;
   if (previous?.raw && sample.cpuTicks >= previous.raw.cpuTicks) {
     const elapsed = Math.max(1, now - previous.sampledAt) / 1000;
-    cpuPercent = Math.round(((sample.cpuTicks - previous.raw.cpuTicks) / CLK_TCK / elapsed) * 100);
+    cpuPercent = Math.round(((sample.cpuTicks - previous.raw.cpuTicks) / CLK_TCK / elapsed) * 1000) / 10;
   }
   const payload = {
     pid: pid || null,
     pids: sample.pids || [],
+    rssBytes: Math.max(0, Math.round(sample.rssBytes || 0)),
     rssMb: Math.round((sample.rssBytes || 0) / 1024 / 1024),
     cpuPercent: Math.max(0, Math.min(999, cpuPercent)),
     source: sample.source,

@@ -76,6 +76,8 @@ function hostMemoryStats() {
 }
 
 let lastCpuSnapshot = null;
+let lastCpuSampleAt = 0;
+let lastCpuPercent = 0;
 
 function readProcCpuSnapshot() {
   if (process.platform !== 'linux' || !fs.existsSync('/proc/stat')) return null;
@@ -88,18 +90,28 @@ function readProcCpuSnapshot() {
 }
 
 function hostCpuPercent() {
+  const now = Date.now();
+  if (lastCpuSampleAt && now - lastCpuSampleAt < 250) return lastCpuPercent;
   const current = readProcCpuSnapshot();
   if (current) {
     if (!lastCpuSnapshot) {
       lastCpuSnapshot = current;
-      return Math.min(100, Math.round(((os.loadavg()[0] || 0) / hostCpuCount()) * 100));
+      lastCpuPercent = Math.min(100, Math.round(((os.loadavg()[0] || 0) / hostCpuCount()) * 100));
+      lastCpuSampleAt = now;
+      return lastCpuPercent;
     }
     const idleDelta = current.idle - lastCpuSnapshot.idle;
     const totalDelta = current.total - lastCpuSnapshot.total;
     lastCpuSnapshot = current;
-    if (totalDelta > 0) return Math.max(0, Math.min(100, Math.round((1 - idleDelta / totalDelta) * 100)));
+    if (totalDelta > 0) {
+      lastCpuPercent = Math.max(0, Math.min(100, Math.round((1 - idleDelta / totalDelta) * 100)));
+      lastCpuSampleAt = now;
+      return lastCpuPercent;
+    }
   }
-  return Math.min(100, Math.round(((os.loadavg()[0] || 0) / hostCpuCount()) * 100));
+  lastCpuPercent = Math.min(100, Math.round(((os.loadavg()[0] || 0) / hostCpuCount()) * 100));
+  lastCpuSampleAt = now;
+  return lastCpuPercent;
 }
 
 module.exports = {
