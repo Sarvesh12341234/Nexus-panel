@@ -332,13 +332,15 @@ code {
 }
 
 .server-list {
+  --server-switch-row: 64px;
   display: grid;
   gap: 0.5rem;
   margin-bottom: 0.75rem;
-  max-height: min(30vh, 300px);
+  max-height: calc((var(--server-switch-row) * 3) + 1rem);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
+  padding-right: 0.25rem;
 }
 
 .server-list-item {
@@ -349,6 +351,8 @@ code {
   background: rgba(255, 255, 255, 0.045);
   color: var(--text);
   border: 1px solid var(--line);
+  min-height: var(--server-switch-row);
+  align-content: center;
 }
 
 .server-list-item small {

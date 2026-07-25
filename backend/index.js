@@ -62,10 +62,12 @@ const wakeWatchers = new Map();
 const tunnelProcesses = new Map();
 const passwordResetRequests = new Map();
 const keyedOperations = new Map();
+const repairJobs = new Map();
 const crashHistory = new Map();
 const crashRestartTimers = new Map();
 const autoBackupInFlight = new Set();
 const serverSizeCache = new Map();
+const liveUploadProgress = new Map();
 const adaptiveEngine = new AdaptiveEngine();
 const repairAgent = new RepairAgent(db);
 const repairWeb = new RepairWebResearch(db);
@@ -1619,17 +1621,31 @@ async function firstProtectedServerTreeEntry(root, relative = '') {
 function uploadRows(serverId) {
   return db.prepare("SELECT relative_path, file_name, size, uploaded_bytes, status, message, chunks_json, updated_at FROM upload_sessions WHERE server_id = ? AND status != 'complete' ORDER BY updated_at DESC LIMIT 25")
     .all(serverId)
-    .map((row) => ({
-      path: row.relative_path,
-      name: row.file_name,
-      size: row.size,
-      uploadedBytes: row.uploaded_bytes,
-      progress: row.size ? Math.min(100, Math.round((row.uploaded_bytes / row.size) * 100)) : 0,
-      status: row.status,
-      message: row.message,
-      chunks: parseJsonObject(row.chunks_json) || [],
-      updatedAt: row.updated_at,
-    }));
+    .map((row) => {
+      const key = `${Number(serverId)}:${row.relative_path}`;
+      const live = liveUploadProgress.get(key);
+      if (live && Date.now() - live.updatedAt > 15000) liveUploadProgress.delete(key);
+      const activeLive = live && Date.now() - live.updatedAt <= 15000 ? live : null;
+      const uploadedBytes = Math.min(
+        Number(row.size || 0),
+        Math.max(Number(row.uploaded_bytes || 0), Number(activeLive?.uploadedBytes || 0)),
+      );
+      return {
+        path: row.relative_path,
+        name: row.file_name,
+        size: row.size,
+        uploadedBytes,
+        progress: row.size ? Math.min(100, Math.round((uploadedBytes / row.size) * 100)) : 0,
+        status: activeLive?.status || row.status,
+        message: activeLive?.message || row.message,
+        chunks: parseJsonObject(row.chunks_json) || [],
+        updatedAt: activeLive?.updatedAt || row.updated_at,
+      };
+    });
+}
+
+function uploadProgressKey(serverId, relativePath) {
+  return `${Number(serverId)}:${String(relativePath || '')}`;
 }
 
 function parseChunkRanges(value) {
@@ -2575,7 +2591,13 @@ async function applyAdvancedAgentActions(server, software, root, diagnostics, re
 
   if (ids.has('java-missing') && software?.edition === 'java') {
     try {
-      const requirement = ensureSoftwareRequirements(software, server.id, () => {});
+      const requirement = await ensureSoftwareRequirements(
+        software,
+        server.id,
+        () => {},
+        server.software_version || 'latest',
+        root,
+      );
       actions.push(requirement.message);
     } catch (error) {
       warnings.push(`Java requirement repair needs owner/VPS package access: ${error.message}`);
@@ -4427,6 +4449,8 @@ app.get('/api/security/render', requirePermission(capabilities.SECURITY_VIEW, pe
     hostAgent.request('STATUS'),
   ]);
   const events = loginEventRows(10);
+  const deviceMemory = hostMemoryStats();
+  const deviceMemoryGb = Math.round((deviceMemory.total / 1024 / 1024 / 1024) * 10) / 10;
   const checks = (health.checks || []).map((check) => `
     <article class="${check.ok ? 'is-ok' : 'is-bad'}">
       <strong>${renderEscape(check.name)}</strong><span>${renderEscape(check.message)}</span>
@@ -4447,6 +4471,13 @@ app.get('/api/security/render', requirePermission(capabilities.SECURITY_VIEW, pe
       <article><span>Agent version</span><strong>${renderEscape(liveAgent.version || '3.0.0')}</strong></article>
       <article><span>Response mode</span><strong>SSR + CSP</strong></article>
       <article><span>Panel version</span><strong>${PANEL_VERSION}</strong></article>
+    </div>
+    <div class="section-head"><div><p class="eyebrow">Device</p><h2>Host information</h2></div></div>
+    <div class="security-runtime-strip">
+      <article><span>Platform</span><strong>${renderEscape(`${process.platform} ${os.arch()}`)}</strong></article>
+      <article><span>Kernel</span><strong>${renderEscape(os.release())}</strong></article>
+      <article><span>CPU</span><strong>${hostCpuCount()} logical cores</strong></article>
+      <article><span>Memory</span><strong>${deviceMemoryGb} GB</strong></article>
     </div>
     <p class="muted">Generated at ${renderEscape(renderUserDate(req.user, Date.now()))} (${renderEscape(getUserTimezone(req.user.id))}).</p>
     <div class="health-grid">${checks || '<p class="empty-state">No checks available.</p>'}</div>
@@ -6086,7 +6117,6 @@ app.get('/api/servers/:id/console/stream', requirePermission(capabilities.CONSOL
   const heartbeat = setInterval(() => writeEvent('metrics', {
     at: Date.now(),
     server: serverMetricsPayload(target),
-    host: hostMetricsPayload(),
   }), 1000);
   heartbeat.unref();
   req.on('close', () => {
@@ -6185,18 +6215,76 @@ app.post('/api/servers/:id/start', requirePermission(capabilities.SERVER_START, 
   }
 }));
 
+app.get('/api/servers/:id/fix/status', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  const job = repairJobs.get(server.id);
+  if (!job) return res.json({ status: 'idle', message: 'No repair is running.' });
+  res.json({
+    id: job.id,
+    status: job.status,
+    message: job.message,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    result: job.result || null,
+    error: job.error || '',
+  });
+});
+
 app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
   if (runtimeStatus(server.id) === 'online') return res.status(409).json({ error: 'Stop the server before running Fix Server.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This server has no repairable software runtime.' });
-  await safeTimelinePoint(server, req, 'Before Repair & Diagnose', 'Captured configuration before repair workflow.');
-  const report = await runServerRepair(server, software, { applyOptimizations: true });
-  const learned = learnRepairPlaybook(server, report);
-  appendLog(server.id, `[NexusPanel] Repair & Diagnose checks completed: ${report.summary} Start the server and keep it online for 60 seconds before the repair is trusted.`);
-  if (learned) appendLog(server.id, `[NexusPanel] Repair playbook ${learned.signature} recorded as an untrusted candidate; it will not be replayed until stable runtime validates it.`);
-  if (learned) logFixed({ serverId: server.id, category: 'learning', title: 'Repair playbook candidate recorded', detail: `Signature ${learned.signature}; ${learned.actions} action(s).`, source: 'repair-agent' });
-  res.json({ ok: true, ...report, learned, server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), req) });
+  const existing = repairJobs.get(server.id);
+  if (existing && ['queued', 'running'].includes(existing.status)) {
+    return res.status(202).json({ ok: true, queued: true, job: { id: existing.id, status: existing.status, message: existing.message } });
+  }
+  const job = {
+    id: crypto.randomUUID(),
+    status: 'queued',
+    message: 'Repair queued. The panel remains available.',
+    startedAt: Date.now(),
+    finishedAt: 0,
+    result: null,
+    error: '',
+  };
+  const actorUserId = req.user.id;
+  repairJobs.set(server.id, job);
+  appendLog(server.id, '[NexusPanel] Repair & Diagnose queued in the background.');
+  res.status(202).json({ ok: true, queued: true, job: { id: job.id, status: job.status, message: job.message } });
+
+  setImmediate(() => {
+    job.status = 'running';
+    job.message = 'Inspecting runtime, files, logs, and isolation policy...';
+    withKeyedOperation(`repair:${server.id}`, async () => {
+      await safeTimelinePoint(server, { user: { id: actorUserId } }, 'Before Repair & Diagnose', 'Captured configuration before repair workflow.');
+      const report = await runServerRepair(server, software, { applyOptimizations: true });
+      const learned = learnRepairPlaybook(server, report);
+      appendLog(server.id, `[NexusPanel] Repair & Diagnose checks completed: ${report.summary} Start the server and keep it online for 60 seconds before the repair is trusted.`);
+      if (learned) appendLog(server.id, `[NexusPanel] Repair playbook ${learned.signature} recorded as an untrusted candidate; it will not be replayed until stable runtime validates it.`);
+      if (learned) logFixed({ serverId: server.id, category: 'learning', title: 'Repair playbook candidate recorded', detail: `Signature ${learned.signature}; ${learned.actions} action(s).`, source: 'repair-agent' });
+      job.status = 'completed';
+      job.message = report.summary;
+      job.finishedAt = Date.now();
+      job.result = {
+        summary: report.summary,
+        learned,
+        actions: (report.actions || []).slice(0, 12),
+        warnings: (report.warnings || []).slice(0, 8),
+      };
+    }).catch((error) => {
+      job.status = 'failed';
+      job.message = `Repair failed: ${error.message}`;
+      job.error = error.message;
+      job.finishedAt = Date.now();
+      appendLog(server.id, `[NexusPanel] Repair & Diagnose failed: ${error.message}`);
+    }).finally(() => {
+      const cleanup = setTimeout(() => {
+        if (repairJobs.get(server.id) === job) repairJobs.delete(server.id);
+      }, 30 * 60 * 1000);
+      cleanup.unref();
+    });
+  });
 }));
 
 app.post('/api/servers/:id/eula', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
@@ -6679,6 +6767,29 @@ app.get('/api/servers/:id/files/uploads', requirePermission(capabilities.FILES_M
   res.json({ uploads: uploadRows(server.id) });
 });
 
+app.post('/api/servers/:id/files/upload-progress', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  const target = safeServerFile(server, req.body.path || '');
+  if (!target.relative) return res.status(400).json({ error: 'Choose an upload path.' });
+  const key = uploadProgressKey(server.id, target.relative);
+  if (req.body.status === 'complete' || req.body.status === 'canceled') {
+    liveUploadProgress.delete(key);
+    return res.json({ ok: true });
+  }
+  const session = uploadSession(server.id, target.relative);
+  if (!session) return res.status(404).json({ error: 'Upload session was not found.' });
+  const size = Number(session.size || req.body.size || 0);
+  const uploadedBytes = clampNumber(req.body.uploadedBytes, 0, Math.max(0, size), Number(session.uploaded_bytes || 0));
+  const previous = liveUploadProgress.get(key);
+  liveUploadProgress.set(key, {
+    uploadedBytes: Math.max(Number(previous?.uploadedBytes || 0), uploadedBytes),
+    status: 'active',
+    message: 'Uploading live',
+    updatedAt: Date.now(),
+  });
+  res.json({ ok: true });
+});
+
 app.get('/api/servers/:id/files/upload-status', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.query.path || '');
@@ -6700,6 +6811,7 @@ app.get('/api/servers/:id/files/upload-status', requirePermission(capabilities.F
       }
     }
     db.prepare('DELETE FROM upload_sessions WHERE server_id = ? AND relative_path = ?').run(server.id, target.relative);
+    liveUploadProgress.delete(uploadProgressKey(server.id, target.relative));
     return res.json({ uploadedBytes: complete.size, uploadedChunks: [{ start: 0, end: complete.size }], complete: true, sha256: expectedFileHash || '' });
   }
   const uploadedBytes = partial ? uploadedRangeBytes(chunks) : 0;
@@ -6748,6 +6860,7 @@ app.post('/api/servers/:id/files/upload-chunk', requirePermission(capabilities.F
     }
     await fs.promises.rename(partialPath, target.absolute);
     db.prepare('DELETE FROM upload_sessions WHERE server_id = ? AND relative_path = ?').run(server.id, target.relative);
+    liveUploadProgress.delete(uploadProgressKey(server.id, target.relative));
     return res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true, sha256: finalHash });
   }
   upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, 'active', 'Uploading', chunks);
@@ -6783,6 +6896,7 @@ app.post('/api/servers/:id/files/upload-complete', requirePermission(capabilitie
   }
   await fs.promises.rename(partialPath, target.absolute);
   db.prepare('DELETE FROM upload_sessions WHERE server_id = ? AND relative_path = ?').run(server.id, target.relative);
+  liveUploadProgress.delete(uploadProgressKey(server.id, target.relative));
   res.status(201).json({ ok: true, path: target.relative, uploadedBytes: totalSize, complete: true, sha256: finalHash });
 }));
 
@@ -6793,6 +6907,7 @@ app.post('/api/servers/:id/files/upload-pause', requirePermission(capabilities.F
   const partial = await fs.promises.stat(`${target.absolute}.uploading`).catch(() => null);
   const session = uploadSession(server.id, target.relative);
   const chunks = mergeChunkRanges(parseChunkRanges(session?.chunks_json));
+  liveUploadProgress.delete(uploadProgressKey(server.id, target.relative));
   upsertUploadSession(server.id, target.relative, Number(req.body.size || partial?.size || 0), uploadedRangeBytes(chunks), 'paused', 'Paused', chunks);
   res.json({ uploads: uploadRows(server.id) });
 }));
@@ -6803,6 +6918,7 @@ app.delete('/api/servers/:id/files/upload-session', requirePermission(capabiliti
   if (!target.relative) return res.status(400).json({ error: 'Choose an upload path.' });
   await fs.promises.rm(`${target.absolute}.uploading`, { force: true }).catch(() => {});
   db.prepare('DELETE FROM upload_sessions WHERE server_id = ? AND relative_path = ?').run(server.id, target.relative);
+  liveUploadProgress.delete(uploadProgressKey(server.id, target.relative));
   res.json({ uploads: uploadRows(server.id) });
 }));
 

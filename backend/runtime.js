@@ -61,16 +61,16 @@ function flushLogWrites() {
 setInterval(flushLogWrites, 150).unref();
 
 function appendLog(serverId, line) {
-  const numericServerId = Number(serverId);
-  const rows = logs.has(serverId) ? logs.get(serverId) : persistedLogLines(serverId);
+  const id = Number(serverId);
+  const rows = logs.has(id) ? logs.get(id) : persistedLogLines(id);
   const rendered = `[${new Date().toISOString()}] ${line}`;
   rows.push(rendered);
   while (rows.length > MAX_LOG_LINES) rows.shift();
-  logs.set(serverId, rows);
-  const pending = pendingLogWrites.get(serverId) || [];
+  logs.set(id, rows);
+  const pending = pendingLogWrites.get(id) || [];
   pending.push(rendered);
-  pendingLogWrites.set(serverId, pending);
-  const subscribers = logSubscribers.get(numericServerId);
+  pendingLogWrites.set(id, pending);
+  const subscribers = logSubscribers.get(id);
   if (subscribers) {
     for (const send of subscribers) {
       try {
@@ -84,12 +84,12 @@ function appendLog(serverId, line) {
 function splitLines(serverId, chunk) {
   const id = Number(serverId);
   const combined = `${partialLines.get(id) || ''}${String(chunk)}`;
-  const lines = combined.split(/\r?\n/);
+  const lines = combined.split(/\r\n|\n|\r/);
   partialLines.set(id, lines.pop() || '');
   lines.filter(Boolean).forEach((line) => {
-    trackPlayerLine(serverId, line);
-    appendLog(serverId, line);
-    detectRecoverableStartupFailure(serverId, line);
+    trackPlayerLine(id, line);
+    appendLog(id, line);
+    detectRecoverableStartupFailure(id, line);
   });
 }
 
@@ -107,12 +107,13 @@ function detectRecoverableStartupFailure(serverId, line) {
 }
 
 function runtimeStatus(serverId) {
-  return processes.has(serverId) ? 'online' : 'offline';
+  return processes.has(Number(serverId)) ? 'online' : 'offline';
 }
 
 function consoleLogs(serverId) {
-  if (!logs.has(serverId)) logs.set(serverId, persistedLogLines(serverId));
-  return logs.get(serverId);
+  const id = Number(serverId);
+  if (!logs.has(id)) logs.set(id, persistedLogLines(id));
+  return logs.get(id);
 }
 
 function subscribeConsole(serverId, send) {
@@ -129,33 +130,39 @@ function subscribeConsole(serverId, send) {
 }
 
 function trackPlayerLine(serverId, line) {
-  const set = players.get(serverId) || new Set();
-  const joined = line.match(/(?:INFO\]:\s*)?([A-Za-z0-9_]{2,16}) joined the game\b/i)
-    || line.match(/\b([A-Za-z0-9_]{2,16}) logged in with entity id\b/i)
-    || line.match(/Player connected:\s*([A-Za-z0-9_ ]+?)(?:,|\s+xuid:|$)/i);
-  const left = line.match(/(?:INFO\]:\s*)?([A-Za-z0-9_]{2,16}) left the game\b/i)
-    || line.match(/\b([A-Za-z0-9_]{2,16}) lost connection\b/i)
-    || line.match(/Player disconnected:\s*([A-Za-z0-9_ ]+?)(?:,|\s+xuid:|$)/i);
-  const javaList = line.match(/There are \d+ of a max of \d+ players online:\s*(.*)$/i);
+  const id = Number(serverId);
+  const clean = String(line || '')
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/§[0-9A-FK-OR]/gi, '');
+  const set = players.get(id) || new Set();
+  const joined = clean.match(/\b([A-Za-z0-9_]{1,16})\s+joined the game\b/i)
+    || clean.match(/\b([A-Za-z0-9_]{1,16})(?:\[[^\r\n]*?\])?\s+logged in with entity id\b/i)
+    || clean.match(/Player connected:\s*([A-Za-z0-9_ ]+?)(?:,|\s+xuid:|$)/i);
+  const left = clean.match(/\b([A-Za-z0-9_]{1,16})\s+left the game\b/i)
+    || clean.match(/\b([A-Za-z0-9_]{1,16})\s+lost connection\b/i)
+    || clean.match(/Player disconnected:\s*([A-Za-z0-9_ ]+?)(?:,|\s+xuid:|$)/i);
+  const javaList = clean.match(/There are \d+ of a max of \d+ players online[.:]\s*(.*)$/i);
   if (joined) set.add(joined[1].trim());
   if (left) set.delete(left[1].trim());
   if (javaList) {
     set.clear();
-    for (const name of javaList[1].split(',').map((value) => value.trim()).filter((value) => /^[A-Za-z0-9_]{2,16}$/.test(value))) {
+    for (const name of javaList[1].split(',').map((value) => value.trim()).filter((value) => /^[A-Za-z0-9_]{1,16}$/.test(value))) {
       set.add(name);
     }
   }
-  players.set(serverId, set);
+  players.set(id, set);
 }
 
 function runtimeDetails(serverId) {
-  const child = processes.get(serverId);
+  const id = Number(serverId);
+  const child = processes.get(id);
   return {
     status: child ? 'online' : 'offline',
     pid: child ? child.pid : null,
     unit: child?.nexusUnit || '',
     startedAt: child?.startedAt || 0,
-    players: [...(players.get(serverId) || new Set())],
+    players: [...(players.get(id) || new Set())],
   };
 }
 
@@ -197,14 +204,15 @@ function ensureRuntimeEnvironment(root) {
 }
 
 function startServer(server, software) {
-  if (processes.has(server.id)) return { ok: true, message: 'Server already running.' };
+  const serverId = Number(server.id);
+  if (processes.has(serverId)) return { ok: true, message: 'Server already running.' };
   if (!server.executable_path || !fs.existsSync(server.executable_path)) {
     throw new Error('Install server software before starting.');
   }
 
   const root = ensureServerDirs(server);
   const runtimeEnv = ensureRuntimeEnvironment(root);
-  appendLog(server.id, `[NexusPanel] Working directory: ${root}`);
+  appendLog(serverId, `[NexusPanel] Working directory: ${root}`);
   const executable = server.executable_path;
   const totalCpuCores = hostCpuCount();
   const dbMemoryMb = Math.max(256, Math.round(Number(server.max_memory_mb) || 1024));
@@ -241,7 +249,7 @@ function startServer(server, software) {
       executable,
       'nogui',
     ];
-    appendLog(server.id, `[NexusPanel] Java heap capped at ${heapMaxMb} MB with ${nativeReserveMb} MB reserved for threads, code cache, buffers, and kernel-accounted memory.`);
+    appendLog(serverId, `[NexusPanel] Java heap capped at ${heapMaxMb} MB with ${nativeReserveMb} MB reserved for threads, code cache, buffers, and kernel-accounted memory.`);
   } else if (software.key === 'pocketmine') {
     const header = fs.readFileSync(executable, { encoding: 'utf8', flag: 'r' }).slice(0, 80);
     if (!header.includes('<?php')) {
@@ -263,7 +271,7 @@ function startServer(server, software) {
     args = Array.isArray(software.startArgs) ? software.startArgs : [];
   }
 
-  appendLog(server.id, `[NexusPanel] Starting ${server.name} with ${software.name}...`);
+  appendLog(serverId, `[NexusPanel] Starting ${server.name} with ${software.name}...`);
   let mark = null;
   try {
     mark = JSON.parse(server.nexus_mark_profile || '{}');
@@ -273,7 +281,7 @@ function startServer(server, software) {
   const storedProfile = mark || {};
   const profile = {
     ...storedProfile,
-    serverId: server.id,
+    serverId,
     serverRoot: root,
     port: Number(server.port || 25565),
     cpuCores: dbCpuCores,
@@ -288,19 +296,19 @@ function startServer(server, software) {
     envCache: runtimeEnv.cache,
     envConfig: runtimeEnv.config,
   };
-  appendLog(server.id, `[NexusPanel] Nexus-Mark allocation enforced from database: ${dbMemoryMb} MB RAM, ${dbCpuCores} CPU core(s).`);
+  appendLog(serverId, `[NexusPanel] Nexus-Mark allocation enforced from database: ${dbMemoryMb} MB RAM, ${dbCpuCores} CPU core(s).`);
   const wrapped = wrapCommand(command, args, profile);
   if (wrapped.identity?.available) {
-    appendLog(server.id, `[NexusPanel] Dedicated kernel identity active: ${wrapped.identity.name} (UID ${wrapped.identity.uid}), isolated from other server processes.`);
+    appendLog(serverId, `[NexusPanel] Dedicated kernel identity active: ${wrapped.identity.name} (UID ${wrapped.identity.uid}), isolated from other server processes.`);
   } else if (process.platform === 'linux') {
-    appendLog(server.id, `[NexusPanel] Per-server UID layer unavailable (${wrapped.identity?.reason || 'host compatibility'}); remaining Nexus-Mark layers stay active.`);
+    appendLog(serverId, `[NexusPanel] Per-server UID layer unavailable (${wrapped.identity?.reason || 'host compatibility'}); remaining Nexus-Mark layers stay active.`);
   }
   if (wrapped.engine === 'native-kernel+cgroup-v2') {
-    appendLog(server.id, `[NexusPanel] Nexus-Mark ${wrapped.policyTier || 'compatible'} policy active: cgroup v2 + namespaces + Landlock + seccomp (${wrapped.nativeDetail}).`);
+    appendLog(serverId, `[NexusPanel] Nexus-Mark ${wrapped.policyTier || 'compatible'} policy active: cgroup v2 + namespaces + Landlock + seccomp (${wrapped.nativeDetail}).`);
   } else if (wrapped.engine === 'native-landlock-seccomp') {
-    appendLog(server.id, `[NexusPanel] Nexus-Mark native Landlock/seccomp active; systemd cgroup policy is unavailable (${wrapped.compatibilityDetail || 'host compatibility'}).`);
+    appendLog(serverId, `[NexusPanel] Nexus-Mark native Landlock/seccomp active; systemd cgroup policy is unavailable (${wrapped.compatibilityDetail || 'host compatibility'}).`);
   } else if (process.platform === 'linux') {
-    appendLog(server.id, `[NexusPanel] Nexus-Mark native runtime unavailable (${wrapped.nativeDetail || 'unsupported host'}); using ${wrapped.engine}.`);
+    appendLog(serverId, `[NexusPanel] Nexus-Mark native runtime unavailable (${wrapped.nativeDetail || 'unsupported host'}); using ${wrapped.engine}.`);
   }
   const child = spawn(wrapped.command, wrapped.args, spawnOptions({
     cwd: root,
@@ -308,49 +316,49 @@ function startServer(server, software) {
     windowsHide: true,
   }, profile));
 
-  processes.set(server.id, child);
+  processes.set(serverId, child);
   child.startedAt = Date.now();
   child.stopCommand = software.stopCommand || 'stop';
   child.nexusUnit = wrapped.unit;
-  child.nexusGuardTimer = startAllocationGuard(server.id, child, profile);
+  child.nexusGuardTimer = startAllocationGuard(serverId, child, profile);
   if (wrapped.unit) {
     if (profile.startupCpuQuotaPercent > profile.cpuQuotaPercent) {
-      appendLog(server.id, `[NexusPanel] Cgroup active: startup ${profile.startupCpuQuotaPercent}% CPU, then ${profile.cpuQuotaPercent}% CPU.`);
+      appendLog(serverId, `[NexusPanel] Cgroup active: startup ${profile.startupCpuQuotaPercent}% CPU, then ${profile.cpuQuotaPercent}% CPU.`);
       const throttleTimer = setTimeout(() => {
-        if (processes.get(server.id) !== child) return;
+        if (processes.get(serverId) !== child) return;
         const result = spawnSync('systemctl', ['set-property', wrapped.unit, `CPUQuota=${profile.cpuQuotaPercent}%`], {
           encoding: 'utf8',
           windowsHide: true,
         });
-        if (result.status === 0) appendLog(server.id, `[NexusPanel] Startup CPU burst ended. Limit is now ${profile.cpuCores} core(s).`);
+        if (result.status === 0) appendLog(serverId, `[NexusPanel] Startup CPU burst ended. Limit is now ${profile.cpuCores} core(s).`);
         else {
           const detail = String(result.stderr || '').trim() || 'systemctl error';
-          if (/unit .* not found/i.test(detail)) appendLog(server.id, '[NexusPanel] Startup CPU burst unit was already collected; steady database allocation remains enforced by Nexus-Mark.');
-          else appendLog(server.id, `[NexusPanel] CPU throttle update failed: ${detail}`);
+          if (/unit .* not found/i.test(detail)) appendLog(serverId, '[NexusPanel] Startup CPU burst unit was already collected; steady database allocation remains enforced by Nexus-Mark.');
+          else appendLog(serverId, `[NexusPanel] CPU throttle update failed: ${detail}`);
         }
       }, 45 * 1000);
       throttleTimer.unref();
       child.nexusThrottleTimer = throttleTimer;
     } else {
-      appendLog(server.id, `[NexusPanel] Cgroup active: steady limit ${profile.cpuQuotaPercent}% CPU (${profile.cpuCores} cores); startup burst is disabled for allocations above 3 cores.`);
+      appendLog(serverId, `[NexusPanel] Cgroup active: steady limit ${profile.cpuQuotaPercent}% CPU (${profile.cpuCores} cores); startup burst is disabled for allocations above 3 cores.`);
     }
   }
-  child.stdout.on('data', (chunk) => splitLines(server.id, chunk));
-  child.stderr.on('data', (chunk) => splitLines(server.id, chunk));
+  child.stdout.on('data', (chunk) => splitLines(serverId, chunk));
+  child.stderr.on('data', (chunk) => splitLines(serverId, chunk));
   child.on('error', (error) => {
     if (child.nexusGuardTimer) clearInterval(child.nexusGuardTimer);
     if (child.nexusThrottleTimer) clearTimeout(child.nexusThrottleTimer);
-    appendLog(server.id, `[NexusPanel] Failed to start: ${error.message}`);
-    processes.delete(server.id);
+    appendLog(serverId, `[NexusPanel] Failed to start: ${error.message}`);
+    processes.delete(serverId);
   });
   child.on('exit', (code, signal) => {
     if (child.nexusGuardTimer) clearInterval(child.nexusGuardTimer);
     if (child.nexusThrottleTimer) clearTimeout(child.nexusThrottleTimer);
-    const intentional = intentionalStops.delete(server.id);
-    appendLog(server.id, `[NexusPanel] Process exited code=${code ?? 'none'} signal=${signal ?? 'none'}`);
-    processes.delete(server.id);
-    players.delete(server.id);
-    partialLines.delete(Number(server.id));
+    const intentional = intentionalStops.delete(serverId);
+    appendLog(serverId, `[NexusPanel] Process exited code=${code ?? 'none'} signal=${signal ?? 'none'}`);
+    processes.delete(serverId);
+    players.delete(serverId);
+    partialLines.delete(serverId);
     if (exitHandler) {
       Promise.resolve(exitHandler({
         server,
@@ -571,18 +579,19 @@ function terminateProcessTree(child) {
 }
 
 function restartServer(server, software) {
-  const child = processes.get(server.id);
+  const serverId = Number(server.id);
+  const child = processes.get(serverId);
   if (!child) return startServer(server, software);
-  appendLog(server.id, '[NexusPanel] Restart requested.');
-  intentionalStops.add(server.id);
+  appendLog(serverId, '[NexusPanel] Restart requested.');
+  intentionalStops.add(serverId);
   child.stdin.write(`${child.stopCommand || 'stop'}\n`);
   const timer = setInterval(() => {
-    if (!processes.has(server.id)) {
+    if (!processes.has(serverId)) {
       clearInterval(timer);
       try {
         startServer(server, software);
       } catch (error) {
-        appendLog(server.id, `[NexusPanel] Restart failed: ${error.message}`);
+        appendLog(serverId, `[NexusPanel] Restart failed: ${error.message}`);
       }
     }
   }, 350);
@@ -590,37 +599,40 @@ function restartServer(server, software) {
 }
 
 function sendCommand(serverId, command) {
-  const child = processes.get(serverId);
+  const id = Number(serverId);
+  const child = processes.get(id);
   if (!child) throw new Error('Server is not running.');
   const clean = String(command || '').trim().replace(/^\//, '');
   if (!clean) throw new Error('Command is empty.');
   child.stdin.write(`${clean}\n`);
-  const line = appendLog(serverId, `> ${clean}`);
+  const line = appendLog(id, `> ${clean}`);
   return { ok: true, line };
 }
 
 function stopServer(serverId) {
-  const child = processes.get(serverId);
+  const id = Number(serverId);
+  const child = processes.get(id);
   if (!child) return { ok: true, message: 'Server is already offline.' };
-  intentionalStops.add(serverId);
+  intentionalStops.add(id);
   child.stdin.write(`${child.stopCommand || 'stop'}\n`);
-  appendLog(serverId, '[NexusPanel] Sent graceful stop.');
+  appendLog(id, '[NexusPanel] Sent graceful stop.');
   return { ok: true, message: 'Stop command sent.' };
 }
 
 function killServer(serverId) {
-  const child = processes.get(serverId);
+  const id = Number(serverId);
+  const child = processes.get(id);
   if (!child) return { ok: true, message: 'Server is already offline.' };
-  intentionalStops.add(serverId);
+  intentionalStops.add(id);
   if (child.nexusUnit && process.platform === 'linux') {
     spawnSync('systemctl', ['kill', child.nexusUnit], { stdio: 'ignore' });
   } else if (process.platform === 'win32') {
     terminateProcessTree(child);
-    appendLog(serverId, '[NexusPanel] Kill requested.');
+    appendLog(id, '[NexusPanel] Kill requested.');
     return { ok: true, message: 'Kill requested.' };
   }
   child.kill('SIGTERM');
-  appendLog(serverId, '[NexusPanel] Kill requested.');
+  appendLog(id, '[NexusPanel] Kill requested.');
   return { ok: true, message: 'Kill requested.' };
 }
 
@@ -636,6 +648,7 @@ module.exports = {
   runtimeStatus,
   sendCommand,
   subscribeConsole,
+  trackPlayerLine,
   startServer,
   restartServer,
   setExitHandler,

@@ -1,4 +1,4 @@
-const { spawn } = require('node:child_process');
+const { fork, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -21,6 +21,9 @@ const focusLabels = [
 ];
 
 let pipelinePromise = null;
+let reasoningWorker = null;
+let reasoningRequestId = 0;
+const reasoningRequests = new Map();
 
 function packageInstalled() {
   try {
@@ -159,7 +162,7 @@ async function setEnabled(enabled) {
   return status();
 }
 
-async function reasonPlan({ server, diagnostics = [], logs = [], context = null }) {
+async function reasonPlanLocal({ server, diagnostics = [], logs = [], context = null }) {
   if (!status().ready) return null;
   const contextText = context
     ? JSON.stringify({
@@ -231,20 +234,93 @@ async function reasonPlan({ server, diagnostics = [], logs = [], context = null 
   };
 }
 
+function rejectReasoningRequests(error) {
+  for (const pending of reasoningRequests.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+  reasoningRequests.clear();
+}
+
+function ensureReasoningWorker() {
+  if (reasoningWorker?.connected) return reasoningWorker;
+  const child = fork(__filename, ['--reason-worker'], {
+    cwd: workspaceRoot,
+    env: { ...process.env, NEXUSPANEL_ADVANCED_AI_WORKER: '1' },
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    windowsHide: true,
+  });
+  child.on('message', (message) => {
+    if (message?.type !== 'reason-result') return;
+    const pending = reasoningRequests.get(message.id);
+    if (!pending) return;
+    reasoningRequests.delete(message.id);
+    clearTimeout(pending.timer);
+    if (message.error) pending.reject(new Error(message.error));
+    else pending.resolve(message.result || null);
+  });
+  child.on('error', (error) => rejectReasoningRequests(error));
+  child.on('exit', (code) => {
+    if (reasoningWorker === child) reasoningWorker = null;
+    rejectReasoningRequests(new Error(`Advanced AI worker exited with code ${code ?? 'unknown'}.`));
+  });
+  reasoningWorker = child;
+  return child;
+}
+
+async function reasonPlan(input) {
+  if (!status().ready) return null;
+  if (process.env.NEXUSPANEL_ADVANCED_AI_WORKER === '1') return reasonPlanLocal(input);
+  const worker = ensureReasoningWorker();
+  const id = ++reasoningRequestId;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reasoningRequests.delete(id);
+      reject(new Error('Advanced AI worker timed out.'));
+    }, 180000);
+    timer.unref();
+    reasoningRequests.set(id, { resolve, reject, timer });
+    worker.send({ type: 'reason-plan', id, input }, (error) => {
+      if (!error) return;
+      const pending = reasoningRequests.get(id);
+      if (!pending) return;
+      reasoningRequests.delete(id);
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
 async function reason(input) {
   const plan = await reasonPlan(input);
   return plan?.summary || null;
 }
 
 if (require.main === module) {
-  install()
-    .then((payload) => {
-      console.log(JSON.stringify(payload, null, 2));
-    })
-    .catch((error) => {
-      console.error(error.message);
-      process.exit(1);
+  if (process.argv.includes('--reason-worker')) {
+    let queue = Promise.resolve();
+    process.on('message', (message) => {
+      if (message?.type !== 'reason-plan') return;
+      queue = queue.then(async () => {
+        try {
+          const result = await reasonPlanLocal(message.input || {});
+          process.send?.({ type: 'reason-result', id: message.id, result });
+        } catch (error) {
+          process.send?.({ type: 'reason-result', id: message.id, error: error.message });
+        }
+      });
     });
+    process.on('disconnect', () => process.exit(0));
+  } else {
+    install()
+      .then((payload) => {
+        console.log(JSON.stringify(payload, null, 2));
+      })
+      .catch((error) => {
+        console.error(error.message);
+        process.exit(1);
+      });
+  }
 }
 
 module.exports = {

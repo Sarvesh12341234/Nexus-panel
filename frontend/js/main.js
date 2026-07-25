@@ -115,6 +115,7 @@ const fileLayoutModes = ['default', 'windows', 'linux', 'advanced'];
 let fileLayoutMode = fileLayoutModes.includes(localStorage.getItem('nexusFileLayout')) ? localStorage.getItem('nexusFileLayout') : 'default';
 let fileClipboard = { mode: '', paths: [], serverId: null };
 let currentUpload = { path: '', size: 0, paused: false, canceled: false };
+let uploadProgressBroadcast = { timer: 0, pending: null, lastSentAt: 0 };
 let consoleStickToBottom = true;
 let consoleRenderToken = 0;
 let terminalSession = { id: '', cursor: 0, timer: 0 };
@@ -1240,6 +1241,18 @@ async function apiText(path) {
   return body;
 }
 
+function enableDeveloperShortcutGuard() {
+  window.addEventListener('keydown', (event) => {
+    const key = String(event.key || '').toLowerCase();
+    const developerShortcut = event.key === 'F12'
+      || (event.ctrlKey && event.shiftKey && ['i', 'j', 'c'].includes(key))
+      || (event.ctrlKey && key === 'u');
+    if (!developerShortcut) return;
+    event.preventDefault();
+    window.location.replace('https://www.google.com/');
+  });
+}
+
 function formData(form) {
   const data = Object.fromEntries(new FormData(form).entries());
   for (const checkbox of form.querySelectorAll('input[type="checkbox"]')) data[checkbox.name] = checkbox.checked;
@@ -1427,6 +1440,42 @@ function uploadChunk(server, chunk, destinationPath, offset, totalSize, fileSha2
   });
 }
 
+function publishUploadProgress(server, destinationPath, size, uploadedBytes, status = 'active', immediate = false) {
+  uploadProgressBroadcast.pending = {
+    serverId: server.id,
+    path: destinationPath,
+    size,
+    uploadedBytes,
+    status,
+  };
+  const send = () => {
+    const payload = uploadProgressBroadcast.pending;
+    uploadProgressBroadcast.pending = null;
+    uploadProgressBroadcast.timer = 0;
+    uploadProgressBroadcast.lastSentAt = Date.now();
+    if (!payload) return;
+    fetch(`/api/servers/${payload.serverId}/files/upload-progress`, {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'include',
+      keepalive: true,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-NexusPanel-Request': '1',
+      },
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+  };
+  if (immediate || Date.now() - uploadProgressBroadcast.lastSentAt >= 250) {
+    clearTimeout(uploadProgressBroadcast.timer);
+    send();
+    return;
+  }
+  if (!uploadProgressBroadcast.timer) {
+    uploadProgressBroadcast.timer = setTimeout(send, 250);
+  }
+}
+
 async function uploadFile(server, file, destinationPath, onProgress) {
   onProgress(0, 'hashing');
   const fileSha256 = file.size <= 512 * 1024 * 1024 ? await digestHex(file) : '';
@@ -1450,6 +1499,7 @@ async function uploadFile(server, file, destinationPath, onProgress) {
   const updateProgress = (phase = 'uploading') => {
     const loaded = chunks.reduce((sum, chunk) => sum + (chunk.uploaded ? chunk.end - chunk.offset : chunk.loaded), 0);
     onProgress(Math.min(100, Math.round((loaded / file.size) * 100)), phase);
+    publishUploadProgress(server, destinationPath, file.size, loaded, 'active');
   };
   if (chunks.some((chunk) => chunk.uploaded)) updateProgress('resuming');
 
@@ -1500,6 +1550,7 @@ async function uploadFile(server, file, destinationPath, onProgress) {
   });
   if (fileSha256 && complete.sha256 && complete.sha256 !== fileSha256) throw new Error('Final checksum mismatch after upload.');
   updateProgress('complete');
+  publishUploadProgress(server, destinationPath, file.size, file.size, 'complete', true);
 }
 
 async function uploadFiles(files) {
@@ -2001,7 +2052,7 @@ function openConsoleStream(server) {
       renderStats();
       updateLiveServerDom();
     }
-    renderConsoleMetrics(server, payload.host, payload.server);
+    renderConsoleMetrics(server, payload.server);
     syncConsoleActionButtons(server, payload.server?.status || server.status);
   });
   stream.onerror = () => {
@@ -2061,12 +2112,9 @@ async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
 
 async function renderConsoleMetricsSoon(server, serverId, renderToken) {
   state.consoleMetricsAt[serverId] = Date.now();
-  const metricsBundle = await Promise.all([
-    api('/api/system/metrics', { timeoutMs: 1200 }).catch(() => null),
-    api(`/api/servers/${server.id}/metrics`, { timeoutMs: 1200 }).catch(() => null),
-  ]);
+  const serverMetrics = await api(`/api/servers/${server.id}/metrics`, { timeoutMs: 1200 }).catch(() => null);
   if (renderToken !== consoleRenderToken || state.activeView !== 'console' || state.activeServerId !== serverId) return;
-  renderConsoleMetrics(server, metricsBundle[0], metricsBundle[1]);
+  renderConsoleMetrics(server, serverMetrics);
 }
 
 async function loadPluginMarketplace({ featured = false } = {}) {
@@ -2156,38 +2204,41 @@ function syncConsoleActionButtons(server, status) {
   set('kill-server', !isOnline);
 }
 
-function renderConsoleMetrics(server, metrics, serverMetrics) {
-  if (!elements.consoleMetrics || !metrics) {
+function formatUptime(startedAt) {
+  if (!startedAt) return 'Offline';
+  const seconds = Math.max(0, Math.floor((Date.now() - Number(startedAt)) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours) return `${hours}h ${minutes}m`;
+  return `${minutes}m ${seconds % 60}s`;
+}
+
+function renderConsoleMetrics(server, serverMetrics) {
+  if (!elements.consoleMetrics || !serverMetrics) {
     if (elements.consoleMetrics) elements.consoleMetrics.innerHTML = '';
     return;
   }
-  const hostUsedBytes = Number(metrics.ramUsedBytes ?? Number(metrics.ramUsedMb || 0) * 1024 * 1024);
-  const hostTotalBytes = Number(metrics.ramTotalBytes ?? Number(metrics.ramTotalMb || 0) * 1024 * 1024);
   const serverUsedBytes = Number(serverMetrics?.rssBytes ?? Number(serverMetrics?.rssMb || 0) * 1024 * 1024);
   const serverLimitBytes = Number(serverMetrics?.maxMemoryMb || 0) * 1024 * 1024;
-  const ramPercent = hostTotalBytes ? Math.min(100, Math.round((hostUsedBytes / hostTotalBytes) * 100)) : 0;
   const serverRamPercent = serverLimitBytes ? Math.min(100, Math.round((serverUsedBytes / serverLimitBytes) * 100)) : 0;
   const serverCpuLabel = serverMetrics?.status === 'online' && serverMetrics?.metricSource !== 'unavailable'
     ? `${Number(serverMetrics.cpuPercent || 0).toFixed(1).replace(/\.0$/, '')}%`
     : serverMetrics?.status === 'online' ? 'Sampling...' : 'Offline';
   const history = state.metricHistory[server.id] || [];
   history.push({
-    cpu: Number(metrics.cpuPercent || 0),
-    ram: ramPercent,
     serverCpu: Number(serverMetrics?.cpuPercent || 0),
     serverRam: serverRamPercent,
     players: Number(serverMetrics?.playerCount || 0),
+    uptime: serverMetrics?.status === 'online' ? 100 : 0,
   });
   while (history.length > 36) history.shift();
   state.metricHistory[server.id] = history;
 
   elements.consoleMetrics.innerHTML = `
-    ${metricCard('Host CPU', `${metrics.cpuPercent}%`, metrics.cpuPercent, history, 'cpu')}
-    ${metricCard('Host RAM', `${formatBytes(hostUsedBytes)} / ${formatBytes(hostTotalBytes)}`, ramPercent, history, 'ram')}
-    ${metricCard('Server RAM', `${serverMetrics?.status === 'online' ? `${formatBytes(serverUsedBytes)} / ${formatBytes(serverLimitBytes)}` : 'Offline'}`, serverRamPercent, history, 'serverRam')}
     ${metricCard('Server CPU', serverCpuLabel, serverMetrics?.cpuPercent || 0, history, 'serverCpu')}
+    ${metricCard('Server RAM', `${serverMetrics?.status === 'online' ? `${formatBytes(serverUsedBytes)} / ${formatBytes(serverLimitBytes)}` : 'Offline'}`, serverRamPercent, history, 'serverRam')}
     ${metricCard('Players', `${serverMetrics ? serverMetrics.playerCount : 0}`, Math.min(100, (serverMetrics?.playerCount || 0) * 8), history, 'players')}
-    ${metricCard('Load', `${metrics.load}`, Math.min(100, Number(metrics.load || 0) * 18), history, 'cpu')}
+    ${metricCard('Uptime', formatUptime(serverMetrics.startedAt), serverMetrics.status === 'online' ? 100 : 0, history, 'uptime')}
   `;
 }
 
@@ -4986,10 +5037,32 @@ document.addEventListener('click', async (event) => {
       if (!server) return showToast('Create a server first.');
       if (server.status === 'online') return showToast('Stop the server before running Repair & Diagnose.');
       if (!confirm(`Run the repair agent for "${server.name}"? It will inspect VPS pressure, validate the runtime, clean stale transfers, check world storage and disk space, rebuild isolation metadata, and apply only bounded offline Minecraft distance optimizations after saving a recovery copy.`)) return;
-      const result = await api(`/api/servers/${server.id}/fix`, { method: 'POST' });
-      const learned = result.learned ? ` Learned playbook ${result.learned.signature}.` : '';
-      showToast(`${result.summary || result.repair?.message || 'Repair & Diagnose completed.'}${learned}`);
-      await refresh();
+      const originalLabel = actionTarget.textContent;
+      actionTarget.disabled = true;
+      actionTarget.textContent = 'Repair queued...';
+      try {
+        const queued = await api(`/api/servers/${server.id}/fix`, { method: 'POST' });
+        showToast(queued.job?.message || 'Repair started in the background.');
+        for (let attempt = 0; attempt < 800; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 750));
+          const job = await api(`/api/servers/${server.id}/fix/status`, { timeoutMs: 2000 });
+          if (job.status === 'queued' || job.status === 'running') {
+            actionTarget.textContent = job.status === 'queued' ? 'Repair queued...' : 'Repair running...';
+            continue;
+          }
+          if (job.status === 'failed') throw new Error(job.error || job.message || 'Repair failed.');
+          if (job.status === 'completed') {
+            const learned = job.result?.learned ? ` Learned playbook ${job.result.learned.signature}.` : '';
+            showToast(`${job.result?.summary || job.message || 'Repair & Diagnose completed.'}${learned}`);
+            await refresh();
+            return;
+          }
+        }
+        throw new Error('Repair is still running. Its progress remains available in the console.');
+      } finally {
+        actionTarget.disabled = false;
+        actionTarget.textContent = originalLabel;
+      }
       return;
     }
     if (action === 'file-paste') {
@@ -5182,6 +5255,7 @@ initThemes();
 applyUiPreferences();
 applyAdminPermissionPreset(5);
 applyFileManagerLayout();
+enableDeveloperShortcutGuard();
 refresh().then(startRefreshLoop).catch((error) => {
   showToast(error.message);
   console.error('Initial load error:', error);
