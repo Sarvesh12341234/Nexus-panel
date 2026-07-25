@@ -284,6 +284,7 @@ function panelSettingsPayload(user = null) {
     edition,
     updateTag: configuredTag,
     updateStatus,
+    serverSwitcherVisibleCount: clampNumber(settingValue('server_switcher_visible_count', '3'), 1, 20, 3),
     hostApiTokenPreview: edition === 'host' && user?.role === 'owner' ? `${hostToken.slice(0, 8)}....${hostToken.slice(-6)}` : '',
     nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
     hostAgent: hostAgent.localStatus(),
@@ -5158,6 +5159,9 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
   setSettingValue('repair_web_enabled', toBool(req.body.repairWebEnabled, true) ? '1' : '0');
   setSettingValue('repair_agent_terminal_enabled', toBool(req.body.repairAgentTerminalEnabled, true) ? '1' : '0');
+  if (req.body.serverSwitcherVisibleCount !== undefined) {
+    setSettingValue('server_switcher_visible_count', clampNumber(req.body.serverSwitcherVisibleCount, 1, 20, 3));
+  }
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
   if (publicBaseUrl) {

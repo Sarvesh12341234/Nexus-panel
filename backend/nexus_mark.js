@@ -211,9 +211,11 @@ function kernelStatus({ refresh = false } = {}) {
   const native = nativeStatus({ build: true });
   const controllers = readCgroupControllers();
   const cgroupV2 = fs.existsSync('/sys/fs/cgroup/cgroup.controllers');
-  const systemdActive = process.env.NEXUSPANEL_CGROUPS !== '0' && fs.existsSync('/run/systemd/system');
+  const systemdRun = ['/usr/bin/systemd-run', '/bin/systemd-run'].find((candidate) => fs.existsSync(candidate)) || 'systemd-run';
+  const systemdActive = process.env.NEXUSPANEL_CGROUPS !== '0'
+    && fs.existsSync('/run/systemd/system');
   const versionProbe = systemdActive
-    ? spawnSync('systemd-run', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
+    ? spawnSync(systemdRun, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 3000 })
     : { status: 1, stdout: '', stderr: 'systemd is not active' };
   const systemdVersion = Number(String(versionProbe.stdout || '').match(/systemd\s+(\d+)/i)?.[1] || 0);
   const base = {
@@ -224,6 +226,7 @@ function kernelStatus({ refresh = false } = {}) {
     controllers,
     systemdActive,
     systemdVersion,
+    systemdRun,
     identitySupport: identitySupportStatus(),
     testedAt: Date.now(),
   };
@@ -274,7 +277,7 @@ function kernelStatus({ refresh = false } = {}) {
       const testArgs = native.available
         ? ['--root', preflightRoot, '--port', '65535', '--', payloadCommand, ...payloadArgs]
         : payloadArgs;
-      const result = spawnSync('systemd-run', [
+      const result = spawnSync(systemdRun, [
         '--quiet', '--wait', '--collect', '--no-ask-password', `--unit=${unit}`,
         ...propertyArgs(systemdProperties(testProfile, base, tier)),
         '--', testCommand, ...testArgs,

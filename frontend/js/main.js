@@ -1641,6 +1641,8 @@ function renderView() {
 }
 
 function renderServerSwitcher() {
+  const visibleCount = Math.max(1, Math.min(20, Number(state.settings?.serverSwitcherVisibleCount || 3)));
+  elements.serverList.style.setProperty('--server-switch-max-height', `${(visibleCount * 64) + (Math.max(0, visibleCount - 1) * 8)}px`);
   const options = state.servers.map((server) => `<option value="${server.id}" ${server.id === state.activeServerId ? 'selected' : ''}>${escapeHtml(server.name)}</option>`).join('');
   elements.activeServerSelect.innerHTML = options || '<option value="">No servers</option>';
   elements.serverList.innerHTML = state.servers.map((server) => `
@@ -2396,6 +2398,7 @@ function renderSettings() {
       <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '3.0.0')}"></label>
+      <label>Visible servers before scrolling <input name="serverSwitcherVisibleCount" type="number" min="1" max="20" value="${Number(settings.serverSwitcherVisibleCount || 3)}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v3.0.0"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
@@ -4330,7 +4333,10 @@ document.addEventListener('click', async (event) => {
         const data = await api('/api/settings/nexusmark/doctor', { method: 'POST', timeoutMs: 60000 });
         const mark = data.nexusMark || {};
         const native = mark.native || {};
-        const summary = `Tier ${mark.tier || 'unknown'} | native ${native.available ? `ready, ABI ${native.landlockAbi || '?'}` : native.reason || 'unavailable'} | cgroup v2 ${mark.cgroupV2 ? 'active' : 'fallback'} | systemd ${mark.systemdVersion || 'unavailable'} | preflight ${mark.preflightPassed ? 'passed' : 'native fallback'}`;
+        const systemdSummary = mark.systemdActive
+          ? (mark.systemdVersion ? `active v${mark.systemdVersion}` : 'active, runner restricted')
+          : 'not active';
+        const summary = `Tier ${mark.tier || 'unknown'} | native ${native.available ? `ready, ABI ${native.landlockAbi || '?'}` : native.reason || 'unavailable'} | cgroup v2 ${mark.cgroupV2 ? 'active' : 'fallback'} | systemd ${systemdSummary} | preflight ${mark.preflightPassed ? 'passed' : 'native fallback'}`;
         if (statusNode) statusNode.textContent = summary;
         showToast('Nexus-Mark kernel doctor completed.');
       } catch (error) {

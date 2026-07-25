@@ -336,7 +336,7 @@ code {
   display: grid;
   gap: 0.5rem;
   margin-bottom: 0.75rem;
-  max-height: calc((var(--server-switch-row) * 3) + 1rem);
+  max-height: var(--server-switch-max-height, 208px);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
