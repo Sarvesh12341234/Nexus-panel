@@ -1,455 +1,441 @@
 #!/usr/bin/env bash
-set -euo pipefail
+#
+# NexusPanel Linux Installer v3.0.1
+# Robust installer with retries, diagnostics, safe recovery and optional AI.
+#
+# Environment:
+#   NEXUSPANEL_REPO_URL
+#   NEXUSPANEL_INSTALL_DIR
+#   NEXUSPANEL_SERVICE_USER
+#   NEXUSPANEL_SERVICE_NAME
+#   NEXUSPANEL_EDITION
+#   NEXUSPANEL_REF              (default: main)
+#   NEXUSPANEL_INSTALL_AI       (default: yes)
+#   NEXUSPANEL_SKIP_TUNNELS     (default: no)
+#
+set -uo pipefail
 
+VERSION="3.0.1"
 REPO_URL="${NEXUSPANEL_REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
 INSTALL_DIR="${NEXUSPANEL_INSTALL_DIR:-/opt/nexuspanel}"
 SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
-EDITION="${NEXUSPANEL_EDITION:-normal}"
 SERVICE_NAME="${NEXUSPANEL_SERVICE_NAME:-nexuspanel}"
-RELEASE_TAG="${NEXUSPANEL_RELEASE_TAG:-${EDITION}-v3.0.0}"
+EDITION="${NEXUSPANEL_EDITION:-normal}"
+REF="${NEXUSPANEL_REF:-main}"
+INSTALL_AI="${NEXUSPANEL_INSTALL_AI:-yes}"
+SKIP_TUNNELS="${NEXUSPANEL_SKIP_TUNNELS:-no}"
 NODE_PATH=""
+LOG_DIR="/var/log/nexuspanel-installer"
+LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
+MAX_RETRIES=3
+
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+info() { printf '\n[INFO] %s\n' "$*"; }
+warn() { printf '\n[WARN] %s\n' "$*" >&2; }
+err()  { printf '\n[ERROR] %s\n' "$*" >&2; }
+die()  { err "$*"; err "Installer log: $LOG_FILE"; exit 1; }
+
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+retry() {
+  local attempts=0 delay=2
+  while true; do
+    if "$@"; then return 0; fi
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge "$MAX_RETRIES" ]; then return 1; fi
+    warn "Command failed (attempt $attempts/$MAX_RETRIES): $*"
+    warn "Retrying in ${delay}s..."
+    sleep "$delay"
+    delay=$((delay * 2))
+  done
+}
+
+diagnostics() {
+  echo "---- NexusPanel installer diagnostics ----"
+  echo "date: $(date -Is)"
+  echo "kernel: $(uname -a 2>/dev/null || true)"
+  echo "arch: $(uname -m 2>/dev/null || true)"
+  echo "os:"
+  cat /etc/os-release 2>/dev/null || true
+  echo "node: $(node --version 2>/dev/null || echo missing)"
+  echo "npm: $(npm --version 2>/dev/null || echo missing)"
+  echo "git: $(git --version 2>/dev/null || echo missing)"
+  echo "disk:"
+  df -h "$INSTALL_DIR" /var 2>/dev/null || true
+  echo "memory:"
+  free -h 2>/dev/null || true
+  echo "service:"
+  systemctl status "$SERVICE_NAME" --no-pager 2>/dev/null || true
+  echo "recent journal:"
+  journalctl -u "$SERVICE_NAME" -n 40 --no-pager 2>/dev/null || true
+  echo "------------------------------------------"
+}
+
+trap_handler() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    err "Installer stopped with exit code $rc."
+    diagnostics || true
+    err "Full log: $LOG_FILE"
+  fi
+  exit "$rc"
+}
+trap trap_handler EXIT
 
 need_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    echo "Run as root:"
-    echo "sudo bash installers/nexuspanel-normal-v3.0.0-linux-installer.sh"
-    exit 1
+  [ "$(id -u)" -eq 0 ] || die "Run as root: sudo bash $0"
+}
+
+detect_pm() {
+  if command_exists apt-get; then echo apt; return; fi
+  if command_exists dnf; then echo dnf; return; fi
+  if command_exists yum; then echo yum; return; fi
+  if command_exists zypper; then echo zypper; return; fi
+  if command_exists pacman; then echo pacman; return; fi
+  echo unknown
+}
+
+install_system_packages() {
+  local pm
+  pm="$(detect_pm)"
+  info "[1/7] Installing system dependencies using $pm..."
+
+  case "$pm" in
+    apt)
+      retry apt-get update || die "apt update failed."
+      retry apt-get install -y \
+        curl ca-certificates git unzip tar xz-utils \
+        build-essential systemd acl passwd util-linux procps iproute2
+      ;;
+    dnf)
+      retry dnf makecache
+      retry dnf install -y \
+        curl ca-certificates git unzip tar xz gcc gcc-c++ make \
+        nodejs npm systemd acl shadow-utils util-linux procps-ng iproute
+      ;;
+    yum)
+      retry yum makecache
+      retry yum install -y \
+        curl ca-certificates git unzip tar xz gcc gcc-c++ make \
+        nodejs npm systemd acl shadow-utils util-linux procps iproute
+      ;;
+    zypper)
+      retry zypper --non-interactive refresh
+      retry zypper --non-interactive install \
+        curl ca-certificates git unzip tar xz gcc gcc-c++ make \
+        nodejs npm systemd acl shadow util-linux procps iproute2
+      ;;
+    pacman)
+      retry pacman -Sy --noconfirm --needed \
+        curl ca-certificates git unzip tar xz gcc make \
+        nodejs npm systemd acl shadow util-linux procps iproute2
+      ;;
+    *)
+      die "Unsupported package manager. Install curl, git, Node.js 24+, npm, a compiler, systemd and iproute manually."
+      ;;
+  esac
+}
+
+node_major() {
+  node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
+}
+
+ensure_node() {
+  if command_exists node && [ "$(node_major)" -ge 24 ]; then
+    NODE_PATH="$(command -v node)"
+    info "Node.js $("$NODE_PATH" --version) detected."
+    return
   fi
+
+  local pm
+  pm="$(detect_pm)"
+
+  if [ "$pm" = "apt" ]; then
+    info "Installing Node.js 24 LTS..."
+    retry bash -c 'curl -fsSL https://deb.nodesource.com/setup_24.x | bash -'
+    retry apt-get install -y nodejs
+  fi
+
+  command_exists node || die "Node.js could not be installed."
+  [ "$(node_major)" -ge 24 ] || die "Node.js 24+ is required; detected $(node --version)."
+  NODE_PATH="$(command -v node)"
 }
 
 require_service_user() {
-  if [ "$SERVICE_USER" != "root" ] &&
-     ! id "$SERVICE_USER" >/dev/null 2>&1; then
-    echo "Service user '$SERVICE_USER' does not exist."
-    exit 1
-  fi
-}
-
-install_packages() {
-  echo "[1/7] Updating package index and installing dependencies..."
-
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-
-    apt-get install -y \
-      curl \
-      ca-certificates \
-      git \
-      unzip \
-      tar \
-      xz-utils \
-      build-essential \
-      systemd \
-      acl \
-      passwd \
-      util-linux
-
-    if ! command -v node >/dev/null 2>&1 ||
-       ! node -e \
-       "process.exit(Number(process.versions.node.split('.')[0]) >= 24 ? 0 : 1)" \
-       >/dev/null 2>&1; then
-
-      echo "Installing Node.js 24 LTS..."
-
-      curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
-      apt-get install -y nodejs
-    fi
-
-    return
-  fi
-
-  if command -v dnf >/dev/null 2>&1; then
-    dnf makecache
-
-    dnf install -y \
-      curl ca-certificates git unzip tar xz \
-      gcc gcc-c++ make nodejs npm \
-      systemd acl shadow-utils util-linux
-
-    return
-  fi
-
-  if command -v yum >/dev/null 2>&1; then
-    yum makecache
-
-    yum install -y \
-      curl ca-certificates git unzip tar xz \
-      gcc gcc-c++ make nodejs npm \
-      systemd acl shadow-utils util-linux
-
-    return
-  fi
-
-  if command -v zypper >/dev/null 2>&1; then
-    zypper --non-interactive refresh
-
-    zypper --non-interactive install \
-      curl ca-certificates git unzip tar xz \
-      gcc gcc-c++ make nodejs npm \
-      systemd acl shadow util-linux
-
-    return
-  fi
-
-  if command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm --needed \
-      curl ca-certificates git unzip tar xz \
-      gcc make nodejs npm systemd acl shadow util-linux
-
-    return
-  fi
-
-  echo "Unsupported Linux distribution."
-  exit 1
+  if [ "$SERVICE_USER" = "root" ]; then return; fi
+  id "$SERVICE_USER" >/dev/null 2>&1 ||
+    die "Service user '$SERVICE_USER' does not exist."
 }
 
 install_tunnel_tools() {
-  echo "[1b/7] Installing tunnel helpers..."
+  [ "$EDITION" = "normal" ] || return 0
+  [ "$SKIP_TUNNELS" = "yes" ] && { info "Tunnel helpers disabled."; return 0; }
 
-  local ARCH
-  ARCH="$(uname -m)"
-
-  local NGROK_ARCH="amd64"
-  local PLAYIT_ARCH="amd64"
-
-  case "$ARCH" in
-    x86_64|amd64)
-      NGROK_ARCH="amd64"
-      PLAYIT_ARCH="amd64"
-      ;;
-
-    aarch64|arm64)
-      NGROK_ARCH="arm64"
-      PLAYIT_ARCH="aarch64"
-      ;;
-
-    *)
-      echo "Unknown architecture: $ARCH"
-      echo "Skipping tunnel helpers."
-      return 0
-      ;;
+  info "[1b/7] Installing optional tunnel helpers..."
+  local arch ngrok_arch playit_arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) ngrok_arch=amd64; playit_arch=amd64 ;;
+    aarch64|arm64) ngrok_arch=arm64; playit_arch=aarch64 ;;
+    *) warn "Unsupported architecture $arch; skipping tunnel helpers."; return 0 ;;
   esac
 
-  if ! command -v ngrok >/dev/null 2>&1; then
-    echo "Installing ngrok..."
-
-    if curl -fsSL \
-      "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-${NGROK_ARCH}.tgz" |
-      tar -xz -C /usr/local/bin ngrok; then
-
+  if ! command_exists ngrok; then
+    if retry bash -c \
+      "curl -fsSL 'https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-${ngrok_arch}.tgz' | tar -xz -C /usr/local/bin ngrok"
+    then
       chmod 755 /usr/local/bin/ngrok
     else
-      echo "WARNING: ngrok installation failed."
+      warn "ngrok installation failed; continuing."
     fi
-  else
-    echo "ngrok already installed."
   fi
 
-  if ! command -v playit >/dev/null 2>&1; then
-    echo "Installing playit..."
-
-    if curl -fsSL \
-      "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-${PLAYIT_ARCH}" \
-      -o /usr/local/bin/playit; then
-
+  if ! command_exists playit; then
+    if retry curl -fsSL \
+      "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-${playit_arch}" \
+      -o /usr/local/bin/playit
+    then
       chmod 755 /usr/local/bin/playit
     else
-      echo "WARNING: playit installation failed."
+      warn "playit installation failed; continuing."
     fi
-  else
-    echo "playit already installed."
   fi
 }
 
-install_panel() {
-  echo "[2/7] Installing NexusPanel ${RELEASE_TAG}..."
-  echo "Install directory: ${INSTALL_DIR}"
-
-  if ! command -v node >/dev/null 2>&1; then
-    echo "Node.js is not installed."
-    exit 1
-  fi
-
-  local NODE_MAJOR
-  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-
-  if [ "$NODE_MAJOR" -lt 24 ]; then
-    echo "Node.js 24 or newer is required."
-    echo "Current version: $(node --version)"
-    exit 1
-  fi
-
+clone_or_update() {
+  info "[2/7] Preparing NexusPanel source..."
   mkdir -p "$(dirname "$INSTALL_DIR")"
 
-  if [ -d "${INSTALL_DIR}/.git" ]; then
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    info "Existing Git installation found."
+    git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" || true
+    retry git -C "$INSTALL_DIR" fetch origin --tags --force ||
+      die "Could not fetch repository."
 
-    echo "Existing NexusPanel installation detected."
-    echo "Updating repository..."
-
-    git -C "${INSTALL_DIR}" fetch origin --tags --force
-
-    git -C "${INSTALL_DIR}" reset --hard "${RELEASE_TAG}"
-
-  elif [ -d "${INSTALL_DIR}" ] &&
-       [ "$(find "${INSTALL_DIR}" -mindepth 1 -maxdepth 1 | wc -l)" -gt 0 ]; then
-
-    echo "${INSTALL_DIR} exists and is not empty."
-
-    echo "Use another directory with:"
-    echo "NEXUSPANEL_INSTALL_DIR=/some/path"
-
-    exit 1
-
+    if git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/remotes/origin/$REF"; then
+      git -C "$INSTALL_DIR" reset --hard "origin/$REF" ||
+        die "Could not reset to origin/$REF."
+    elif git -C "$INSTALL_DIR" rev-parse --verify "$REF^{commit}" >/dev/null 2>&1; then
+      git -C "$INSTALL_DIR" reset --hard "$REF" ||
+        die "Could not reset to $REF."
+    else
+      warn "Requested ref '$REF' was not found; falling back to origin/main."
+      git -C "$INSTALL_DIR" reset --hard origin/main ||
+        die "Could not reset to origin/main."
+    fi
+  elif [ -d "$INSTALL_DIR" ] &&
+       [ "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -print -quit | wc -l)" -gt 0 ]; then
+    die "$INSTALL_DIR exists and is not empty. Set NEXUSPANEL_INSTALL_DIR to another directory."
   else
-
-    echo "Cloning NexusPanel..."
-
-    git clone \
-      --branch "${RELEASE_TAG}" \
-      --single-branch \
-      "${REPO_URL}" \
-      "${INSTALL_DIR}"
+    retry git clone --depth 1 --branch "$REF" "$REPO_URL" "$INSTALL_DIR" ||
+      retry git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" ||
+      die "Could not clone NexusPanel."
   fi
 
-  cd "${INSTALL_DIR}"
-
+  cd "$INSTALL_DIR"
   NODE_PATH="$(command -v node)"
+}
 
-  echo "[3/7] Installing Node.js dependencies..."
+npm_install_with_recovery() {
+  info "[3/7] Installing Node.js dependencies..."
 
-  npm install \
-    --omit=optional \
-    --no-audit \
-    --no-fund
+  export npm_config_audit=false
+  export npm_config_fund=false
+  export npm_config_fetch_retries=5
+  export npm_config_fetch_retry_mintimeout=2000
+  export npm_config_fetch_retry_maxtimeout=30000
 
-  npm install \
-    --include=optional \
-    --no-audit \
-    --no-fund || true
+  if retry npm install --omit=optional --no-audit --no-fund; then
+    npm install --include=optional --no-audit --no-fund ||
+      warn "Optional dependencies failed; continuing."
+    return
+  fi
 
-  echo "Building NexusMark..."
+  warn "Normal npm install failed. Clearing npm cache and retrying..."
+  npm cache verify >/dev/null 2>&1 || true
 
-  npm run build:nexusmark || {
-    echo "NexusMark native runtime unavailable."
-    echo "Continuing with systemd sandbox."
-  }
+  if retry npm cache clean --force &&
+     retry npm install --no-audit --no-fund; then
+    return
+  fi
 
-  echo "Building host agent..."
+  if [ -f package-lock.json ]; then
+    warn "Trying npm ci as a final dependency recovery path..."
+    retry npm ci --omit=optional --no-audit --no-fund ||
+      die "Node.js dependency installation failed. See $LOG_FILE."
+  else
+    die "Node.js dependency installation failed. See $LOG_FILE."
+  fi
+}
 
-  npm run build:host-agent || {
-    echo "Host agent native build deferred."
-  }
+build_components() {
+  info "Building optional native components..."
+
+  if npm run build:nexusmark; then
+    info "NexusMark build completed."
+  else
+    warn "NexusMark build failed. Continuing with the available sandbox."
+  fi
+
+  if npm run build:host-agent; then
+    info "Host agent build completed."
+  else
+    warn "Host agent build failed. Continuing; service installation may rebuild it."
+  fi
 }
 
 install_advanced_ai() {
+  [ "$INSTALL_AI" != "no" ] ||
+    { info "Advanced AI disabled by NEXUSPANEL_INSTALL_AI=no."; return 0; }
 
-  echo
-  echo "=============================================="
-  echo " NexusPanel Advanced AI"
-  echo "=============================================="
-  echo
-  echo "Model:"
-  echo "  onnx-community/Qwen2.5-Coder-0.5B-Instruct"
-  echo
-  echo "Mode:"
-  echo "  Local Q4 ONNX"
-  echo
-  echo "The AI will run locally through the NexusPanel"
-  echo "advanced AI backend."
-  echo
-  echo "Installing advanced AI..."
-  echo
+  info "[3b/7] Installing Advanced AI..."
+  cd "$INSTALL_DIR"
 
-  cd "${INSTALL_DIR}"
-
-  echo "[3b/7] Installing Transformers runtime..."
-
-  npm install \
-    @huggingface/transformers@latest \
-    --no-audit \
-    --no-fund
-
-  echo
-  echo "[3c/7] Initializing advanced AI model..."
-  echo
-  echo "The first launch may download the model/cache."
-  echo "This can take some time depending on your VPS connection."
-  echo
-
-  if [ ! -f "${INSTALL_DIR}/backend/advanced_ai.js" ]; then
-    echo "WARNING:"
-    echo "backend/advanced_ai.js was not found."
-    echo "Skipping model initialization."
+  if ! retry npm install @huggingface/transformers@latest --no-audit --no-fund; then
+    warn "Advanced AI package could not be installed."
+    warn "Core NexusPanel installation will continue."
     return 0
   fi
 
-  if "$NODE_PATH" \
-      "${INSTALL_DIR}/backend/advanced_ai.js"; then
+  if [ ! -f "$INSTALL_DIR/backend/advanced_ai.js" ]; then
+    warn "backend/advanced_ai.js is missing; skipping model initialization."
+    return 0
+  fi
 
-    echo
-    echo "Advanced AI initialized successfully."
+  export HF_HOME="${HF_HOME:-$INSTALL_DIR/data/huggingface}"
+  export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME}"
+  mkdir -p "$HF_HOME"
 
+  if "$NODE_PATH" "$INSTALL_DIR/backend/advanced_ai.js"; then
+    info "Advanced AI model initialized."
   else
-
-    echo
-    echo "WARNING: Advanced AI initialization failed."
-    echo
-    echo "The NexusPanel deterministic repair brain will remain available."
-    echo "You can retry the AI initialization later."
-    echo
+    warn "Advanced AI model initialization failed."
+    warn "This is non-fatal; NexusPanel will continue with its deterministic repair logic."
   fi
 }
 
 prepare_paths() {
-
-  echo "[4/7] Preparing data folders and permissions..."
-
-  cd "${INSTALL_DIR}"
+  info "[4/7] Preparing directories and permissions..."
+  cd "$INSTALL_DIR"
 
   mkdir -p \
-    data \
-    servers \
-    software \
-    backups \
-    backupfolder \
-    update/backups \
+    data servers software backups backupfolder update/backups \
+    "$INSTALL_DIR/data/huggingface" \
     /var/lib/nexuspanel/backups \
     /var/lib/nexuspanel/logs \
     /var/lib/nexuspanel/nexus-mark
 
-  printf '%s\n' "$EDITION" > data/edition
-
-  if [ -f update/update.sh ]; then
-    chmod 755 update/update.sh
-  fi
+  printf '%s\n' "$EDITION" > "$INSTALL_DIR/data/edition"
+  chmod 755 "$INSTALL_DIR/update/update.sh" 2>/dev/null || true
 
   chmod 750 \
-    data \
-    servers \
-    software \
-    backups \
-    backupfolder \
-    update/backups \
+    data servers software backups backupfolder update/backups \
     /var/lib/nexuspanel \
     /var/lib/nexuspanel/backups \
     /var/lib/nexuspanel/logs \
-    /var/lib/nexuspanel/nexus-mark
+    /var/lib/nexuspanel/nexus-mark || true
 
   if [ "$SERVICE_USER" != "root" ]; then
-
-    local SERVICE_GROUP
-    SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
-
-    chown -R \
-      "${SERVICE_USER}:${SERVICE_GROUP}" \
-      data \
-      servers \
-      software \
-      backups \
-      backupfolder \
-      update/backups \
+    local group
+    group="$(id -gn "$SERVICE_USER")"
+    chown -R "$SERVICE_USER:$group" \
+      "$INSTALL_DIR/data" "$INSTALL_DIR/servers" "$INSTALL_DIR/software" \
+      "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" \
       /var/lib/nexuspanel
   fi
 }
 
 install_cli() {
+  info "[5/7] Installing nexuspanel CLI..."
 
-  echo "[5/7] Installing nexuspanel command..."
-
-  cat > /usr/local/bin/nexuspanel << EOF
+  cat > /usr/local/bin/nexuspanel <<EOF
 #!/usr/bin/env sh
-exec "${NODE_PATH}" "${INSTALL_DIR}/backend/cli.js" "\$@"
+exec "$NODE_PATH" "$INSTALL_DIR/backend/cli.js" "\$@"
 EOF
-
   chmod 755 /usr/local/bin/nexuspanel
+  hash -r 2>/dev/null || true
 }
 
 setup_owner() {
+  info "[6/7] Owner account setup..."
+  cd "$INSTALL_DIR"
 
-  echo "[6/7] Owner account setup..."
+  [ -f "$INSTALL_DIR/backend/cli.js" ] ||
+    { warn "backend/cli.js is missing; skipping owner setup."; return 0; }
 
-  cd "${INSTALL_DIR}"
+  if [ -t 0 ] && [ -t 1 ]; then
+    if NEXUSPANEL_SERVICE_USER="$SERVICE_USER" \
+      "$NODE_PATH" "$INSTALL_DIR/backend/cli.js" setup-owner; then
+      return 0
+    fi
+  else
+    warn "No interactive terminal detected; owner setup skipped."
+    warn "Run: nexuspanel setup-owner"
+    return 0
+  fi
 
-  NEXUSPANEL_SERVICE_USER="$SERVICE_USER" \
-    "$NODE_PATH" \
-    "${INSTALL_DIR}/backend/cli.js" \
-    setup-owner
+  warn "Owner setup returned an error."
+  warn "Core installation will continue. Retry later with: nexuspanel setup-owner"
 }
 
 install_service() {
+  info "[7/7] Installing systemd service..."
+  cd "$INSTALL_DIR"
 
-  echo "[7/7] Installing systemd service..."
+  [ -f "$INSTALL_DIR/backend/service.js" ] ||
+    die "backend/service.js is missing."
 
-  cd "${INSTALL_DIR}"
+  local attempt
+  for attempt in 1 2 3; do
+    if NEXUSPANEL_SERVICE_NAME="$SERVICE_NAME" \
+      NEXUSPANEL_SERVICE_USER="$SERVICE_USER" \
+      "$NODE_PATH" "$INSTALL_DIR/backend/service.js" install
+    then
+      break
+    fi
+    warn "Service installation attempt $attempt failed."
+    systemctl daemon-reload 2>/dev/null || true
+    sleep $((attempt * 2))
+  done
 
-  NEXUSPANEL_SERVICE_NAME="$SERVICE_NAME" \
-  NEXUSPANEL_SERVICE_USER="$SERVICE_USER" \
-    "$NODE_PATH" \
-    "${INSTALL_DIR}/backend/service.js" \
-    install
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable "$SERVICE_NAME" 2>/dev/null || true
+  systemctl restart "$SERVICE_NAME" 2>/dev/null ||
+    systemctl start "$SERVICE_NAME" 2>/dev/null || true
 
-  echo "Waiting for service..."
+  sleep 3
 
-  sleep 2
-
-  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-
-    echo
-    echo "ERROR: NexusPanel service failed to start."
-    echo
-
-    echo "Recent logs:"
-    journalctl \
-      -u "$SERVICE_NAME" \
-      -n 100 \
-      --no-pager
-
-    echo
-    echo "You can inspect the service with:"
-    echo "sudo systemctl status ${SERVICE_NAME}"
-
-    exit 1
+  if systemctl is-active --quiet "$SERVICE_NAME"; then
+    info "NexusPanel service is running."
+    return 0
   fi
+
+  warn "Service did not become active."
+  journalctl -u "$SERVICE_NAME" -n 80 --no-pager 2>/dev/null || true
+
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
+  systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+  sleep 3
+
+  systemctl is-active --quiet "$SERVICE_NAME" ||
+    die "NexusPanel service could not be started. Unrelated processes were not terminated."
 }
 
 show_info() {
+  local public_ip
+  public_ip="$(curl -fsS --max-time 3 ifconfig.me 2>/dev/null || echo YOUR_VPS_IP)"
 
-  local PUBLIC_IP
-
-  PUBLIC_IP="$(
-    curl \
-      -fsS \
-      --max-time 3 \
-      ifconfig.me \
-      2>/dev/null ||
-      echo "YOUR_VPS_IP"
-  )"
-
+  info "NexusPanel installation completed."
   echo
-  echo "=============================================="
-  echo " NexusPanel installation complete"
-  echo "=============================================="
-  echo
-
-  echo "Panel URL:"
-  echo "http://${PUBLIC_IP}:3000"
-
-  echo
-  echo "Service:"
-  echo "${SERVICE_NAME}"
-
-  echo
-  echo "Install directory:"
-  echo "${INSTALL_DIR}"
-
-  echo
-  echo "Edition:"
-  echo "${EDITION}"
-
-  echo
-  echo "Advanced AI:"
-  echo "ENABLED"
-
+  echo "Panel URL:      http://${public_ip}:3000"
+  echo "Service:        ${SERVICE_NAME}"
+  echo "Install dir:    ${INSTALL_DIR}"
+  echo "Edition:        ${EDITION}"
+  echo "Advanced AI:    ${INSTALL_AI}"
+  echo "Installer log:  ${LOG_FILE}"
   echo
   echo "Commands:"
   echo "  nexuspanel status"
@@ -457,33 +443,26 @@ show_info() {
   echo "  nexuspanel start"
   echo "  nexuspanel stop"
   echo "  nexuspanel restart"
-
   echo
-  echo "Systemd:"
+  echo "Diagnostics:"
   echo "  systemctl status ${SERVICE_NAME}"
-  echo "  journalctl -u ${SERVICE_NAME} -f"
-
-  echo
+  echo "  journalctl -u ${SERVICE_NAME} -n 100 --no-pager"
 }
 
 main() {
-
   echo "=============================================="
-  echo " NexusPanel Linux Installer v3.0.0"
-  echo " Advanced AI Edition"
+  echo " NexusPanel Linux Installer v${VERSION}"
+  echo " Robust / Recovery Edition"
   echo "=============================================="
-  echo
 
   need_root
   require_service_user
-
-  install_packages
-
-  if [ "$EDITION" = "normal" ]; then
-    install_tunnel_tools
-  fi
-
-  install_panel
+  install_system_packages
+  ensure_node
+  install_tunnel_tools
+  clone_or_update
+  npm_install_with_recovery
+  build_components
   install_advanced_ai
   prepare_paths
   install_cli
