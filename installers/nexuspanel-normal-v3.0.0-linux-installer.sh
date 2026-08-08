@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 #
-# NexusPanel Linux Installer v3.0.2
-# Robust Ubuntu/Linux installer with Git recovery, npm recovery,
-# optional AI, native builds, systemd service setup and diagnostics.
+# NexusPanel Linux Installer v3.0.3
+# Smart Ubuntu/Linux installer
+#
+# Features:
+#   - Automatic Git default-branch detection
+#   - Git corruption/recovery
+#   - npm recovery
+#   - Node.js 24+
+#   - Optional AI
+#   - Optional tunnel tools
+#   - Native builds
+#   - Systemd service installation
+#   - Automatic diagnostics
+#   - Existing installation backup
+#   - Safe data preservation
+#   - Interactive Y/N prompts
 #
 
 set -uo pipefail
 
-VERSION="3.0.2"
+VERSION="3.0.3"
 
 REPO_URL="${NEXUSPANEL_REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
 INSTALL_DIR="${NEXUSPANEL_INSTALL_DIR:-/opt/nexuspanel}"
@@ -16,13 +29,10 @@ SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
 SERVICE_NAME="${NEXUSPANEL_SERVICE_NAME:-nexuspanel}"
 EDITION="${NEXUSPANEL_EDITION:-normal}"
 
-# "auto" = automatically use repository default branch
-# Otherwise specify a branch/tag.
+# auto = detect repository default branch
 REF="${NEXUSPANEL_REF:-auto}"
 
-# ask = ask Y/N
-# yes = install automatically
-# no = don't install
+# ask / yes / no
 INSTALL_AI="${NEXUSPANEL_INSTALL_AI:-ask}"
 
 SKIP_TUNNELS="${NEXUSPANEL_SKIP_TUNNELS:-no}"
@@ -36,6 +46,7 @@ NODE_PATH=""
 
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 
+# Keep stdin available for Y/N prompts.
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 
@@ -63,11 +74,16 @@ die() {
 
 
 # ============================================================
-# Helpers
+# Basic helpers
 # ============================================================
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+
+pause_short() {
+    sleep 1
 }
 
 
@@ -76,6 +92,7 @@ retry() {
     local delay=2
 
     while true; do
+
         if "$@"; then
             return 0
         fi
@@ -84,7 +101,8 @@ retry() {
             return 1
         fi
 
-        warn "Command failed: $*"
+        warn "Command failed."
+        warn "Command: $*"
         warn "Retry $((attempt + 1))/$MAX_RETRIES in ${delay}s..."
 
         sleep "$delay"
@@ -95,13 +113,15 @@ retry() {
 }
 
 
-run_optional() {
+# Run a command without terminating installation.
+optional() {
     if "$@"; then
         return 0
     fi
 
-    warn "Optional command failed:"
+    warn "Optional operation failed:"
     warn "$*"
+
     return 0
 }
 
@@ -111,19 +131,28 @@ run_optional() {
 # ============================================================
 
 need_root() {
-    if [ "$(id -u)" -ne 0 ]; then
-        die "Run this installer as root:
 
-sudo bash $0"
+    if [ "$(id -u)" -ne 0 ]; then
+
+        echo
+        echo "This installer needs root privileges."
+        echo
+        echo "Run:"
+        echo
+        echo "  sudo bash $0"
+        echo
+
+        exit 1
     fi
 }
 
 
 # ============================================================
-# Package manager
+# OS detection
 # ============================================================
 
 detect_pm() {
+
     if command_exists apt-get; then
         echo "apt"
         return
@@ -153,6 +182,18 @@ detect_pm() {
 }
 
 
+show_os() {
+
+    echo
+    echo "Operating system:"
+    cat /etc/os-release 2>/dev/null || true
+
+    echo
+    echo "Architecture:"
+    uname -m 2>/dev/null || true
+}
+
+
 # ============================================================
 # System packages
 # ============================================================
@@ -162,7 +203,7 @@ install_system_packages() {
     local pm
     pm="$(detect_pm)"
 
-    info "[1/8] Installing system dependencies..."
+    info "[1/9] Installing system dependencies..."
     info "Package manager: $pm"
 
     case "$pm" in
@@ -171,8 +212,12 @@ install_system_packages() {
 
             export DEBIAN_FRONTEND=noninteractive
 
+            info "Updating APT..."
+
             retry apt-get update ||
-                die "apt-get update failed."
+                die "APT update failed."
+
+            info "Installing required packages..."
 
             retry apt-get install -y \
                 curl \
@@ -190,8 +235,11 @@ install_system_packages() {
                 iproute2 \
                 rsync \
                 file \
-                jq ||
-                die "Failed installing Ubuntu/Debian dependencies."
+                jq \
+                openssl \
+                python3 \
+                python3-minimal \
+                || die "Ubuntu dependency installation failed."
 
             ;;
 
@@ -219,7 +267,10 @@ install_system_packages() {
                 iproute \
                 rsync \
                 file \
-                jq
+                jq \
+                openssl \
+                python3 \
+                || die "DNF dependency installation failed."
 
             ;;
 
@@ -247,7 +298,10 @@ install_system_packages() {
                 iproute \
                 rsync \
                 file \
-                jq
+                jq \
+                openssl \
+                python3 \
+                || die "YUM dependency installation failed."
 
             ;;
 
@@ -275,7 +329,10 @@ install_system_packages() {
                 iproute2 \
                 rsync \
                 file \
-                jq
+                jq \
+                openssl \
+                python3 \
+                || die "Zypper dependency installation failed."
 
             ;;
 
@@ -300,13 +357,16 @@ install_system_packages() {
                 iproute2 \
                 rsync \
                 file \
-                jq
+                jq \
+                openssl \
+                python \
+                || die "Pacman dependency installation failed."
 
             ;;
 
         *)
 
-            die "Unsupported Linux package manager."
+            die "Unsupported Linux distribution/package manager."
 
             ;;
     esac
@@ -327,14 +387,19 @@ node_major() {
 
 ensure_node() {
 
-    if command_exists node &&
-       [ "$(node_major)" -ge 24 ]; then
+    if command_exists node; then
 
-        NODE_PATH="$(command -v node)"
+        local current_major
+        current_major="$(node_major)"
 
-        info "Node.js $("$NODE_PATH" --version) detected."
+        if [ "$current_major" -ge 24 ]; then
 
-        return 0
+            NODE_PATH="$(command -v node)"
+
+            info "Node.js $("$NODE_PATH" --version) detected."
+
+            return 0
+        fi
     fi
 
 
@@ -346,23 +411,38 @@ ensure_node() {
 
         info "Installing Node.js 24..."
 
-        retry bash -c \
+        if ! retry bash -c \
             'curl -fsSL https://deb.nodesource.com/setup_24.x | bash -'
+        then
+            die "NodeSource setup failed."
+        fi
 
         retry apt-get install -y nodejs ||
             die "Node.js installation failed."
 
     elif [ "$pm" = "dnf" ]; then
 
-        if command_exists dnf; then
-            retry dnf install -y nodejs npm ||
-                die "Node.js installation failed."
-        fi
+        retry dnf install -y nodejs npm ||
+            die "Node.js installation failed."
 
     elif [ "$pm" = "yum" ]; then
 
         retry yum install -y nodejs npm ||
             die "Node.js installation failed."
+
+    elif [ "$pm" = "zypper" ]; then
+
+        retry zypper --non-interactive install nodejs npm ||
+            die "Node.js installation failed."
+
+    elif [ "$pm" = "pacman" ]; then
+
+        retry pacman -S --noconfirm --needed nodejs npm ||
+            die "Node.js installation failed."
+
+    else
+
+        die "Cannot determine package manager for Node.js."
 
     fi
 
@@ -370,18 +450,24 @@ ensure_node() {
     command_exists node ||
         die "Node.js was not installed."
 
+
     local major
     major="$(node_major)"
 
     if [ "$major" -lt 24 ]; then
-        die "Node.js 24+ required. Detected: $(node --version)"
+
+        die "Node.js 24+ is required.
+
+Detected:
+$(node --version)"
     fi
 
 
     NODE_PATH="$(command -v node)"
 
-    info "Using Node.js: $NODE_PATH"
-    info "Node version: $("$NODE_PATH" --version)"
+    info "Node.js installed successfully."
+    info "Path: $NODE_PATH"
+    info "Version: $("$NODE_PATH" --version)"
 }
 
 
@@ -395,135 +481,65 @@ require_service_user() {
         return 0
     fi
 
+
     if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+
         die "Service user '$SERVICE_USER' does not exist."
     fi
 }
 
 
 # ============================================================
-# Optional tunnel tools
+# Git functions
 # ============================================================
 
-install_tunnel_tools() {
+remote_branch_exists() {
 
-    if [ "$EDITION" != "normal" ]; then
-        return 0
-    fi
-
-    if [ "$SKIP_TUNNELS" = "yes" ]; then
-        info "Tunnel helper installation disabled."
-        return 0
-    fi
-
-    info "[1b/8] Installing optional tunnel helpers..."
-
-    local arch
-    local ngrok_arch
-    local playit_arch
-
-    arch="$(uname -m)"
-
-    case "$arch" in
-
-        x86_64|amd64)
-            ngrok_arch="amd64"
-            playit_arch="amd64"
-            ;;
-
-        aarch64|arm64)
-            ngrok_arch="arm64"
-            playit_arch="aarch64"
-            ;;
-
-        *)
-            warn "Unsupported architecture: $arch"
-            warn "Skipping tunnel helpers."
-            return 0
-            ;;
-    esac
-
-
-    if ! command_exists ngrok; then
-
-        if retry bash -c \
-            "curl -fsSL 'https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-${ngrok_arch}.tgz' |
-             tar -xz -C /usr/local/bin ngrok"
-        then
-            chmod 755 /usr/local/bin/ngrok
-            info "ngrok installed."
-        else
-            warn "ngrok installation failed. Continuing."
-        fi
-    else
-        info "ngrok already installed."
-    fi
-
-
-    if ! command_exists playit; then
-
-        if retry curl -fsSL \
-            "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-${playit_arch}" \
-            -o /usr/local/bin/playit
-        then
-            chmod 755 /usr/local/bin/playit
-            info "playit installed."
-        else
-            warn "playit installation failed. Continuing."
-        fi
-
-    else
-        info "playit already installed."
-    fi
-}
-
-
-# ============================================================
-# Git helpers
-# ============================================================
-
-remote_ref_exists() {
-
-    local remote="$1"
-    local ref="$2"
+    local branch="$1"
 
     git ls-remote \
         --exit-code \
         --heads \
-        "$remote" \
-        "$ref" >/dev/null 2>&1
+        "$REPO_URL" \
+        "refs/heads/$branch" \
+        >/dev/null 2>&1
 }
 
 
 get_default_branch() {
 
-    local symbolic
+    local branch=""
 
-    symbolic="$(
+    branch="$(
         git ls-remote \
             --symref \
             "$REPO_URL" \
             HEAD 2>/dev/null |
-            awk '/^ref:/ {
-                sub("refs/heads/", "", $2)
+        awk '
+            /^ref:/ {
+                gsub("refs/heads/", "", $2)
                 print $2
                 exit
-            }'
+            }
+        '
     )"
 
-    if [ -n "$symbolic" ]; then
-        echo "$symbolic"
+
+    if [ -n "$branch" ]; then
+
+        echo "$branch"
         return 0
     fi
 
 
-    # Fallbacks
-    if remote_ref_exists "$REPO_URL" main; then
+    # Fallback
+    if remote_branch_exists "main"; then
         echo "main"
         return 0
     fi
 
-    if remote_ref_exists "$REPO_URL" master; then
+
+    if remote_branch_exists "master"; then
         echo "master"
         return 0
     fi
@@ -533,13 +549,51 @@ get_default_branch() {
 }
 
 
+git_repair_repository() {
+
+    info "Attempting Git repository recovery..."
+
+    cd "$INSTALL_DIR" || return 1
+
+
+    if [ ! -d ".git" ]; then
+
+        warn ".git directory is missing."
+
+        return 1
+    fi
+
+
+    git remote set-url origin "$REPO_URL" 2>/dev/null || true
+
+
+    if ! git fsck --no-progress >/dev/null 2>&1; then
+
+        warn "Git integrity check reported problems."
+
+        rm -f .git/index.lock 2>/dev/null || true
+
+        git reset --hard HEAD 2>/dev/null || true
+    fi
+
+
+    rm -f .git/index.lock 2>/dev/null || true
+
+
+    retry git fetch origin \
+        --tags \
+        --prune \
+        '+refs/heads/*:refs/remotes/origin/*'
+}
+
+
 # ============================================================
-# Git source recovery
+# Clone/update
 # ============================================================
 
 clone_or_update() {
 
-    info "[2/8] Preparing NexusPanel source..."
+    info "[2/9] Preparing NexusPanel source..."
 
     mkdir -p "$(dirname "$INSTALL_DIR")"
 
@@ -550,7 +604,7 @@ clone_or_update() {
 
     if [ -d "$INSTALL_DIR/.git" ]; then
 
-        info "Existing Git installation found."
+        info "Existing Git repository detected."
 
         cd "$INSTALL_DIR" ||
             die "Cannot enter $INSTALL_DIR."
@@ -559,26 +613,54 @@ clone_or_update() {
         git remote set-url origin "$REPO_URL" 2>/dev/null || true
 
 
-        info "Refreshing Git repository..."
-
         if ! retry git fetch origin \
             --tags \
             --prune \
             '+refs/heads/*:refs/remotes/origin/*'
         then
 
-            warn "Git fetch failed."
+            warn "Normal Git fetch failed."
 
-            diagnostics
+            if ! git_repair_repository; then
 
-            die "Could not update repository."
+                warn "Git repository could not be repaired."
+
+                local backup
+
+                backup="${INSTALL_DIR}.broken-$(date +%Y%m%d-%H%M%S)"
+
+                info "Moving broken installation to:"
+                info "$backup"
+
+                mv "$INSTALL_DIR" "$backup" ||
+                    die "Could not preserve broken installation."
+
+                mkdir -p "$INSTALL_DIR"
+
+                info "Trying fresh clone..."
+
+                retry git clone \
+                    "$REPO_URL" \
+                    "$INSTALL_DIR" ||
+                    die "Fresh Git clone failed."
+
+                cd "$INSTALL_DIR" ||
+                    die "Could not enter installation directory."
+
+                NODE_PATH="$(command -v node)"
+
+                return 0
+            fi
         fi
 
 
         local target_ref=""
 
 
-        # Explicit branch requested
+        # ----------------------------------------------------
+        # Explicit REF
+        # ----------------------------------------------------
+
         if [ "$REF" != "auto" ]; then
 
             if git show-ref \
@@ -586,6 +668,7 @@ clone_or_update() {
                 --quiet \
                 "refs/remotes/origin/$REF"
             then
+
                 target_ref="origin/$REF"
 
             elif git show-ref \
@@ -593,19 +676,23 @@ clone_or_update() {
                 --quiet \
                 "refs/tags/$REF"
             then
+
                 target_ref="$REF"
 
             elif git rev-parse \
                 --verify \
                 "$REF^{commit}" >/dev/null 2>&1
             then
+
                 target_ref="$REF"
             fi
-
         fi
 
 
-        # Automatic default branch detection
+        # ----------------------------------------------------
+        # Automatic default branch
+        # ----------------------------------------------------
+
         if [ -z "$target_ref" ]; then
 
             local default_branch
@@ -614,68 +701,73 @@ clone_or_update() {
 
             if [ -n "$default_branch" ]; then
 
-                info "Repository default branch: $default_branch"
+                info "Detected repository default branch: $default_branch"
 
                 if git show-ref \
                     --verify \
                     --quiet \
                     "refs/remotes/origin/$default_branch"
                 then
+
                     target_ref="origin/$default_branch"
                 fi
             fi
         fi
 
 
-        # Last-resort branch detection
+        # ----------------------------------------------------
+        # Last-resort remote branch detection
+        # ----------------------------------------------------
+
         if [ -z "$target_ref" ]; then
 
-            if git show-ref \
-                --verify \
-                --quiet \
-                refs/remotes/origin/main
-            then
-                target_ref="origin/main"
+            local candidate
 
-            elif git show-ref \
-                --verify \
-                --quiet \
-                refs/remotes/origin/master
-            then
-                target_ref="origin/master"
-            fi
+            for candidate in main master develop; do
+
+                if git show-ref \
+                    --verify \
+                    --quiet \
+                    "refs/remotes/origin/$candidate"
+                then
+
+                    target_ref="origin/$candidate"
+                    break
+                fi
+            done
         fi
 
 
         if [ -z "$target_ref" ]; then
 
-            warn "Available remote branches:"
-            git branch -r || true
+            warn "Available branches:"
+            git branch -a || true
 
-            die "Could not determine a usable Git branch."
+            die "No usable Git branch was found."
         fi
 
 
         info "Using Git reference: $target_ref"
 
 
-        # Save local changes if any
+        # ----------------------------------------------------
+        # Preserve local data
+        # ----------------------------------------------------
+
         if ! git diff --quiet ||
            ! git diff --cached --quiet
         then
 
-            warn "Local Git changes detected."
+            warn "Local source changes detected."
 
-            local backup_git
+            local source_backup
 
-            backup_git="${INSTALL_DIR}.local-backup-$(date +%Y%m%d-%H%M%S)"
+            source_backup="${INSTALL_DIR}.local-backup-$(date +%Y%m%d-%H%M%S)"
 
-            info "Backing up local installation to:"
-            info "$backup_git"
+            mkdir -p "$source_backup"
 
-            mkdir -p "$backup_git"
+            info "Preserving local data..."
 
-            # Preserve important data
             for folder in \
                 data \
                 servers \
@@ -685,22 +777,41 @@ clone_or_update() {
             do
 
                 if [ -d "$INSTALL_DIR/$folder" ]; then
+
                     cp -a \
                         "$INSTALL_DIR/$folder" \
-                        "$backup_git/" || true
+                        "$source_backup/" \
+                        2>/dev/null || true
                 fi
 
             done
+
+            info "Local backup:"
+            info "$source_backup"
 
             git reset --hard HEAD || true
             git clean -fd || true
         fi
 
 
-        git reset --hard "$target_ref" ||
-            die "Could not reset repository to $target_ref."
+        # ----------------------------------------------------
+        # Reset source
+        # ----------------------------------------------------
+
+        if ! git reset --hard "$target_ref"; then
+
+            warn "Git reset failed."
+
+            if ! git_repair_repository; then
+                die "Git repository could not be recovered."
+            fi
+
+            git reset --hard "$target_ref" ||
+                die "Git reset still failed."
+        fi
 
 
+        # Preserve runtime data
         git clean -fd \
             -e data/ \
             -e servers/ \
@@ -724,24 +835,21 @@ clone_or_update() {
        [ "$(find "$INSTALL_DIR" \
             -mindepth 1 \
             -maxdepth 1 \
-            -print -quit |
+            -print -quit 2>/dev/null |
             wc -l)" -gt 0 ]
     then
 
         warn "$INSTALL_DIR exists but is not a Git repository."
 
-        local backup_dir
+        local old_backup
 
-        backup_dir="${INSTALL_DIR}.backup-$(date +%Y%m%d-%H%M%S)"
+        old_backup="${INSTALL_DIR}.backup-$(date +%Y%m%d-%H%M%S)"
 
-        info "Moving existing directory to:"
-        info "$backup_dir"
+        info "Preserving existing installation:"
+        info "$old_backup"
 
-        mv "$INSTALL_DIR" "$backup_dir" ||
+        mv "$INSTALL_DIR" "$old_backup" ||
             die "Could not move existing installation."
-
-        info "Old installation preserved at:"
-        info "$backup_dir"
     fi
 
 
@@ -749,11 +857,14 @@ clone_or_update() {
     # Fresh clone
     # --------------------------------------------------------
 
-    local branch
+    local branch=""
 
     if [ "$REF" = "auto" ]; then
+
         branch="$(get_default_branch || true)"
+
     else
+
         branch="$REF"
     fi
 
@@ -770,7 +881,7 @@ clone_or_update() {
         then
 
             warn "Branch clone failed."
-            warn "Trying normal clone..."
+            warn "Trying normal repository clone..."
 
             retry git clone \
                 "$REPO_URL" \
@@ -780,8 +891,7 @@ clone_or_update() {
 
     else
 
-        info "Default branch could not be detected."
-        info "Trying normal Git clone..."
+        info "Could not detect default branch."
 
         retry git clone \
             "$REPO_URL" \
@@ -795,11 +905,119 @@ clone_or_update() {
 
 
     NODE_PATH="$(command -v node)"
+
+    info "Repository ready."
 }
 
 
 # ============================================================
-# npm configuration
+# Tunnel tools
+# ============================================================
+
+install_tunnel_tools() {
+
+    if [ "$EDITION" != "normal" ]; then
+        return 0
+    fi
+
+
+    if [ "$SKIP_TUNNELS" = "yes" ]; then
+
+        info "Tunnel helpers disabled."
+
+        return 0
+    fi
+
+
+    info "[2b/9] Installing optional tunnel helpers..."
+
+
+    local arch
+    local ngrok_arch
+    local playit_arch
+
+    arch="$(uname -m)"
+
+
+    case "$arch" in
+
+        x86_64|amd64)
+
+            ngrok_arch="amd64"
+            playit_arch="amd64"
+
+            ;;
+
+        aarch64|arm64)
+
+            ngrok_arch="arm64"
+            playit_arch="aarch64"
+
+            ;;
+
+        *)
+
+            warn "Architecture $arch is not supported."
+            warn "Skipping tunnel helpers."
+
+            return 0
+
+            ;;
+    esac
+
+
+    # ngrok
+
+    if command_exists ngrok; then
+
+        info "ngrok already installed."
+
+    else
+
+        if retry bash -c \
+            "curl -fsSL 'https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-${ngrok_arch}.tgz' | tar -xz -C /usr/local/bin ngrok"
+        then
+
+            chmod 755 /usr/local/bin/ngrok
+
+            info "ngrok installed."
+
+        else
+
+            warn "ngrok installation failed."
+            warn "Continuing without ngrok."
+        fi
+    fi
+
+
+    # playit
+
+    if command_exists playit; then
+
+        info "playit already installed."
+
+    else
+
+        if retry curl -fsSL \
+            "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-${playit_arch}" \
+            -o /usr/local/bin/playit
+        then
+
+            chmod 755 /usr/local/bin/playit
+
+            info "playit installed."
+
+        else
+
+            warn "playit installation failed."
+            warn "Continuing without playit."
+        fi
+    fi
+}
+
+
+# ============================================================
+# npm
 # ============================================================
 
 configure_npm() {
@@ -812,47 +1030,53 @@ configure_npm() {
     export npm_config_fetch_retry_maxtimeout=30000
 
     export npm_config_maxsockets=10
+
+    export npm_config_update_notifier=false
 }
 
 
-# ============================================================
-# npm install recovery
-# ============================================================
-
 npm_install_with_recovery() {
 
-    info "[3/8] Installing Node.js dependencies..."
+    info "[3/9] Installing Node.js dependencies..."
 
     cd "$INSTALL_DIR" ||
         die "Cannot enter $INSTALL_DIR."
 
+
     configure_npm
 
 
-    # First attempt
+    # --------------------------------------------------------
+    # Attempt 1
+    # --------------------------------------------------------
+
     if retry npm install \
         --omit=optional \
         --no-audit \
         --no-fund
     then
 
-        info "Core npm dependencies installed."
+        info "npm dependencies installed."
 
         npm install \
             --include=optional \
             --no-audit \
-            --no-fund ||
-            warn "Optional npm dependencies could not be installed."
+            --no-fund \
+            || warn "Optional npm dependencies failed."
 
         return 0
     fi
 
 
-    # Cache recovery
     warn "npm install failed."
-    warn "Running npm cache verification..."
 
-    npm cache verify || true
+    # --------------------------------------------------------
+    # Attempt 2 - cache verification
+    # --------------------------------------------------------
+
+    info "Verifying npm cache..."
+
+    npm cache verify 2>/dev/null || true
 
 
     if retry npm install \
@@ -861,14 +1085,18 @@ npm_install_with_recovery() {
     then
 
         info "npm recovery succeeded."
+
         return 0
     fi
 
 
-    # Clean cache
+    # --------------------------------------------------------
+    # Attempt 3 - cache clean
+    # --------------------------------------------------------
+
     warn "Cleaning npm cache..."
 
-    npm cache clean --force || true
+    npm cache clean --force 2>/dev/null || true
 
 
     if retry npm install \
@@ -876,15 +1104,19 @@ npm_install_with_recovery() {
         --no-fund
     then
 
-        info "npm installation succeeded after cache recovery."
+        info "npm recovered after cache cleanup."
+
         return 0
     fi
 
 
-    # npm ci
+    # --------------------------------------------------------
+    # Attempt 4 - npm ci
+    # --------------------------------------------------------
+
     if [ -f package-lock.json ]; then
 
-        warn "Trying npm ci recovery..."
+        warn "Trying npm ci..."
 
         if retry npm ci \
             --omit=optional \
@@ -893,57 +1125,94 @@ npm_install_with_recovery() {
         then
 
             info "npm ci recovery succeeded."
+
             return 0
         fi
     fi
 
 
-    die "Node.js dependency installation failed."
+    # --------------------------------------------------------
+    # Final diagnostic
+    # --------------------------------------------------------
+
+    warn "All npm recovery attempts failed."
+
+    echo
+    echo "Node:"
+    node --version || true
+
+    echo
+    echo "npm:"
+    npm --version || true
+
+    echo
+    echo "package.json:"
+    if [ -f package.json ]; then
+        cat package.json
+    fi
+
+    echo
+
+    die "Node.js dependencies could not be installed."
 }
 
 
 # ============================================================
-# Build components
+# Builds
 # ============================================================
 
 build_components() {
 
-    info "[3a/8] Building optional native components..."
+    info "[4/9] Building NexusPanel components..."
 
     cd "$INSTALL_DIR" ||
         die "Cannot enter installation directory."
 
 
     if npm run build:nexusmark; then
+
         info "NexusMark build completed."
+
     else
+
         warn "NexusMark build failed."
-        warn "Continuing with fallback sandbox."
+        warn "Continuing with fallback mode."
     fi
 
 
     if npm run build:host-agent; then
+
         info "Host agent build completed."
+
     else
+
         warn "Host agent build failed."
-        warn "Continuing."
+        warn "Continuing with available host-agent implementation."
     fi
 }
 
 
 # ============================================================
-# Advanced AI
+# AI prompt
 # ============================================================
 
 ask_ai() {
 
-    if [ "$INSTALL_AI" = "yes" ]; then
-        return 0
-    fi
+    case "$INSTALL_AI" in
 
-    if [ "$INSTALL_AI" = "no" ]; then
-        return 1
-    fi
+        yes|YES|y|Y)
+
+            return 0
+            ;;
+
+        no|NO|n|N)
+
+            return 1
+            ;;
+
+        ask|"")
+            ;;
+    esac
 
 
     echo
@@ -951,56 +1220,69 @@ ask_ai() {
     echo " NexusPanel Advanced AI"
     echo "=================================================="
     echo
-    echo "Optional local coding/diagnostic AI:"
+    echo "Optional local coding/diagnostic AI."
     echo
-    echo " Model:"
-    echo " Qwen2.5-Coder-0.5B-Instruct"
+    echo "Model:"
+    echo "Qwen2.5-Coder-0.5B-Instruct"
     echo
-    echo "The model is downloaded locally and is not required"
-    echo "for the normal NexusPanel panel to work."
-    echo
-    echo "It can increase disk usage and first-install time."
+    echo "AI is NOT required for the normal panel."
+    echo "It may require additional disk space and time."
     echo
 
 
-    if [ -t 0 ] && [ -t 1 ]; then
+    # Explicitly test whether stdin is usable.
+    if [ ! -t 0 ]; then
 
-        while true; do
+        warn "Installer input is not interactive."
+        warn "Skipping AI automatically."
 
-            read -r -p \
-                "Install Advanced AI now? [y/N]: " answer
-
-            case "$answer" in
-
-                y|Y|yes|YES)
-                    return 0
-                    ;;
-
-                n|N|no|NO|"")
-                    return 1
-                    ;;
-
-                *)
-                    echo "Please answer y or n."
-                    ;;
-            esac
-
-        done
-
+        return 1
     fi
 
 
-    # Non-interactive installation
-    warn "No interactive terminal detected."
-    warn "Advanced AI will be skipped."
+    while true; do
 
-    return 1
+        printf "Install Advanced AI now? [y/N]: "
+
+        if ! read -r answer; then
+
+            warn "Could not read input."
+            warn "Skipping Advanced AI."
+
+            return 1
+        fi
+
+
+        case "$answer" in
+
+            y|Y|yes|YES)
+
+                echo
+                return 0
+                ;;
+
+            n|N|no|NO|"")
+                echo
+                return 1
+                ;;
+
+            *)
+
+                echo "Please enter y or n."
+                ;;
+        esac
+    done
 }
 
 
+# ============================================================
+# Advanced AI
+# ============================================================
+
 install_advanced_ai() {
 
-    info "[4/8] Advanced AI setup..."
+    info "[5/9] Advanced AI setup..."
+
 
     if ! ask_ai; then
 
@@ -1014,7 +1296,7 @@ install_advanced_ai() {
         die "Cannot enter installation directory."
 
 
-    info "Installing @huggingface/transformers..."
+    info "Installing Hugging Face Transformers..."
 
     if ! retry npm install \
         @huggingface/transformers@latest \
@@ -1022,7 +1304,7 @@ install_advanced_ai() {
         --no-fund
     then
 
-        warn "Could not install Advanced AI package."
+        warn "Could not install @huggingface/transformers."
         warn "Continuing without Advanced AI."
 
         return 0
@@ -1033,7 +1315,7 @@ install_advanced_ai() {
 
         warn "backend/advanced_ai.js does not exist."
 
-        warn "Skipping model initialization."
+        info "AI package installed, but model initialization was skipped."
 
         return 0
     fi
@@ -1046,7 +1328,7 @@ install_advanced_ai() {
     mkdir -p "$HF_HOME"
 
 
-    info "Initializing local AI model..."
+    info "Initializing local AI..."
 
     if "$NODE_PATH" \
         "$INSTALL_DIR/backend/advanced_ai.js"
@@ -1056,19 +1338,19 @@ install_advanced_ai() {
 
     else
 
-        warn "Advanced AI model initialization failed."
-        warn "Core NexusPanel will continue working."
+        warn "AI initialization failed."
+        warn "Core NexusPanel installation is continuing."
     fi
 }
 
 
 # ============================================================
-# Prepare folders
+# Directories
 # ============================================================
 
 prepare_paths() {
 
-    info "[5/8] Preparing directories and permissions..."
+    info "[6/9] Preparing directories..."
 
     cd "$INSTALL_DIR" ||
         die "Cannot enter installation directory."
@@ -1093,6 +1375,7 @@ prepare_paths() {
 
 
     if [ -f "$INSTALL_DIR/update/update.sh" ]; then
+
         chmod 755 "$INSTALL_DIR/update/update.sh" || true
     fi
 
@@ -1108,7 +1391,7 @@ prepare_paths() {
         /var/lib/nexuspanel/backups \
         /var/lib/nexuspanel/logs \
         /var/lib/nexuspanel/nexus-mark \
-        || true
+        2>/dev/null || true
 
 
     if [ "$SERVICE_USER" != "root" ]; then
@@ -1116,6 +1399,7 @@ prepare_paths() {
         local group
 
         group="$(id -gn "$SERVICE_USER")"
+
 
         chown -R \
             "$SERVICE_USER:$group" \
@@ -1126,7 +1410,7 @@ prepare_paths() {
             "$INSTALL_DIR/backupfolder" \
             "$INSTALL_DIR/update/backups" \
             /var/lib/nexuspanel \
-            || true
+            2>/dev/null || true
     fi
 }
 
@@ -1137,13 +1421,12 @@ prepare_paths() {
 
 install_cli() {
 
-    info "[6/8] Installing nexuspanel CLI..."
+    info "[7/9] Installing nexuspanel CLI..."
 
 
     if [ ! -f "$INSTALL_DIR/backend/cli.js" ]; then
 
-        warn "backend/cli.js missing."
-
+        warn "backend/cli.js is missing."
         warn "CLI installation skipped."
 
         return 0
@@ -1163,11 +1446,15 @@ EOF
     chmod 755 /usr/local/bin/nexuspanel
 
 
-    hash -r 2>/dev/null || true
+    info "CLI installed successfully."
 
 
-    info "CLI installed:"
-    info "/usr/local/bin/nexuspanel"
+    if ! command_exists nexuspanel; then
+
+        warn "/usr/local/bin is not currently visible in PATH."
+        warn "The command should work in a new terminal."
+
+    fi
 }
 
 
@@ -1177,7 +1464,8 @@ EOF
 
 setup_owner() {
 
-    info "[7/8] Owner account setup..."
+    info "[8/9] Owner account setup..."
+
 
     cd "$INSTALL_DIR" ||
         die "Cannot enter installation directory."
@@ -1192,12 +1480,15 @@ setup_owner() {
     fi
 
 
-    # Existing unattended credentials
+    # --------------------------------------------------------
+    # Unattended
+    # --------------------------------------------------------
+
     if [ -n "${NEXUSPANEL_OWNER_EMAIL:-}" ] &&
        [ -n "${NEXUSPANEL_OWNER_PASSWORD:-}" ]
     then
 
-        info "Using unattended owner configuration."
+        info "Using configured owner credentials."
 
         if NEXUSPANEL_SERVICE_USER="$SERVICE_USER" \
             "$NODE_PATH" \
@@ -1206,14 +1497,20 @@ setup_owner() {
         then
 
             info "Owner setup completed."
-            return 0
-        fi
 
-        warn "Automatic owner setup failed."
+            return 0
+
+        else
+
+            warn "Automatic owner setup failed."
+        fi
     fi
 
 
-    # Interactive setup
+    # --------------------------------------------------------
+    # Interactive
+    # --------------------------------------------------------
+
     if [ -t 0 ] && [ -t 1 ]; then
 
         echo
@@ -1233,8 +1530,8 @@ setup_owner() {
 
         else
 
-            warn "Owner setup returned an error."
-            warn "You can run it later with:"
+            warn "Owner setup failed."
+            warn "You can run it later:"
             echo
             echo "sudo nexuspanel setup-owner"
         fi
@@ -1243,7 +1540,9 @@ setup_owner() {
 
         warn "No interactive terminal."
         warn "Owner setup skipped."
-        warn "Run later:"
+
+        echo
+        echo "Run later:"
         echo
         echo "sudo nexuspanel setup-owner"
     fi
@@ -1263,18 +1562,19 @@ systemd_available() {
 
 install_service() {
 
-    info "[8/8] Installing NexusPanel systemd service..."
+    info "[9/9] Installing NexusPanel service..."
 
 
     if ! systemd_available; then
 
-        warn "systemd is not running on this machine."
-        warn "NexusPanel service installation skipped."
+        warn "systemd is not running."
 
-        info "You can start the panel manually with:"
+        echo
+        echo "Manual start:"
         echo
         echo "cd $INSTALL_DIR"
         echo "npm start"
+        echo
 
         return 0
     fi
@@ -1286,17 +1586,20 @@ install_service() {
 
     if [ ! -f "$INSTALL_DIR/backend/service.js" ]; then
 
-        die "backend/service.js is missing."
+        warn "backend/service.js is missing."
+        warn "Service installation skipped."
+
+        return 0
     fi
 
 
     local attempt=1
-    local success=0
+    local installed=0
 
 
-    while [ "$attempt" -le 3 ]; do
+    while [ "$attempt" -le "$MAX_RETRIES" ]; do
 
-        info "Service installation attempt $attempt/3..."
+        info "Service installation attempt $attempt/$MAX_RETRIES..."
 
 
         if NEXUSPANEL_SERVICE_NAME="$SERVICE_NAME" \
@@ -1306,56 +1609,50 @@ install_service() {
             install
         then
 
-            success=1
+            installed=1
             break
         fi
 
 
-        warn "Service installation attempt $attempt failed."
+        warn "Service installation failed."
 
-        systemctl daemon-reload || true
+        systemctl daemon-reload 2>/dev/null || true
 
-        sleep $((attempt * 2))
+        sleep "$((attempt * 2))"
 
         attempt=$((attempt + 1))
     done
 
 
-    if [ "$success" -ne 1 ]; then
+    if [ "$installed" -ne 1 ]; then
 
-        warn "Could not install the service automatically."
-
-        journalctl \
-            -u "$SERVICE_NAME" \
-            -n 100 \
-            --no-pager \
-            2>/dev/null || true
+        warn "Could not install systemd service automatically."
 
         return 0
     fi
 
 
-    systemctl daemon-reload || true
+    systemctl daemon-reload 2>/dev/null || true
 
 
     systemctl enable "$SERVICE_NAME" \
         2>/dev/null || true
 
 
-    if systemctl restart "$SERVICE_NAME"; then
-        :
-    else
-        systemctl start "$SERVICE_NAME" || true
+    info "Starting NexusPanel service..."
+
+
+    if ! systemctl restart "$SERVICE_NAME" 2>/dev/null; then
+
+        systemctl start "$SERVICE_NAME" \
+            2>/dev/null || true
     fi
 
 
     sleep 3
 
 
-    if systemctl is-active \
-        --quiet \
-        "$SERVICE_NAME"
-    then
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
 
         info "NexusPanel service is running."
 
@@ -1364,7 +1661,6 @@ install_service() {
 
 
     warn "Service did not start."
-
 
     echo
     echo "========== SERVICE LOG =========="
@@ -1378,11 +1674,11 @@ install_service() {
     echo "================================="
 
 
-    warn "Attempting one final service recovery..."
+    info "Attempting service recovery..."
 
 
-    systemctl daemon-reload || true
-    systemctl reset-failed "$SERVICE_NAME" || true
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
 
 
     systemctl restart "$SERVICE_NAME" \
@@ -1394,17 +1690,14 @@ install_service() {
     sleep 3
 
 
-    if systemctl is-active \
-        --quiet \
-        "$SERVICE_NAME"
-    then
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
 
         info "Service recovered successfully."
 
     else
 
-        warn "Service is still not running."
-        warn "Installation itself completed, but the service needs investigation."
+        warn "Service is still stopped."
+        warn "The installation itself remains intact."
 
     fi
 }
@@ -1417,9 +1710,10 @@ install_service() {
 diagnostics() {
 
     echo
-    echo "=============================================="
-    echo " NexusPanel Installer Diagnostics"
-    echo "=============================================="
+    echo "=================================================="
+    echo " NexusPanel Diagnostics"
+    echo "=================================================="
+
 
     echo
     echo "Date:"
@@ -1457,7 +1751,7 @@ diagnostics() {
 
 
     echo
-    echo "Installation:"
+    echo "Install directory:"
     echo "$INSTALL_DIR"
 
 
@@ -1471,33 +1765,41 @@ diagnostics() {
     free -h 2>/dev/null || true
 
 
-    echo
-    echo "Git branches:"
     if [ -d "$INSTALL_DIR/.git" ]; then
-        git -C "$INSTALL_DIR" branch -a 2>/dev/null || true
-    fi
 
+        echo
+        echo "Git remote:"
 
-    echo
-    echo "Git remotes:"
-    if [ -d "$INSTALL_DIR/.git" ]; then
         git -C "$INSTALL_DIR" remote -v 2>/dev/null || true
+
+
+        echo
+        echo "Git branches:"
+
+        git -C "$INSTALL_DIR" branch -a 2>/dev/null || true
+
+
+        echo
+        echo "Current commit:"
+
+        git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || true
     fi
 
 
-    echo
-    echo "Service:"
     if systemd_available; then
+
+        echo
+        echo "Service status:"
+
         systemctl status \
             "$SERVICE_NAME" \
             --no-pager \
             2>/dev/null || true
-    fi
 
 
-    echo
-    echo "Recent journal:"
-    if systemd_available; then
+        echo
+        echo "Recent service logs:"
+
         journalctl \
             -u "$SERVICE_NAME" \
             -n 50 \
@@ -1507,7 +1809,54 @@ diagnostics() {
 
 
     echo
-    echo "=============================================="
+    echo "=================================================="
+}
+
+
+# ============================================================
+# Final checks
+# ============================================================
+
+final_check() {
+
+    local problems=0
+
+
+    if [ ! -d "$INSTALL_DIR" ]; then
+
+        warn "Install directory does not exist."
+
+        problems=$((problems + 1))
+    fi
+
+
+    if [ ! -f "$INSTALL_DIR/package.json" ]; then
+
+        warn "package.json is missing."
+
+        problems=$((problems + 1))
+    fi
+
+
+    if ! command_exists node; then
+
+        warn "Node.js is missing."
+
+        problems=$((problems + 1))
+    fi
+
+
+    if [ "$problems" -eq 0 ]; then
+
+        info "Final installation checks passed."
+
+        return 0
+    fi
+
+
+    warn "$problems installation check(s) failed."
+
+    return 1
 }
 
 
@@ -1530,32 +1879,40 @@ show_info() {
 
     echo
     echo "=================================================="
-    echo " NexusPanel installation completed"
+    echo " NexusPanel v${VERSION}"
+    echo " Installation completed"
     echo "=================================================="
     echo
 
-    echo "Panel URL:"
+
+    echo "Panel:"
     echo "http://${public_ip}:3000"
+
 
     echo
     echo "Service:"
     echo "$SERVICE_NAME"
 
+
     echo
     echo "Install directory:"
     echo "$INSTALL_DIR"
+
 
     echo
     echo "Edition:"
     echo "$EDITION"
 
+
     echo
     echo "Node:"
     "$NODE_PATH" --version 2>/dev/null || true
 
+
     echo
     echo "Installer log:"
     echo "$LOG_FILE"
+
 
     echo
     echo "Useful commands:"
@@ -1569,11 +1926,18 @@ show_info() {
     echo "  sudo nexuspanel agent status"
     echo "  sudo nexuspanel nexusmark status"
 
+
     echo
     echo "Systemd:"
     echo
     echo "  sudo systemctl status $SERVICE_NAME"
     echo "  sudo journalctl -u $SERVICE_NAME -n 100 --no-pager"
+
+
+    echo
+    echo "Installer log:"
+    echo "$LOG_FILE"
+
 
     echo
     echo "=================================================="
@@ -1588,6 +1952,7 @@ on_exit() {
 
     local rc=$?
 
+
     if [ "$rc" -ne 0 ]; then
 
         err "Installer exited with code $rc."
@@ -1597,6 +1962,7 @@ on_exit() {
         err "Full log:"
         err "$LOG_FILE"
     fi
+
 
     exit "$rc"
 }
@@ -1621,29 +1987,54 @@ main() {
 
     need_root
 
+
+    show_os
+
+
     require_service_user
+
 
     install_system_packages
 
+
     ensure_node
+
 
     install_tunnel_tools
 
+
     clone_or_update
+
 
     npm_install_with_recovery
 
+
     build_components
+
 
     install_advanced_ai
 
+
     prepare_paths
+
 
     install_cli
 
+
     setup_owner
 
+
     install_service
+
+
+    if ! final_check; then
+
+        warn "Installation finished with warnings."
+
+        diagnostics || true
+
+    fi
+
 
     show_info
 }
