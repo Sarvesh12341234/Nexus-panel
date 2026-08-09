@@ -96,13 +96,73 @@ function directoryTree(root) {
   return { directories, executables };
 }
 
+function pathAncestors(target, stopAt = '/') {
+  const result = [];
+  let current;
+  try { current = path.resolve(target); } catch { return result; }
+  while (current && current !== stopAt) {
+    result.push(current);
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  if (stopAt && fs.existsSync(stopAt)) result.push(stopAt);
+  return [...new Set(result.filter((entry) => fs.existsSync(entry)))];
+}
+
+function grantTraversal(name, targets) {
+  const unique = [...new Set(targets.filter(Boolean).flatMap((target) => pathAncestors(target)))];
+  if (!unique.length) return { ok: true };
+  const result = run('setfacl', ['-m', `u:${name}:--x`, '--', ...unique], 20000);
+  return result.status === 0
+    ? { ok: true }
+    : { ok: false, reason: 'parent-traversal-acl-failed', error: String(result.stderr || result.stdout || '').trim().slice(0, 800) };
+}
+
+function javaRuntimeExecutables(serverRoot) {
+  const result = [];
+  const runtimeRoot = path.join(serverRoot, 'runtime');
+  if (!fs.existsSync(runtimeRoot)) return result;
+  const queue = [runtimeRoot];
+  while (queue.length) {
+    const current = queue.shift();
+    let entries = [];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const child = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        try {
+          const real = fs.realpathSync(child);
+          if (real.startsWith(`${runtimeRoot}${path.sep}`) && fs.statSync(real).isFile()) result.push(child, real);
+        } catch {}
+        continue;
+      }
+      if (entry.isDirectory()) { queue.push(child); continue; }
+      if (/[/\\]runtime[/\\]java-[^/\\]+[/\\]jdk-[^/\\]+[/\\](?:bin|lib)[/\\]/.test(child)) {
+        try {
+          if ((fs.statSync(child).mode & 0o111) !== 0 || /[/\\]bin[/\\]|[/\\]lib[/\\]jspawnhelper$/.test(child)) result.push(child);
+        } catch {}
+      }
+    }
+  }
+  return [...new Set(result.filter((entry) => fs.existsSync(entry)))];
+}
+
 function applyAcl(name, serverRoot, nativeBinary = '') {
+  // systemd User= performs path traversal as the server UID. ACLing only
+  // serverRoot is insufficient when /opt/nexuspanel or /opt/nexuspanel/servers
+  // is not searchable by that UID. Explicitly grant traversal on every parent.
+  const javaExecutables = javaRuntimeExecutables(serverRoot);
+  const traversal = grantTraversal(name, [serversRoot, serverRoot, nativeBinary, ...javaExecutables]);
+  if (!traversal.ok) return traversal;
+
   const access = run('setfacl', [
     '-R', '-P', '-m', `u:${name}:rw-,g::---,o::---,m::rwx`, '--', serverRoot,
   ], 120000);
   if (access.status !== 0) {
     return { ok: false, reason: 'acl-apply-failed', error: String(access.stderr || access.stdout || '').trim().slice(0, 800) };
   }
+
   const tree = directoryTree(serverRoot);
   const directories = tree.directories;
   for (let index = 0; index < directories.length; index += 100) {
@@ -115,44 +175,44 @@ function applyAcl(name, serverRoot, nativeBinary = '') {
       return { ok: false, reason: 'default-acl-failed', error: String(directoryAcl.stderr || directoryAcl.stdout || '').trim().slice(0, 800) };
     }
   }
-  for (let index = 0; index < tree.executables.length; index += 100) {
-    const batch = tree.executables.slice(index, index + 100);
-    const executableAcl = run('setfacl', ['-m', `u:${name}:rwx`, '--', ...batch], 120000);
-    if (executableAcl.status !== 0) {
-      return { ok: false, reason: 'executable-acl-failed', error: String(executableAcl.stderr || executableAcl.stdout || '').trim().slice(0, 800) };
-    }
-  }
-  run('setfacl', ['-m', `u:${name}:--x`, '--', serversRoot], 10000);
-  if (nativeBinary && fs.existsSync(nativeBinary)) {
-    // Native launcher and Java runtime must retain execute permission. The
-    // broad ACL above intentionally grants only rw- to ordinary files; add
-    // r-x explicitly to executables so systemd-run does not fail with 203/EXEC.
-    const javaMeta = path.join(serverRoot, 'runtime', 'java-runtime.json');
-    let javaBinary = '';
-    try {
-      const meta = JSON.parse(fs.readFileSync(javaMeta, 'utf8'));
-      javaBinary = meta?.javaBinary || '';
-    } catch {}
-    for (const executable of [nativeBinary, javaBinary].filter(Boolean)) {
-      if (!fs.existsSync(executable)) continue;
+
+  // Restore execute permission only for actual runtime launchers/helpers and
+  // files that already carried an executable bit. Never chmod ordinary data.
+  const executablePaths = [...new Set([...tree.executables, ...javaExecutables])];
+  for (let index = 0; index < executablePaths.length; index += 100) {
+    const batch = executablePaths.slice(index, index + 100);
+    for (const executable of batch) {
       try {
         const st = fs.statSync(executable);
         if ((st.mode & 0o111) === 0) fs.chmodSync(executable, st.mode | 0o100);
       } catch {}
     }
-    const paths = [
-      externalDataRoot,
-      path.join(externalDataRoot, 'nexus-mark'),
-      path.dirname(nativeBinary),
-      nativeBinary,
-      javaBinary,
-    ].filter((entry, index, values) => values.indexOf(entry) === index && fs.existsSync(entry));
+    const executableAcl = run('setfacl', ['-m', `u:${name}:r-x`, '--', ...batch], 120000);
+    if (executableAcl.status !== 0) {
+      return { ok: false, reason: 'executable-acl-failed', error: String(executableAcl.stderr || executableAcl.stdout || '').trim().slice(0, 800) };
+    }
+  }
+
+  const resolvedBinaries = [nativeBinary, ...javaExecutables].filter(Boolean).flatMap((entry) => {
+    try { return [entry, fs.realpathSync(entry)]; } catch { return [entry]; }
+  });
+  const paths = [
+    externalDataRoot,
+    path.join(externalDataRoot, 'nexus-mark'),
+    path.dirname(nativeBinary || serverRoot),
+    ...resolvedBinaries,
+  ].filter((entry, index, values) => values.indexOf(entry) === index && fs.existsSync(entry));
+
+  const finalTraversal = grantTraversal(name, [serversRoot, serverRoot, nativeBinary, ...paths]);
+  if (!finalTraversal.ok) return finalTraversal;
+
+  if (paths.length) {
     const binaryAcl = run('setfacl', ['-m', `u:${name}:r-x`, '--', ...paths], 10000);
     if (binaryAcl.status !== 0) {
       return { ok: false, reason: 'runtime-acl-failed', error: String(binaryAcl.stderr || binaryAcl.stdout || '').trim().slice(0, 800) };
     }
   }
-  return { ok: true, directories: directories.length };
+  return { ok: true, directories: directories.length, executables: executablePaths.length };
 }
 
 function verifyIdentity(name, serverRoot, nativeBinary = '') {
@@ -199,7 +259,21 @@ function ensureServerIdentity(profile, nativeBinary = '') {
   const cached = cache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now() && accountUid(name)) {
     const runtimeAccess = grantWritableRuntimePaths(name, profile);
-    return runtimeAccess.ok ? cached.value : { available: false, ...runtimeAccess, name, uid: accountUid(name) };
+    if (!runtimeAccess.ok) return { available: false, ...runtimeAccess, name, uid: accountUid(name) };
+    let javaBinary = '';
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(serverRoot, 'runtime', 'java-runtime.json'), 'utf8'));
+      javaBinary = meta?.javaBinary || '';
+    } catch {}
+    if (javaBinary && fs.existsSync(javaBinary) && commandAvailable('runuser')) {
+      const javaExec = run('runuser', ['-u', name, '--', javaBinary, '-version'], 10000);
+      if (javaExec.status !== 0) {
+        cache.delete(cacheKey);
+        return { available: false, reason: 'identity-java-exec-failed', name, uid: accountUid(name),
+          error: String(javaExec.stderr || javaExec.stdout || '').trim().slice(0, 800) };
+      }
+    }
+    return cached.value;
   }
 
   const account = createAccount(name, serverRoot);
@@ -220,6 +294,21 @@ function ensureServerIdentity(profile, nativeBinary = '') {
   if (!verification.ok) return { available: false, ...verification, name, uid: accountUid(name) };
   const runtimeAccess = grantWritableRuntimePaths(name, profile);
   if (!runtimeAccess.ok) return { available: false, ...runtimeAccess, name, uid: accountUid(name) };
+
+  // Do the same check the real launcher will do, but as the exact service UID.
+  // A host-root `access(2)` check can pass while systemd User= still gets 203/EXEC
+  // because an intermediate directory is not traversable.
+  let javaBinary = '';
+  try {
+    const meta = JSON.parse(fs.readFileSync(path.join(serverRoot, 'runtime', 'java-runtime.json'), 'utf8'));
+    javaBinary = meta?.javaBinary || '';
+  } catch {}
+  if (javaBinary && fs.existsSync(javaBinary) && commandAvailable('runuser')) {
+    const javaExec = run('runuser', ['-u', name, '--', javaBinary, '-version'], 10000);
+    if (javaExec.status !== 0) {
+      return { available: false, reason: 'identity-java-exec-failed', name, uid: accountUid(name), error: String(javaExec.stderr || javaExec.stdout || '').trim().slice(0, 800) };
+    }
+  }
 
   const value = {
     available: true,

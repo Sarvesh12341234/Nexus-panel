@@ -6,7 +6,7 @@
 
 set -uo pipefail
 
-VERSION="5.2.0"
+VERSION="5.2.3"
 REPO_URL="${NEXUSPANEL_REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
 INSTALL_DIR="${NEXUSPANEL_INSTALL_DIR:-/opt/nexuspanel}"
 SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
@@ -155,7 +155,7 @@ install_system_packages() {
             info "Updating APT..."
             retry apt-get update || die "APT update failed."
             info "Installing required packages..."
-            retry apt-get install -y curl ca-certificates git unzip tar xz-utils build-essential systemd acl passwd util-linux procps iproute2 rsync file jq openssl python3 python3-minimal || die "Ubuntu dependency installation failed."
+            retry apt-get install -y curl ca-certificates git unzip tar xz-utils build-essential systemd acl sudo passwd util-linux procps iproute2 rsync file jq openssl python3 python3-minimal || die "Ubuntu dependency installation failed."
             ;;
         dnf)
             retry dnf makecache || true
@@ -606,6 +606,44 @@ setup_owner() {
     info "Open the one-time setup URL printed at the end of installation."
 }
 
+preflight_linux_permissions() {
+    info "Running Nexus-Mark host permission preflight..."
+    [ "$(id -u)" -eq 0 ] || die "Permission preflight requires root."
+    command_exists setfacl || die "setfacl is required for per-server isolation. Install package: acl"
+    command_exists runuser || die "runuser is required for per-server identity verification."
+    if ! command_exists useradd && ! command_exists adduser; then
+        die "useradd/adduser is required for per-server identities."
+    fi
+    mkdir -p "$INSTALL_DIR/servers" /var/lib/nexuspanel/nexus-mark
+    # Traversal-only installation parents: identities can reach their own
+    # server directory without being able to list panel data.
+    chmod 711 "$INSTALL_DIR" "$INSTALL_DIR/servers" 2>/dev/null || true
+    chmod 750 /var/lib/nexuspanel /var/lib/nexuspanel/nexus-mark 2>/dev/null || true
+
+    local probe_user="nexuspanel-preflight-$$"
+    local probe_root="$INSTALL_DIR/servers/.nexuspanel-preflight-$$"
+    if command_exists useradd; then
+        useradd --system --user-group --no-create-home --home-dir "$probe_root" \
+            --shell /usr/sbin/nologin "$probe_user" >/dev/null 2>&1 || true
+    fi
+    if ! id "$probe_user" >/dev/null 2>&1; then
+        warn "Could not create temporary permission probe account; continuing with installer ACL checks."
+        return 0
+    fi
+    mkdir -p "$probe_root"
+    chmod 700 "$probe_root"
+    setfacl -m "u:$probe_user:--x" "$INSTALL_DIR" "$INSTALL_DIR/servers" 2>/dev/null || true
+    setfacl -m "u:$probe_user:rwx" "$probe_root" 2>/dev/null || true
+    if runuser -u "$probe_user" -- test -r "$probe_root" -a -w "$probe_root" -a -x "$probe_root"; then
+        info "Host ACL traversal preflight passed."
+    else
+        warn "Host ACL traversal preflight failed. Server startup will refuse unsafe identity fallback."
+    fi
+    setfacl -x "u:$probe_user" "$INSTALL_DIR" "$INSTALL_DIR/servers" "$probe_root" 2>/dev/null || true
+    rm -rf "$probe_root" 2>/dev/null || true
+    userdel "$probe_user" >/dev/null 2>&1 || true
+}
+
 systemd_available() {
     command_exists systemctl && [ -d /run/systemd/system ]
 }
@@ -820,6 +858,7 @@ main() {
     build_components
     install_advanced_ai
     prepare_paths
+    preflight_linux_permissions
     install_cli
     install_service
     setup_owner
