@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const readline = require('node:readline/promises');
 const { stdin, stdout } = require('node:process');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const {
   hasSystemd,
   install,
@@ -18,6 +19,7 @@ const {
 } = require('./service');
 const { getUserCount } = require('./db');
 const { createUser } = require('./auth');
+const { doctor: platformDoctor } = require('./platform');
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: 'inherit', windowsHide: true, ...options });
@@ -31,6 +33,10 @@ function help() {
 Usage:
   nexuspanel version
   nexuspanel doctor
+  nexuspanel intelligence [scope]
+  nexuspanel platform
+  nexuspanel permissions audit
+  nexuspanel permissions repair
   nexuspanel start
   nexuspanel stop
   nexuspanel restart
@@ -41,6 +47,7 @@ Usage:
   nexuspanel install
   nexuspanel service install
   nexuspanel setup-owner
+  nexuspanel setup-url
   nexuspanel nexusmark status
   nexuspanel nexusmark rebuild
   nexuspanel nexusmark restart
@@ -52,6 +59,21 @@ Usage:
 
 Service: ${serviceName}`);
 }
+
+function setupUrl() {
+  const dataDir = path.join(__dirname, '..', 'data');
+  const tokenPath = path.join(dataDir, 'setup_token');
+  if (getUserCount() > 0) throw new Error('Initial setup is already complete.');
+  let token = fs.existsSync(tokenPath) ? fs.readFileSync(tokenPath, 'utf8').trim() : '';
+  if (!token) {
+    token = crypto.randomBytes(32).toString('base64url');
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(tokenPath, token, { mode: 0o600 });
+  }
+  const port = Number(process.env.PORT || 3000);
+  console.log(`Setup URL: http://YOUR_VPS_IP:${port}/setup.html?token=${token}`);
+}
+
 
 async function ensureOwnerForCli() {
   if (getUserCount() > 0) return;
@@ -153,7 +175,25 @@ async function main() {
   
   if (command === 'help' || command === '--help' || command === '-h') return help();
   if (command === 'version' || command === '--version' || command === '-v') {
-    console.log('NexusPanel 3.0.0');
+    console.log('NexusPanel 3.0.6');
+    return;
+  }
+  if (command === 'intelligence') {
+    const { IntelligenceCore } = require('./intelligence_core');
+    const intelligence = new IntelligenceCore(path.join(__dirname, '..'));
+    const scope = String(process.argv[3] || 'system').slice(0, 120);
+    console.log(JSON.stringify({ snapshot: intelligence.snapshot(scope), recommendations: intelligence.recommend({ scope }) }, null, 2));
+    return;
+  }
+  if (command === 'setup-url') return setupUrl();
+  if (command === 'permissions' && ['audit', 'repair'].includes(process.argv[3])) {
+    const { audit, repair } = require('./permission_repair');
+    const root = path.join(__dirname, '..');
+    const servers = path.join(root, 'servers');
+    const mutable = ['data', 'servers', 'software', 'backups', 'backupfolder'].map((name) => path.join(root, name)).filter((target) => fs.existsSync(target));
+    const targets = [...mutable, ...(fs.existsSync(servers) ? fs.readdirSync(servers, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => path.join(servers, e.name)) : [])];
+    const output = targets.map((target) => process.argv[3] === 'repair' ? repair(target, { owner: process.platform === 'win32' ? null : require('os').userInfo().username }) : audit(target));
+    console.log(JSON.stringify(output, null, 2));
     return;
   }
   if (command === 'setup-owner' || command === 'owner:setup') {
@@ -202,11 +242,16 @@ async function main() {
     await ensureOwnerForCli();
     return require('./index');
   }
+  if (command === 'platform') {
+    console.log(JSON.stringify(platformDoctor(), null, 2));
+    return;
+  }
   if (command === 'doctor') {
     const { kernelStatus } = require('./nexus_mark');
     const { localStatus, request } = require('./host_agent');
     console.log(JSON.stringify({
-      version: '3.0.0',
+      version: '3.0.5',
+      platform: platformDoctor(),
       node: process.version,
       systemd: hasSystemd(),
       service: status({ quiet: true }),
@@ -226,4 +271,14 @@ try {
 } catch (error) {
   console.error(error.message);
   process.exit(1);
+}
+
+
+// NexusPanel 3.2.3 advanced diagnostics commands.
+if (process.argv[2] === 'advanced-health') {
+  const {HealthEngine}=require('./advanced/operations');
+  const h=new HealthEngine();
+  const server=process.argv[3] || 'local';
+  console.log(JSON.stringify(h.score(server), null, 2));
+  process.exit(0);
 }

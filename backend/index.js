@@ -6,7 +6,6 @@ const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const readline = require('node:readline/promises');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { stdin, stdout } = require('node:process');
@@ -14,6 +13,7 @@ const { createZip } = require('./archive');
 const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
 const { AdaptiveEngine } = require('./adaptive_engine');
 const { MODEL_VERSION: REPAIR_AGENT_MODEL_VERSION, PARAMETER_COUNT: REPAIR_AGENT_PARAMETER_COUNT, RepairAgent } = require('./repair_agent');
+const { audit: auditPermissions, repair: repairPermissions } = require('./permission_repair');
 const { RepairWebResearch } = require('./repair_web');
 const advancedAi = require('./advanced_ai');
 const worldConverter = require('./world_converter');
@@ -32,6 +32,11 @@ const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
 const { DDOS_PARAMETER_COUNT, collectDdosEvidence } = require('./ddos_guard');
 const { runAgentTerminal, runFullAccessCommand } = require('./agent_terminal');
 const hostAgent = require('./host_agent');
+const { IntelligenceCore } = require('./intelligence_core');
+const { PerformanceMonitor } = require('./performance_monitor');
+const openRouter = require('./openrouter');
+const { MicroDecisionModel } = require('./micro_lm');
+const { NexusAgentCore } = require('./agent_core');
 const {
   SESSION_COOKIE,
   authMiddleware,
@@ -57,6 +62,7 @@ const port = Number(process.env.PORT || 3000);
 const dataRoot = path.join(__dirname, '..', 'data');
 const healthPath = path.join(dataRoot, 'panel_health.json');
 const editionPath = path.join(dataRoot, 'edition');
+const setupTokenPath = path.join(dataRoot, 'setup_token');
 const terminalSessions = new Map();
 const wakeWatchers = new Map();
 const tunnelProcesses = new Map();
@@ -69,13 +75,22 @@ const autoBackupInFlight = new Set();
 const serverSizeCache = new Map();
 const liveUploadProgress = new Map();
 const adaptiveEngine = new AdaptiveEngine();
+const intelligence = new IntelligenceCore(path.join(__dirname, '..'));
+const performanceMonitor = new PerformanceMonitor();
+const microLm = new MicroDecisionModel(path.join(__dirname, '..'));
 const repairAgent = new RepairAgent(db);
+const agentCore = new NexusAgentCore({ microLm, learning: repairAgent });
 const repairWeb = new RepairWebResearch(db);
+const { HealthEngine, IncidentEngine, DependencyGraph, ChangePlanner, routeModel } = require('./advanced/operations');
+const healthEngine = new HealthEngine();
+const incidentEngine = new IncidentEngine(300);
+const dependencyGraph = new DependencyGraph();
+const changePlanner = new ChangePlanner();
 let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const dummyPasswordHash = hashPassword(crypto.randomBytes(24).toString('base64url'));
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
-const PANEL_VERSION = '3.0.0';
+const PANEL_VERSION = '3.2.3';
 let updateStatus = {
   running: false,
   progress: 0,
@@ -91,6 +106,13 @@ app.use('/api/servers/:id/files/upload-chunk', express.raw({ type: 'application/
 app.use('/api/servers/:id/files/upload', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/network/upload-test', express.raw({ type: 'application/octet-stream', limit: '64mb' }));
 app.use(express.json({ limit: '1mb' }));
+app.use(performanceMonitor.middleware());
+app.use((req, res, next) => {
+  const requestId = crypto.randomBytes(8).toString('hex');
+  req.nexusRequestId = requestId;
+  res.setHeader('X-Nexus-Request-Id', requestId);
+  next();
+});
 app.use(authMiddleware);
 app.use('/api', (req, res, next) => {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
@@ -127,6 +149,32 @@ app.use(express.static(path.join(__dirname, '..', 'frontend'), {
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+function ensureSetupToken() {
+  if (getUserCount() > 0) return '';
+  try {
+    const existing = fs.existsSync(setupTokenPath) ? fs.readFileSync(setupTokenPath, 'utf8').trim() : '';
+    if (existing && /^[A-Za-z0-9_-]{43}$/.test(existing)) return existing;
+    const token = crypto.randomBytes(32).toString('base64url');
+    fs.mkdirSync(dataRoot, { recursive: true });
+    fs.writeFileSync(setupTokenPath, token, { mode: 0o600 });
+    try { fs.chmodSync(setupTokenPath, 0o600); } catch {}
+    return token;
+  } catch (error) {
+    throw new Error(`Unable to prepare first-run setup token: ${error.message}`);
+  }
+}
+
+function validSetupToken(candidate) {
+  const expected = ensureSetupToken();
+  const provided = String(candidate || '');
+  if (!expected || provided.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+}
+
+function finishInitialSetup() {
+  try { fs.rmSync(setupTokenPath, { force: true }); } catch {}
 }
 
 app.get('/api/bootstrap', (_req, res) => {
@@ -268,7 +316,7 @@ const repairAgentModelFreshness = ensureRepairAgentModelFresh();
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
-  const defaultTag = edition === 'host' ? 'host-v3.0.0' : 'normal-v3.0.0';
+  const defaultTag = edition === 'host' ? 'host-v3.2.3' : 'normal-v3.2.3';
   let configuredTag = settingValue('update_target_tag', defaultTag);
   if (/^(?:normal|host)-v[12]\./.test(configuredTag)) {
     configuredTag = defaultTag;
@@ -301,6 +349,7 @@ function panelSettingsPayload(user = null) {
     repairAgentLiveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
     repairAgentFullAccessEnabled: repairFullAccessEnabled(),
     repairAgentFullAccessUntil: repairFullAccessUntil(),
+    openRouter: openRouter.status(),
     normalTunnelsEnabled: edition === 'normal',
     ngrokConfigured: edition === 'normal' && Boolean(settingValue('ngrok_auth_token', '')),
     ngrokAuthtokenPreview: edition === 'normal' && settingValue('ngrok_auth_token', '') ? `${settingValue('ngrok_auth_token', '').slice(0, 6)}....${settingValue('ngrok_auth_token', '').slice(-4)}` : '',
@@ -2049,7 +2098,7 @@ async function readProperties(server) {
 
 async function writeProperties(server, values) {
   const current = await readProperties(server);
-  const merged = { ...current, ...values, 'server-port': String(server.port) };
+  const merged = { ...current, ...values, 'server-port': String(values['server-port'] ?? server.port) };
   const content = [
     ...Object.entries(merged).map(([key, value]) => `${key}=${value}`),
     '',
@@ -3031,6 +3080,23 @@ async function inspectVpsRepairReadiness(server, root) {
   const actions = [];
   const warnings = [];
   try {
+    const permissionAudit = auditPermissions(root);
+    const permissionProblems = permissionAudit.inaccessible.length > 0 || !permissionAudit.writableRoot;
+    if (permissionProblems) {
+      const repaired = repairPermissions(root, {
+        owner: process.platform === 'win32' ? null : os.userInfo().username,
+        dryRun: false,
+      });
+      actions.push(`Permission auditor repaired server-root access: ${repaired.auditBefore.inaccessible.length} inaccessible path(s) before, ${repaired.auditAfter.inaccessible.length} after.`);
+      if (!repaired.ok) warnings.push(`Permission repair completed with remaining access issues: ${repaired.auditAfter.inaccessible.length} path(s).`);
+    } else {
+      actions.push(`Permission audit passed: ${permissionAudit.files} file(s), ${permissionAudit.dirs} directory(s).`);
+    }
+  } catch (error) {
+    warnings.push(`Permission auditor failed: ${error.message}`);
+  }
+
+  try {
     const marker = assertInside(root, path.join(root, 'runtime', `.repair-write-test-${process.pid}`));
     await fs.promises.mkdir(path.dirname(marker), { recursive: true });
     await fs.promises.writeFile(marker, 'ok', { encoding: 'utf8', mode: 0o600 });
@@ -3146,7 +3212,14 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   };
   let advancedReasoning = '';
   try {
-    const advancedPlan = await advancedAi.reasonPlan({ server, diagnostics, logs: consoleLogs(server.id), context: repairContext });
+    const forensic = advancedAi.advancedAssessment({
+      server,
+      diagnostics,
+      logs: consoleLogs(server.id),
+      context: repairContext,
+    });
+    agentAnalysis.advancedForensics = forensic;
+    const advancedPlan = await advancedAi.reasonPlan({ server, diagnostics, logs: consoleLogs(server.id), context: { ...repairContext, forensic } });
     advancedReasoning = advancedPlan?.summary || '';
     if (advancedReasoning) {
       agentAnalysis.advancedReasoning = advancedReasoning;
@@ -4294,7 +4367,44 @@ app.post('/api/optimizer/apply', requirePermission(capabilities.OPTIMIZER_MANAGE
 });
 
 app.post('/api/setup', asyncRoute(async (req, res) => {
-  res.status(410).json({ error: 'Owner setup is terminal-only. Restart NexusPanel to create the first owner.' });
+  if (getUserCount() > 0) {
+    return res.status(409).json({ error: 'Initial setup has already been completed.' });
+  }
+
+  const token = req.get('x-nexuspanel-setup-token') || req.body?.setupToken;
+  if (!validSetupToken(token)) {
+    return res.status(403).json({ error: 'Invalid or expired setup link.' });
+  }
+
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const name = String(req.body?.name || '').trim() || 'Owner';
+  const password = String(req.body?.password || '');
+  const confirmation = String(req.body?.passwordConfirmation || '');
+
+  if (!email.includes('@') || email.length > 254) {
+    return res.status(400).json({ error: 'Enter a valid email address.' });
+  }
+  if (name.length < 2 || name.length > 100) {
+    return res.status(400).json({ error: 'Name must be between 2 and 100 characters.' });
+  }
+  if (password.length < 12 || password.length > 256) {
+    return res.status(400).json({ error: 'Password must be between 12 and 256 characters.' });
+  }
+  if (password !== confirmation) {
+    return res.status(400).json({ error: 'Passwords do not match.' });
+  }
+
+  try {
+    const user = createUser({ email, name, password, role: 'owner', accessLevel: 100 });
+    finishInitialSetup();
+    setSessionCookie(res, createSession(user.id, { userAgent: req.headers['user-agent'] || '' }), { secure: req.secure });
+    res.status(201).json({ ok: true, user: publicUser(user) });
+  } catch (error) {
+    if (/UNIQUE constraint failed: users\.email/i.test(String(error.message))) {
+      return res.status(409).json({ error: 'That email address is already registered.' });
+    }
+    throw error;
+  }
 }));
 
 app.post('/api/login', (req, res) => {
@@ -4509,8 +4619,89 @@ app.get('/api/repair/agent/status', requirePermission(capabilities.SECURITY_VIEW
   res.json({ agent: repairBrainPayload().agent, advancedAi: advancedAi.status() });
 });
 
+
+function collectAdvancedOverview() {
+  const servers = db.prepare('SELECT id, name, status, port, max_memory_mb, cpu_cores FROM servers ORDER BY id').all();
+  const health = servers.map((server) => {
+    const metrics = processTreeMetrics(server.id) || {};
+    const cpu = Number(metrics.cpuPercent ?? 0);
+    const memory = Number(metrics.memoryPercent ?? 0);
+    const errors = Number(metrics.errorCount ?? 0);
+    const score = healthEngine.observe(server.id, { cpu, memory, errors });
+    return { server, health: score };
+  });
+  for (const item of servers) {
+    dependencyGraph.node(`server:${item.id}`, { type: 'server', name: item.name, status: item.status });
+    dependencyGraph.node(`port:${item.port}`, { type: 'allocation', port: item.port });
+    dependencyGraph.edge(`server:${item.id}`, `port:${item.port}`, 'binds');
+  }
+  return {
+    version: PANEL_VERSION,
+    generatedAt: Date.now(),
+    health,
+    incidents: incidentEngine.list(50),
+    dependencies: dependencyGraph.snapshot(),
+    modelRoute: routeModel({ complexity: 'normal' }),
+    performance: performanceMonitor.snapshot(),
+  };
+}
+
+app.get('/api/advanced/overview', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json(collectAdvancedOverview());
+});
+
+app.get('/api/advanced/incidents', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
+  const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+  res.json({ incidents: incidentEngine.list(limit) });
+});
+
+app.post('/api/advanced/incidents', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
+  const type = String(req.body.type || 'manual').slice(0, 80);
+  const severity = ['info','low','medium','high','critical'].includes(req.body.severity) ? req.body.severity : 'info';
+  const event = incidentEngine.add(type, req.body.data && typeof req.body.data === 'object' ? req.body.data : {}, severity);
+  res.status(201).json({ incident: event });
+});
+
+app.post('/api/advanced/change-plan', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  const risk = ['low','medium','high','critical'].includes(req.body.risk) ? req.body.risk : 'medium';
+  const change = req.body.change && typeof req.body.change === 'object' ? req.body.change : {};
+  if (Object.keys(change).length > 30) return res.status(400).json({ error: 'Change plan is too large.' });
+  res.status(201).json({ plan: changePlanner.plan(change, risk) });
+});
+
+app.get('/api/advanced/dependencies', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  collectAdvancedOverview();
+  res.json(dependencyGraph.snapshot());
+});
+
+app.get('/api/performance', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ performance: performanceMonitor.snapshot() });
+});
+
 app.get('/api/advanced-ai/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   res.json({ advancedAi: advancedAi.status() });
+});
+
+app.get('/api/advanced-ai/tools', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ registry: advancedAi.toolRegistry() });
+});
+
+app.get('/api/advanced-ai/tool-search', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
+  const query = String(req.query.q || '').slice(0, 200);
+  const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 12));
+  res.json({ query, tools: advancedAi.searchTools(query, limit) });
+});
+
+app.get('/api/advanced-ai/learning', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ learning: advancedAi.learningSummary() });
+});
+
+app.post('/api/advanced-ai/learn', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can train the live AI.' });
+  const reward = Number(req.body.reward);
+  if (!Number.isFinite(reward) || reward < -1 || reward > 1) return res.status(400).json({ error: 'reward must be between -1 and 1.' });
+  const episode = advancedAi.learn({ ...req.body, reward });
+  res.json({ ok: true, episode, learning: advancedAi.learningSummary() });
 });
 
 app.post('/api/advanced-ai/install', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
@@ -5154,6 +5345,76 @@ app.post('/api/settings/nexusmark/doctor', requirePermission(capabilities.SETTIN
   res.json({ nexusMark: status });
 });
 
+app.get('/api/agent/core', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req,res)=>{
+  res.json({ agent: { version:1, ...agentCore.snapshot() } });
+});
+app.post('/api/agent/events', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req,res)=>{
+  const type=String(req.body?.type||'event').slice(0,80);
+  const decision=agentCore.ingest(type, req.body?.payload || {});
+  res.json({ok:true,decision,agent:agentCore.snapshot()});
+});
+
+app.get('/api/ai/micro/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ microLm: { version: 1, samples: microLm.state.samples, updatedAt: microLm.state.updatedAt, actions: microLm.actions } });
+});
+app.post('/api/ai/micro/decide', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
+  res.json({ decision: microLm.decide(req.body || {}) });
+});
+app.post('/api/ai/micro/learn', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can update the MicroLM.' });
+  const reward=Number(req.body.reward);
+  if(!Number.isFinite(reward)||reward<-1||reward>1)return res.status(400).json({error:'reward must be between -1 and 1.'});
+  res.json({ decision: microLm.learn(req.body.evidence || {}, req.body.action, reward) });
+});
+
+app.get('/api/advanced-ai/providers/openrouter', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ provider: openRouter.status() });
+});
+
+app.post('/api/advanced-ai/providers/openrouter/key', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can configure external AI providers.' });
+  const provider = openRouter.setApiKey(req.body.apiKey);
+  res.json({ provider });
+});
+
+app.delete('/api/advanced-ai/providers/openrouter/key', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can remove external AI providers.' });
+  openRouter.setApiKey('');
+  res.json({ provider: openRouter.status() });
+});
+
+app.post('/api/advanced-ai/providers/openrouter/test', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can test external AI providers.' });
+  res.json({ provider: openRouter.status(), test: await openRouter.test() });
+}));
+
+app.get('/api/advanced-ai/providers/openrouter/models', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  const freeOnly = String(req.query.freeOnly ?? '1') !== '0';
+  const models = await openRouter.listModels({ force: String(req.query.refresh || '') === '1', freeOnly });
+  res.json({ models, freeOnly, count: models.length });
+}));
+
+app.put('/api/advanced-ai/providers/openrouter', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can configure external AI providers.' });
+  res.json({ provider: openRouter.setConfig({ model: req.body.model, freeOnly: req.body.freeOnly }) });
+});
+
+app.post('/api/advanced-ai/providers/openrouter/chat', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
+  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can use the external AI bridge.' });
+  const messages = Array.isArray(req.body.messages) ? req.body.messages : [];
+  if (!messages.length || messages.length > 40) return res.status(400).json({ error: 'messages must contain 1-40 items.' });
+  const tools = Array.isArray(req.body.tools) ? req.body.tools : [];
+  const result = await openRouter.chat({
+    model: req.body.model,
+    messages,
+    tools,
+    temperature: req.body.temperature,
+    maxTokens: req.body.maxTokens,
+    web: req.body.web === true,
+  });
+  res.json({ result });
+}));
+
 app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
   setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
   setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
@@ -5183,6 +5444,12 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   const updateTag = String(req.body.updateTargetTag || req.body.updateTag || panelSettingsPayload(req.user).updateTag).trim();
   if (/^(normal|host)-v\d+\.\d+(?:\.\d+)?$/.test(updateTag)) setSettingValue('update_target_tag', updateTag);
   setSettingValue('update_repo', FIXED_UPDATE_REPO);
+  if (req.body.openRouterModel !== undefined || req.body.openRouterFreeOnly !== undefined) {
+    openRouter.setConfig({
+      model: req.body.openRouterModel,
+      freeOnly: req.body.openRouterFreeOnly,
+    });
+  }
   res.json({ settings: panelSettingsPayload(req.user) });
 });
 
@@ -6138,6 +6405,32 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
   res.json(hostMetricsPayload());
 });
 
+app.get('/api/intelligence', requireAuth, (req, res) => {
+  const scope = String(req.query.scope || 'system').slice(0, 120);
+  res.json(intelligence.snapshot(scope));
+});
+
+app.get('/api/intelligence/recommendations', requireAuth, (req, res) => {
+  const scope = String(req.query.scope || 'system').slice(0, 120);
+  res.json(intelligence.recommend({ scope }));
+});
+
+app.post('/api/intelligence/incident', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const scope = String(req.body.scope || 'system').slice(0, 120);
+  const incident = intelligence.recordIncident({
+    type: String(req.body.type || 'manual').slice(0, 80),
+    scope,
+    severity: req.body.severity,
+    evidence: Array.isArray(req.body.evidence) ? req.body.evidence : [],
+    metadata: req.body.metadata || {},
+  });
+  res.json({ ok: true, incident });
+});
+
+app.post('/api/intelligence/incident/:id/resolve', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  res.json({ ok: intelligence.resolveIncident(String(req.params.id)) });
+});
+
 app.use('/api/servers/:id/timeline', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
   res.status(410).json({ error: 'Server Time Machine has been removed from this build.' });
 });
@@ -6345,9 +6638,43 @@ app.put('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES
   for (const [key, value] of Object.entries(req.body.values || {})) {
     if (allowed.has(key)) values[key] = String(value);
   }
-  await writeProperties(server, values);
-  appendLog(server.id, '[NexusPanel] server.properties updated. Restart may be required.');
-  res.json({ values: await readProperties(server) });
+
+  if (Object.prototype.hasOwnProperty.call(values, 'server-port')) {
+    const requestedPort = Number(values['server-port']);
+    if (!Number.isInteger(requestedPort) || requestedPort < 1024 || requestedPort > 65535) {
+      return res.status(400).json({ error: 'Server port must be an integer between 1024 and 65535.' });
+    }
+    if (runtimeStatus(server.id) === 'online' || runtimeStatus(server.id) === 'starting') {
+      return res.status(409).json({ error: 'Stop the server before changing its game port.' });
+    }
+    const collision = db.prepare(`
+      SELECT id, name FROM servers
+      WHERE port = ? AND id != ?
+      LIMIT 1
+    `).get(requestedPort, server.id);
+    if (collision) {
+      return res.status(409).json({ error: `Port ${requestedPort} is already allocated to ${collision.name || `server #${collision.id}`}.` });
+    }
+    if (requestedPort !== Number(server.port)) {
+      db.prepare('UPDATE servers SET port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(requestedPort, server.id);
+      const updatedServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
+      try {
+        writeProfile(updatedServer);
+      } catch (error) {
+        db.prepare('UPDATE servers SET port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(server.port, server.id);
+        throw new Error(`Port changed in database but Nexus-Mark profile regeneration failed; change was rolled back. ${error.message}`);
+      }
+    }
+  }
+
+  const currentServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
+  await writeProperties(currentServer, values);
+  const verified = await readProperties(currentServer);
+  if (Object.prototype.hasOwnProperty.call(values, 'server-port') && Number(verified['server-port']) !== Number(currentServer.port)) {
+    return res.status(500).json({ error: 'Port verification failed after saving.' });
+  }
+  appendLog(server.id, '[NexusPanel] server.properties updated and allocation synchronized. Restart may be required.');
+  res.json({ values: verified, server: serverPayload(currentServer, req) });
 }));
 
 app.get('/api/servers/:id/whitelist', requirePermission(capabilities.WHITELIST_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
@@ -7491,43 +7818,23 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
 async function ensureInitialOwner() {
   if (getUserCount() > 0) return;
 
-  const envEmail = process.env.NEXUSPANEL_OWNER_EMAIL;
-  const envPassword = process.env.NEXUSPANEL_OWNER_PASSWORD;
-  if (envEmail && envPassword) {
-    createUser({
-      email: envEmail,
-      name: process.env.NEXUSPANEL_OWNER_NAME || 'Owner',
-      password: envPassword,
-      role: 'owner',
-      accessLevel: 100,
-    });
-    console.log('Created owner account from NEXUSPANEL_OWNER_EMAIL.');
+  const envEmail = String(process.env.NEXUSPANEL_OWNER_EMAIL || '').trim();
+  const envPassword = String(process.env.NEXUSPANEL_OWNER_PASSWORD || '');
+  if (!envEmail || !envPassword) {
+    ensureSetupToken();
+    console.log('No owner account exists yet. Complete first-run setup using the setup URL printed by the installer.');
     return;
   }
 
-  if (!stdin.isTTY) {
-    throw new Error('No owner account exists. Run NexusPanel in a terminal or set NEXUSPANEL_OWNER_EMAIL and NEXUSPANEL_OWNER_PASSWORD.');
-  }
-
-  console.log('\nNexusPanel first run: create the owner account before opening the web panel.');
-  const rl = readline.createInterface({ input: stdin, output: stdout });
-
-  try {
-    const name = (await rl.question('Owner name [Owner]: ')).trim() || 'Owner';
-    const email = (await rl.question('Owner email: ')).trim();
-    const password = await rl.question('Owner password (12+ chars): ');
-
-    createUser({
-      email,
-      name,
-      password,
-      role: 'owner',
-      accessLevel: 100,
-    });
-    console.log('Owner created. Open the web panel and log in.');
-  } finally {
-    rl.close();
-  }
+  createUser({
+    email: envEmail,
+    name: process.env.NEXUSPANEL_OWNER_NAME || 'Owner',
+    password: envPassword,
+    role: 'owner',
+    accessLevel: 100,
+  });
+  finishInitialSetup();
+  console.log(`Created owner account from NEXUSPANEL_OWNER_EMAIL: ${envEmail}`);
 }
 
 async function start() {

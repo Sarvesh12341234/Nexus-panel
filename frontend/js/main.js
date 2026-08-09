@@ -1186,52 +1186,82 @@ function applyTheme(key) {
   document.body.dataset.themeMode = theme.mode;
 }
 
+const apiInFlight = new Map();
+const apiCache = new Map();
+
+function apiCacheKey(path, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  return ['GET', 'HEAD'].includes(method) ? `${method} ${path}` : '';
+}
+
 async function api(path, options = {}) {
-  const { timeoutMs = 0, ...fetchOptions } = options;
-  let timeout = 0;
-  let controller = null;
-  if (timeoutMs && !fetchOptions.signal) {
-    controller = new AbortController();
-    timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const { timeoutMs = 0, cacheTtlMs = 0, ...fetchOptions } = options;
+  const method = String(fetchOptions.method || 'GET').toUpperCase();
+  const key = apiCacheKey(path, options);
+  if (key && cacheTtlMs > 0) {
+    const cached = apiCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.data;
   }
-  try {
-    const response = await fetch(path, {
-      cache: 'no-store',
-      credentials: 'include',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(fetchOptions.headers || {}) },
-      ...fetchOptions,
-      ...(fetchOptions.method && !['GET', 'HEAD', 'OPTIONS'].includes(String(fetchOptions.method).toUpperCase())
-        ? { headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-NexusPanel-Request': '1', ...(fetchOptions.headers || {}) } }
-        : {}),
-      ...(controller ? { signal: controller.signal } : {}),
-    });
-    const raw = await response.text();
-    let data = {};
+  if (key && apiInFlight.has(key)) return apiInFlight.get(key);
+
+  const request = (async () => {
+    let timeout = 0;
+    let controller = null;
+    if (timeoutMs && !fetchOptions.signal) {
+      controller = new AbortController();
+      timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    }
     try {
-      data = raw ? JSON.parse(raw) : {};
-    } catch {
-      data = {};
+      const headers = {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) ? { 'X-NexusPanel-Request': '1' } : {}),
+        ...(fetchOptions.headers || {}),
+      };
+      const response = await fetch(path, {
+        cache: 'no-store',
+        credentials: 'include',
+        ...fetchOptions,
+        headers,
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      const raw = await response.text();
+      let data = {};
+      try { data = raw ? JSON.parse(raw) : {}; } catch { data = {}; }
+      if (response.status === 401 && data.code === 'AUTH_REQUIRED') {
+        closeConsoleStream();
+        state.user = null;
+        window.location.replace('/login.html?expired=1');
+        const authError = new Error(data.error || 'Your session expired. Sign in again.');
+        authError.code = 'AUTH_REQUIRED';
+        throw authError;
+      }
+      if (!response.ok) throw new Error(data.error || raw.slice(0, 500) || 'Request failed.');
+      if (method !== 'GET' && method !== 'HEAD') {
+        for (const cacheKey of apiCache.keys()) {
+          if (cacheKey.includes(path.split('/').slice(0, 4).join('/'))) apiCache.delete(cacheKey);
+        }
+      }
+      if (key && cacheTtlMs > 0) apiCache.set(key, { data, expiresAt: Date.now() + Math.max(25, cacheTtlMs) });
+      return data;
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        const timeoutError = new Error('Request timed out.');
+        timeoutError.code = 'timeout';
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      if (timeout) window.clearTimeout(timeout);
     }
-    if (response.status === 401 && data.code === 'AUTH_REQUIRED') {
-      closeConsoleStream();
-      state.user = null;
-      window.location.replace('/login.html?expired=1');
-      const authError = new Error(data.error || 'Your session expired. Sign in again.');
-      authError.code = 'AUTH_REQUIRED';
-      throw authError;
-    }
-    if (!response.ok) throw new Error(data.error || raw.slice(0, 500) || 'Request failed.');
-    return data;
-  } catch (error) {
-    if (error.name === 'AbortError') {
-      const timeoutError = new Error('Request timed out.');
-      timeoutError.code = 'timeout';
-      throw timeoutError;
-    }
-    throw error;
-  } finally {
-    if (timeout) window.clearTimeout(timeout);
-  }
+  })();
+  if (key) apiInFlight.set(key, request);
+  try { return await request; }
+  finally { if (key && apiInFlight.get(key) === request) apiInFlight.delete(key); }
+}
+
+function invalidateApiCache(prefix = '') {
+  for (const key of apiCache.keys()) if (!prefix || key.includes(prefix)) apiCache.delete(key);
 }
 
 async function apiText(path) {
@@ -1242,16 +1272,9 @@ async function apiText(path) {
 }
 
 function enableDeveloperShortcutGuard() {
-  window.addEventListener('keydown', (event) => {
-    const key = String(event.key || '').toLowerCase();
-    const developerShortcut = event.key === 'F12'
-      || (event.ctrlKey && event.shiftKey && ['i', 'j', 'c'].includes(key))
-      || (event.ctrlKey && key === 'u');
-    if (!developerShortcut) return;
-    event.preventDefault();
-    window.location.replace('https://www.google.com/');
-  });
+  // Developer tools are intentionally not blocked; this keeps browser debugging and support workflows functional.
 }
+
 
 function formData(form) {
   const data = Object.fromEntries(new FormData(form).entries());
@@ -1936,6 +1959,16 @@ function renderPlugins() {
   }
 
   const plugins = state.plugins.filter((plugin) => plugin.serverId === server.id);
+  const marketStats = document.querySelector('#pluginMarketStats');
+  if (marketStats) {
+    const enabled = plugins.filter((plugin) => plugin.enabled).length;
+    const kindCounts = plugins.reduce((acc, plugin) => { acc[plugin.kind] = (acc[plugin.kind] || 0) + 1; return acc; }, {});
+    marketStats.innerHTML = `
+      <span class="market-stat"><strong>${plugins.length}</strong><small>Installed</small></span>
+      <span class="market-stat"><strong>${enabled}</strong><small>Enabled</small></span>
+      <span class="market-stat"><strong>${escapeHtml(server.softwareName || server.softwareKey || 'Server')}</strong><small>Target</small></span>
+      <span class="market-stat"><strong>${escapeHtml(Object.entries(kindCounts).map(([k,v]) => `${k}: ${v}`).join(' · ') || 'Ready')}</strong><small>Extensions</small></span>`;
+  }
   if (!plugins.length) {
     elements.pluginList.innerHTML = '<p class="empty-state">No plugins installed for this server yet. Search Modrinth above.</p>';
     return;
@@ -2369,6 +2402,23 @@ function applyFileManagerLayout() {
   if (elements.fileLayoutButton) elements.fileLayoutButton.textContent = `Layout: ${fileLayoutMode[0].toUpperCase()}${fileLayoutMode.slice(1)}`;
 }
 
+async function refreshOpenRouterModels(force = false) {
+  const select = document.querySelector('#openRouterModel');
+  const info = document.querySelector('#openRouterModelInfo');
+  if (!select) return;
+  select.innerHTML = '<option value="">Loading free models...</option>';
+  try {
+    const data = await api(`/api/advanced-ai/providers/openrouter/models?freeOnly=${document.querySelector('#openRouterFreeOnly')?.checked === false ? '0' : '1'}${force ? '&refresh=1' : ''}`, { timeoutMs: 20000, cacheTtlMs: 30000 });
+    const current = state.settings?.openRouter?.model || '';
+    select.innerHTML = `<option value="">Auto / MicroLM fallback</option>${(data.models || []).map((model) => `<option value="${escapeHtml(model.id)}" ${model.id === current ? 'selected' : ''}>${escapeHtml(model.name)} — ${model.free ? 'FREE' : 'paid'} · ${Math.round((model.contextLength || 0) / 1000)}K ctx${model.supportedParameters?.includes('tools') ? ' · tools' : ''}</option>`).join('')}`;
+    const selected = (data.models || []).find((model) => model.id === current);
+    if (info) info.textContent = selected ? `${selected.description || selected.name} | ${selected.supportedParameters?.includes('tools') ? 'tool calling supported' : 'text-only'} | ${selected.contextLength || 0} context` : `${data.count || 0} models available.`;
+  } catch (error) {
+    select.innerHTML = '<option value="">Unable to load catalog</option>';
+    if (info) info.textContent = error.message;
+  }
+}
+
 function renderSettings() {
   if (!elements.settingsPanel) return;
   const settings = state.settings || {};
@@ -2400,7 +2450,7 @@ function renderSettings() {
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '3.0.0')}"></label>
       <label>Visible servers before scrolling <input name="serverSwitcherVisibleCount" type="number" min="1" max="20" value="${Number(settings.serverSwitcherVisibleCount || 3)}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
-      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v3.0.0"></label>
+      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v3.2.3"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
       <div class="settings-group">
         <strong>Advanced AI reasoning</strong>
@@ -2410,6 +2460,21 @@ function renderSettings() {
           <button class="secondary" type="button" data-action="advanced-ai-install">Install Advanced AI</button>
           <button class="secondary" type="button" data-action="advanced-ai-enable">Enable Advanced AI</button>
           <button class="danger" type="button" data-action="advanced-ai-disable">Disable Advanced AI</button>
+        </div>
+      </div>
+      <div class="settings-group ai-provider-card">
+        <div class="section-head"><div><strong>OpenRouter AI Hub</strong><p class="muted">Connect a provider once, then browse the live model catalog and select any free model. API keys stay server-side and are never returned to the browser.</p></div><span class="pill ${settings.openRouter?.configured ? 'is-on' : ''}" id="openRouterState">${settings.openRouter?.configured ? 'Connected' : 'Not configured'}</span></div>
+        <label>OpenRouter API key <input id="openRouterKey" type="password" autocomplete="off" placeholder="${settings.openRouter?.configured ? 'Saved — paste a replacement to rotate' : 'sk-or-v1-...'}"></label>
+        <div class="row-actions">
+          <button class="secondary" type="button" data-action="openrouter-save">Save key</button>
+          <button class="secondary" type="button" data-action="openrouter-test">Test connection</button>
+          <button class="secondary" type="button" data-action="openrouter-refresh">Refresh free models</button>
+          <button class="danger" type="button" data-action="openrouter-remove">Remove key</button>
+        </div>
+        <div class="ai-model-picker">
+          <label>Preferred model <select id="openRouterModel" name="openRouterModel"><option value="">Loading model catalog...</option></select></label>
+          <label class="switch"><input id="openRouterFreeOnly" name="openRouterFreeOnly" type="checkbox" ${settings.openRouter?.freeOnly !== false ? 'checked' : ''}><span></span>Show/select free models only</label>
+          <p class="muted" id="openRouterModelInfo">The catalog is fetched from OpenRouter only when requested and cached for 10 minutes.</p>
         </div>
       </div>
       <div class="settings-group">
@@ -2532,8 +2597,8 @@ function renderSettings() {
     </details>
   `;
 
+  refreshOpenRouterModels(false).catch(() => {});
 }
-
 function updateSettingsLiveStatus() {
   if (state.activeView !== 'settings') return;
   const update = state.settings?.updateStatus || {};
@@ -3034,6 +3099,7 @@ async function renderSecurity(forceHealth = false) {
   ]);
   state.loginEvents = audit.events || [];
   state.health = health.health || null;
+  const advanced = await api('/api/advanced/overview').catch(() => null);
 
   if (elements.healthPanel) {
     const checks = state.health?.checks || [];
@@ -3048,6 +3114,13 @@ async function renderSecurity(forceHealth = false) {
       <p class="muted">Last checked: ${escapeHtml(state.health?.checkedAtText ? formatPanelDate(state.health.checkedAtText) : 'never')}</p>
       <div class="health-grid">
         ${checks.map((check) => `<article class="${check.ok ? 'is-ok' : 'is-bad'}"><strong>${escapeHtml(check.name)}</strong><span>${escapeHtml(check.message)}</span></article>`).join('') || '<p class="empty-state">Run a health check to verify panel folders, database, software, and Java.</p>'}
+      </div>
+      <div class="settings-group advanced-ops-card">
+        <div class="section-head"><div><p class="eyebrow">Nexus Intelligence</p><h3>Live operational picture</h3></div><span class="pill">${escapeHtml(String(advanced?.health?.length || 0))} servers</span></div>
+        <div class="health-grid">
+          ${(advanced?.health || []).map((item) => `<article class="${item.health.score >= 85 ? 'is-ok' : 'is-bad'}"><strong>${escapeHtml(item.server.name)}</strong><span>Health ${item.health.score}/100 · ${escapeHtml(item.health.risk)} risk · ${Math.round(item.health.confidence * 100)}% confidence</span></article>`).join('') || '<p class="empty-state">No server telemetry available yet.</p>'}
+        </div>
+        <p class="muted">The lightweight health engine runs locally; larger AI models are only used when deeper reasoning is required.</p>
       </div>
     `;
   }
@@ -3439,7 +3512,7 @@ function startRefreshLoop() {
     if (!state.user || !uiPreferences.liveRefresh || state.activeView !== 'console') return;
     if (state.consoleStream && state.consoleStreamReady) return;
     renderConsole({ force: true }).catch(() => {});
-  }, 500);
+  }, 750);
   state.refreshTimer = window.setInterval(() => {
     if (!state.user || !uiPreferences.liveRefresh) return;
     const liveBusy = state.servers.some((server) => server.installStatus === 'installing') || state.settings?.updateStatus?.running;
@@ -3459,7 +3532,7 @@ function startRefreshLoop() {
         state.uploadRefreshInFlight = false;
       });
     }
-  }, 250);
+  }, 500);
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -4343,6 +4416,38 @@ document.addEventListener('click', async (event) => {
         if (statusNode) statusNode.textContent = error.message;
         showToast(error.message);
       }
+      return;
+    }
+    if (action === 'openrouter-save') {
+      try {
+        const key = String(document.querySelector('#openRouterKey')?.value || '').trim();
+        if (!key) return showToast('Enter an OpenRouter API key first.');
+        const data = await api('/api/advanced-ai/providers/openrouter/key', { method: 'POST', body: JSON.stringify({ apiKey: key }) });
+        state.settings.openRouter = data.provider;
+        const selected = document.querySelector('#openRouterModel')?.value || '';
+        await api('/api/advanced-ai/providers/openrouter', { method: 'PUT', body: JSON.stringify({ model: selected, freeOnly: document.querySelector('#openRouterFreeOnly')?.checked !== false }) });
+        showToast('OpenRouter key saved securely on the server.');
+        await refresh();
+      } catch (error) { showToast(error.message); }
+      return;
+    }
+    if (action === 'openrouter-test') {
+      try {
+        const data = await api('/api/advanced-ai/providers/openrouter/test', { method: 'POST', timeoutMs: 25000 });
+        showToast(`OpenRouter connected. ${data.test?.count || 0} models available.`);
+      } catch (error) { showToast(error.message); }
+      return;
+    }
+    if (action === 'openrouter-refresh') {
+      await refreshOpenRouterModels(true);
+      return;
+    }
+    if (action === 'openrouter-remove') {
+      try {
+        await api('/api/advanced-ai/providers/openrouter/key', { method: 'DELETE' });
+        showToast('OpenRouter key removed.');
+        await refresh();
+      } catch (error) { showToast(error.message); }
       return;
     }
     if (action === 'advanced-ai-status' || action === 'advanced-ai-install' || action === 'advanced-ai-enable' || action === 'advanced-ai-disable') {

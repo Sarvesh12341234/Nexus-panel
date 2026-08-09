@@ -4,6 +4,7 @@ const path = require('node:path');
 const v8 = require('node:v8');
 const { diagnoseRuntime, knowledgeRules } = require('./repair_knowledge');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
+const permissionRepair = require('./permission_repair');
 
 const MODEL_VERSION = 2;
 const MAX_MODEL_PARAMETERS = 1000000;
@@ -59,10 +60,20 @@ const ACTION_LIBRARY = Object.freeze({
     applies: ['cant-keep-up', 'watchdog', 'cpu-throttle', 'gc-thrash', 'disk-latency'],
     description: 'Propose bounded view and simulation distance changes based on host pressure.',
   },
+  'repair-permissions': {
+    risk: 'low',
+    applies: ['permission', 'server-root-readonly', 'ownership', 'eacces', 'eperm', 'chmod', 'acl'],
+    description: 'Audit and safely repair server-root ownership and permissions without making every file world-writable.',
+  },
   'vps-resource-plan': {
     risk: 'read-only',
     applies: ['native-memory', 'oom-kill', 'process-limit', 'file-descriptors', 'disk-full', 'inode-full', 'disk-io-error', 'read-only-fs', 'permission', 'server-root-readonly', 'wrong-working-directory'],
     description: 'Build a VPS resource and filesystem plan from memory, CPU, pressure, disk, process, and write-access telemetry.',
+  },
+  'sandbox-diagnostics': {
+    risk: 'read-only',
+    applies: ['nexusmark-startup-failure', 'nexusmark-identity', 'nexusmark-native'],
+    description: 'Capture Nexus-Mark native stderr, systemd supervisor status, identity/ACL state, and runtime compatibility evidence without changing the server.',
   },
   'network-plan': {
     risk: 'read-only',
@@ -377,10 +388,18 @@ class RepairAgent {
       .sort((a, b) => b.confidence - a.confidence)
       .slice(0, 12);
     const diagnosisIds = new Set(ranked.map((item) => item.id));
+    const sandboxStartup = ['nexusmark-startup-failure', 'nexusmark-identity', 'nexusmark-native']
+      .some((id) => diagnosisIds.has(id));
     const actions = Object.entries(ACTION_LIBRARY)
       .filter(([, action]) => action.applies.some((id) => diagnosisIds.has(id)))
       .map(([id, action]) => ({ id, ...action }));
-    for (const baseAction of ['cleanup-partials', 'rebuild-resource-profile', 'verify-world-storage']) {
+    // Do not "repair" Minecraft JSON/world files when the process dies before
+    // Paper/Bedrock has booted. That creates noise and can damage a healthy
+    // installation. Only collect evidence and rebuild resource metadata.
+    const baseActions = sandboxStartup
+      ? ['rebuild-resource-profile', 'verify-database']
+      : ['cleanup-partials', 'rebuild-resource-profile', 'verify-world-storage'];
+    for (const baseAction of baseActions) {
       if (!actions.some((action) => action.id === baseAction)) {
         actions.push({ id: baseAction, ...ACTION_LIBRARY[baseAction] });
       }
@@ -461,6 +480,18 @@ class RepairAgent {
         steps: ['snapshot-runtime-metadata', 'verify-download-source', 'download-to-repair-temp', 'atomic-executable-replace'],
         rollback: ['restore-previous-executable-if-present'],
         productionGate: context.diskFreeMb > 1024 ? 'disk-ready' : 'blocked-low-disk',
+      });
+    }
+
+    if (actionIds.has('repair-permissions')) {
+      addPlan({
+        mode: 'permission-repair',
+        title: 'Repair server ownership and filesystem permissions safely',
+        risk: 'low',
+        score: Number((0.82 + Number(primary?.confidence || 0) * 0.12).toFixed(3)),
+        steps: ['audit-path-components', 'snapshot-permission-state', 'repair-directory-traversal', 'repair-file-read-write', 'restore-launcher-execute-bit', 'verify-access'],
+        rollback: ['permission-audit-record'],
+        productionGate: 'always-safe',
       });
     }
 
@@ -687,4 +718,6 @@ module.exports = {
   MODEL_VERSION,
   PARAMETER_COUNT,
   RepairAgent,
+  auditPermissions: permissionRepair.audit,
+  repairPermissions: permissionRepair.repair,
 };

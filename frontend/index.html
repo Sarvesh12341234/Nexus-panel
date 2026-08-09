@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="Cache-Control" content="no-store">
     <title>NexusPanel</title>
-    <link rel="stylesheet" href="/css/main.css?v=3.0.0-3">
+    <link rel="stylesheet" href="/css/main.css?v=3.2.3">
   </head>
   <body>
     <div class="backplate" aria-hidden="true"></div>
@@ -31,7 +31,35 @@
         <button type="submit">Login</button>
         <a class="button-link" href="/reset.html">Forgot password</a>
       </form>
-    </section>
+    
+<!-- NEXUS-AUTONOMY-ACTIVITY-5.1.0 -->
+<style>
+.nx-autonomy-activity{position:absolute;z-index:3;right:18px;bottom:14px;width:min(420px,52%);max-height:180px;overflow:auto;background:rgba(5,8,14,.72);backdrop-filter:blur(8px);border:1px solid rgba(120,160,255,.14);border-radius:12px;padding:10px;font:11px system-ui;color:#dfe8ff}
+.nx-autonomy-activity .a{padding:4px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.nx-autonomy-activity b{font-weight:650}
+</style>
+<div class="nx-autonomy-activity" aria-live="polite">
+  <div><b>AUTONOMOUS ACTIVITY</b> · live</div>
+  <div id="nx-autonomy-events"></div>
+</div>
+<script>
+(function(){
+  const el=document.getElementById('nx-autonomy-events'); if(!el)return;
+  async function pull(){
+    try{
+      const r=await fetch('/api/advanced/autonomy/activity',{cache:'no-store'});
+      if(!r.ok)return;
+      const d=await r.json();
+      el.innerHTML=(d.events||[]).slice(-8).reverse().map(e=>{
+        const t=new Date(e.ts).toLocaleTimeString();
+        return '<div class="a"><b>'+t+'</b> · '+String(e.kind||'event').replace(/[<>]/g,'')+' — '+String(e.message||'').replace(/[<>]/g,'')+'</div>';
+      }).join('');
+    }catch(_){}
+  }
+  pull();setInterval(pull,1200);
+})();
+</script>
+</section>
 
     <main class="panel-shell" id="dashboardView" hidden>
       <aside class="sidebar">
@@ -238,6 +266,10 @@
         </section>
 
         <section class="view-section" id="view-plugins" hidden>
+          <div class="plugin-hero surface">
+            <div><p class="eyebrow">Nexus Market</p><h2>Extensions, mods & packs</h2><p class="muted">Discover compatible extensions for the selected server. NexusPanel checks edition, loader and installed state before installation.</p></div>
+            <div class="plugin-market-stats" id="pluginMarketStats"></div>
+          </div>
           <form class="modrinth-form surface" id="modrinthForm">
             <label>Search marketplace <input name="query" placeholder="LuckPerms, Geyser, ViaVersion"></label>
             <label>Type <select name="projectType"><option value="plugin">Plugin</option><option value="mod">Mod</option></select></label>
@@ -342,7 +374,126 @@
       <p class="toast" id="toast" hidden></p>
     </main>
 
-    <script src="/js/password-toggle.js?v=3.0.0-3" defer></script>
-    <script src="/js/main.js?v=3.0.0-3" defer></script>
-  </body>
+    <script src="/js/password-toggle.js?v=3.2.3" defer></script>
+    <script src="/js/main.js?v=3.2.3" defer></script>
+  
+<!-- NEXUS-NEURAL-GRAPH-3.2.4 -->
+<style>
+#nexus-neural-graph{display:none;position:relative;min-height:520px;border-radius:18px;overflow:hidden;background:radial-gradient(circle at 50% 50%,#172033 0,#090d16 48%,#05070c 100%);border:1px solid rgba(120,160,255,.18);color:#eaf1ff}
+#nexus-neural-graph.active{display:block}
+#nexus-neural-graph canvas{position:absolute;inset:0;width:100%;height:100%}
+.nx-graph-title{position:absolute;z-index:2;left:20px;top:16px;font-weight:700;letter-spacing:.04em}
+.nx-graph-sub{position:absolute;z-index:2;left:20px;top:43px;opacity:.6;font-size:12px}
+.nx-graph-legend{position:absolute;z-index:2;right:18px;top:16px;font-size:11px;opacity:.65}
+</style>
+<section id="nexus-neural-graph" aria-label="Read-only NexusPanel neural graph">
+  <canvas id="nexus-neural-canvas"></canvas>
+  <div class="nx-graph-title">Nexus Neural Graph · LIVE</div>
+  <div class="nx-graph-sub">Read-only visualization of panel activity and connections</div>
+  <div class="nx-graph-legend">Metrics · API · AI · Servers · Security · UI</div>
+</section>
+<script>
+(function(){
+  const box=document.getElementById('nexus-neural-graph'), c=document.getElementById('nexus-neural-canvas');
+  if(!box||!c)return;
+  const ctx=c.getContext('2d'), state={nodes:[],edges:[],events:[],pulses:[]};
+  function resize(){const r=box.getBoundingClientRect(),d=devicePixelRatio||1;c.width=r.width*d;c.height=r.height*d;ctx.setTransform(d,0,0,d,0,0);}
+  addEventListener('resize',resize); resize();
+  async function load(){
+    try{const r=await fetch('/api/advanced/neural-graph',{cache:'no-store'}); if(r.ok){const x=await r.json();state.nodes=x.nodes||[];state.edges=x.edges||[];for(const e of x.events||[])state.pulses.push({...e,t:performance.now()});}}
+    catch(_){}
+  }
+  function point(i,n,w,h){const a=(i/Math.max(1,n))*Math.PI*2-Math.PI/2;const rad=Math.min(w,h)*.34;return{x:w/2+Math.cos(a)*rad,y:h/2+Math.sin(a)*rad};}
+  function draw(t){
+    const w=box.clientWidth,h=box.clientHeight;ctx.clearRect(0,0,w,h);
+    const pts=new Map(), n=Math.max(1,state.nodes.length);
+    state.nodes.forEach((x,i)=>pts.set(x.id,point(i,n,w,h)));
+    ctx.lineWidth=1;
+    state.edges.forEach(e=>{
+      const a=pts.get(e.from),b=pts.get(e.to);if(!a||!b)return;
+      const glow=Math.max(.08,Math.min(1,e.activity||0));
+      ctx.globalAlpha=.18+glow*.5;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+      if(glow>.12){const speed=0.00008+glow*.00025;const q=(t*speed)%1;const x=a.x+(b.x-a.x)*q,y=a.y+(b.y-a.y)*q;ctx.globalAlpha=.8;ctx.beginPath();ctx.arc(x,y,2.2+glow*2,0,Math.PI*2);ctx.fill();}
+    });
+    state.nodes.forEach((x,i)=>{
+      const p=pts.get(x.id),pulse=1+0.12*Math.sin(t*.004+i);
+      ctx.globalAlpha=.9;ctx.beginPath();ctx.arc(p.x,p.y,6*pulse,0,Math.PI*2);ctx.fill();
+      ctx.globalAlpha=.8;ctx.font='11px system-ui';ctx.fillText(x.label||x.id,p.x+10,p.y+4);
+    });
+    requestAnimationFrame(draw);
+  }
+  function connectSettingsToggle(){
+    document.addEventListener('change',e=>{
+      if(e.target.matches('[data-nexus-neural-graph-toggle]')) box.classList.toggle('active',!!e.target.checked);
+    });
+  }
+  connectSettingsToggle(); load(); setInterval(load,1200); requestAnimationFrame(draw);
+})();
+</script>
+
+<!-- NEXUS-GRAPH-REPAIR-FLOW-3.2.5 -->
+<script>
+(function(){
+  if(window.__nexusRepairGraphFlow)return;
+  window.__nexusRepairGraphFlow=true;
+  const canvas=document.getElementById('nexus-neural-canvas');
+  const box=document.getElementById('nexus-neural-graph');
+  if(!canvas||!box)return;
+  const ctx=canvas.getContext('2d');
+  const originalRAF=window.requestAnimationFrame;
+  const repairPulses=[];
+  let last=0;
+  async function pull(){
+    try{
+      const r=await fetch('/api/advanced/neural-graph',{cache:'no-store'});
+      if(!r.ok)return;
+      const d=await r.json();
+      for(const e of (d.events||[])){
+        if(/^repair\./.test(e.type)) repairPulses.push({...e,t:performance.now()});
+      }
+      while(repairPulses.length>80) repairPulses.shift();
+    }catch(_){}
+  }
+  setInterval(pull,900);
+  // Overlay only: it does not create controls or mutate graph state.
+  function overlay(t){
+    if(!box.classList.contains('active'))return;
+    const w=box.clientWidth,h=box.clientHeight;
+    ctx.save();
+    ctx.font='11px system-ui';
+    let y=h-18;
+    const recent=repairPulses.filter(x=>t-x.t<4500).slice(-5);
+    recent.forEach((e,i)=>{
+      const alpha=Math.max(0,1-(t-e.t)/4500);
+      ctx.globalAlpha=alpha*.9;
+      const phase=String(e.type).replace(/^repair\./,'');
+      ctx.fillText('● AI '+phase+' → '+(e.to||'target'),18,y-i*17);
+    });
+    ctx.restore();
+  }
+  function loop(t){
+    overlay(t);
+    originalRAF(loop);
+  }
+  originalRAF(loop);
+})();
+</script>
+
+<!-- NEXUS5-QUIET-ACTIVITY -->
+<style>
+.nx5-status-dot{display:inline-block;width:7px;height:7px;border-radius:50%;opacity:.75;margin-right:6px}
+.nx5-status-dot[data-state="busy"]{animation:nx5pulse 1.2s infinite}
+@keyframes nx5pulse{50%{opacity:.25;transform:scale(.75)}}
+@media (prefers-reduced-motion:reduce){.nx5-status-dot[data-state="busy"]{animation:none}}
+</style>
+<script>
+(function(){
+  if(window.__nx5QuietActivity)return; window.__nx5QuietActivity=true;
+  // Deliberately quiet: no toast, modal, overlay, or notification is created.
+  window.Nexus5QuietStatus=function(el,state){
+    if(!el)return; el.classList.add('nx5-status-dot'); el.dataset.state=state||'idle';
+  };
+})();
+</script>
+</body>
 </html>

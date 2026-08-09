@@ -13,7 +13,17 @@ cc -std=c11 -O2 -pipe -fPIE -static-pie -DNEXUS_STATIC_BUILD=1 -DNEXUS_HARDENED_
   -Wl,-z,relro,-z,now,-z,noexecstack,-z,separate-code \
   "$SOURCE_DIR/nexusmark.c" -o "$TEST_DIR/nexusmark-native"
 
+set +e
 "$TEST_DIR/nexusmark-native" --probe
+PROBE_STATUS=$?
+set -e
+if [ "$PROBE_STATUS" -eq 2 ]; then
+  echo "NexusMark native isolation tests skipped: host Landlock ABI is below 3."
+  exit 0
+elif [ "$PROBE_STATUS" -ne 0 ]; then
+  echo "NexusMark native probe failed with status $PROBE_STATUS." >&2
+  exit "$PROBE_STATUS"
+fi
 mkdir -p "$TEST_DIR/root" "$TEST_DIR/outside"
 printf 'private\n' > "$TEST_DIR/outside/secret"
 HOST_PROCESS_ENV="/proc/1/environ"

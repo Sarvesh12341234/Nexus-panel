@@ -3,6 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { externalDataRoot } = require('./paths');
+const { capabilities } = require('./platform');
 const { hostCpuCount } = require('./system_info');
 const { nativeStatus } = require('./nexus_mark_native');
 const { ensureServerIdentity, identitySupportStatus } = require('./nexus_mark_identity');
@@ -203,8 +204,15 @@ function propertyArgs(properties) {
 }
 
 function kernelStatus({ refresh = false } = {}) {
+  const platformInfo = capabilities();
   if (process.platform !== 'linux') {
-    return { platform: process.platform, available: false, tier: 'process-guard', native: nativeStatus({ build: false }) };
+    return {
+      platform: process.platform,
+      available: platformInfo.processGuard,
+      tier: process.platform === 'win32' ? 'windows-process-guard' : 'portable-path-guard',
+      native: { available: false, reason: 'linux-only' },
+      capabilities: platformInfo,
+    };
   }
   if (!refresh && kernelStatusCache.value && kernelStatusCache.expiresAt > Date.now()) return kernelStatusCache.value;
 
@@ -232,6 +240,7 @@ function kernelStatus({ refresh = false } = {}) {
   };
   if (versionProbe.status !== 0) {
     const value = {
+    capabilities: platformInfo,
       ...base,
       available: native.available,
       tier: native.available ? 'native-only' : 'process-guard',
@@ -304,14 +313,15 @@ function kernelStatus({ refresh = false } = {}) {
   return value;
 }
 
-function wrapCommand(command, args, profile) {
+function wrapCommand(command, args, profile, options = {}) {
+  const disableNative = options.disableNative === true;
   if (process.platform !== 'linux') return { command, args, unit: '', engine: 'process-guard', policyTier: 'process-guard' };
 
   const status = kernelStatus();
   const native = status.native;
   const identity = ensureServerIdentity(profile, native.available ? native.binary : '');
   const launchProfile = { ...profile, nexusIdentity: identity };
-  const nativeUsable = native.available && (identity.available || status.preflightPassed);
+  const nativeUsable = !disableNative && native.available && identity.available && status.preflightPassed;
   const nativeCommand = nativeUsable ? native.binary : command;
   const nativeArgs = nativeUsable
     ? [

@@ -255,3 +255,6 @@ button:disabled {
   border-radius: 50%;
   background: currentColor;
 }
+
+/* NexusPanel 4.2 clean UI */
+:root{--nx-ui-gap:12px;--nx-ui-radius:12px}html[data-nexus-density="compact"]{--nx-ui-gap:8px}html[data-nexus-motion="reduced"] *,html[data-nexus-motion="reduced"] *::before,html[data-nexus-motion="reduced"] *::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}.nx-ui-editor{contain:layout paint;isolation:isolate}.nx-ui-editor [data-editor-overlay]{pointer-events:none}.nx-ui-toast{position:fixed;right:16px;bottom:16px;z-index:9999;max-width:360px;pointer-events:none}

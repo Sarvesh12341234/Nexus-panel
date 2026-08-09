@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NexusPanel - Initial Setup</title>
+  <link rel="stylesheet" href="/css/login.css">
+</head>
+<body>
+  <div class="backplate" aria-hidden="true"></div>
+  <section class="login-screen">
+    <form class="auth-card" id="setupForm" novalidate>
+      <div class="brand compact">
+        <span class="brand-mark">N</span>
+        <div><p class="eyebrow">NexusPanel</p><h1>First-run setup</h1></div>
+      </div>
+      <p class="auth-note">Create the owner account. This setup link is single-use.</p>
+      <div class="form-group">
+        <label for="name">Owner name</label>
+        <input id="name" type="text" autocomplete="name" placeholder="Owner" minlength="2" maxlength="100" required>
+      </div>
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="email" placeholder="admin@example.com" maxlength="254" required>
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required>
+        <small>Use at least 12 characters.</small>
+      </div>
+      <div class="form-group">
+        <label for="passwordConfirmation">Confirm password</label>
+        <input id="passwordConfirmation" type="password" autocomplete="new-password" minlength="12" maxlength="256" required>
+      </div>
+      <button type="submit" class="btn-primary">Create owner account</button>
+      <a class="btn-secondary" href="/login.html">Back to login</a>
+      <p class="error-message" id="errorMsg" hidden></p>
+    </form>
+  </section>
+  <script src="/js/setup.js" defer></script>
+</body>
+</html>

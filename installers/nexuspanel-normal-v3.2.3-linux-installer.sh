@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# NexusPanel Linux Installer v3.0.3
+# NexusPanel Linux Installer v3.2.3
 # Smart Ubuntu/Linux installer
 #
 
 set -uo pipefail
 
-VERSION="3.0.3"
+VERSION="3.2.3"
 REPO_URL="${NEXUSPANEL_REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
 INSTALL_DIR="${NEXUSPANEL_INSTALL_DIR:-/opt/nexuspanel}"
 SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
@@ -19,6 +19,21 @@ MAX_RETRIES="${NEXUSPANEL_MAX_RETRIES:-3}"
 LOG_DIR="/var/log/nexuspanel-installer"
 LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 NODE_PATH=""
+SETUP_TOKEN=""
+
+# Authenticate before opening privileged log files. sudo owns the password prompt;
+# the installer never reads, stores, or forwards the password itself.
+if [ "$(id -u)" -ne 0 ]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+        echo "NexusPanel installer requires root privileges (sudo not found)." >&2
+        echo "Run it as root: bash $0" >&2
+        exit 1
+    fi
+    echo "NexusPanel needs administrator privileges for packages, service setup, and permission repair."
+    echo "sudo/PAM will handle authentication; NexusPanel does not store your password."
+    sudo -v || exit 1
+    exec sudo -E bash "$0" "$@"
+fi
 
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -49,13 +64,58 @@ optional() {
     return 0
 }
 
+authenticate_root() {
+    # Never collect or store the root/sudo password ourselves. sudo handles the
+    # password prompt, credential caching and PAM/MFA according to host policy.
+    if [ "$(id -u)" -eq 0 ]; then return 0; fi
+    if ! command_exists sudo; then
+        die "Root privileges are required and sudo is not installed. Run this installer as root."
+    fi
+    echo
+    echo "=================================================="
+    echo " NexusPanel privileged installation"
+    echo "=================================================="
+    echo "NexusPanel needs administrator access to install packages, create its service,"
+    echo "repair ownership/permissions, and configure protected runtime directories."
+    echo "Your password is handled by sudo/PAM and is never stored by NexusPanel."
+    echo
+    sudo -v || die "Administrator authentication failed or was cancelled."
+    exec sudo -E bash "$0" "$@"
+}
+
 need_root() {
+    authenticate_root "$@"
     if [ "$(id -u)" -ne 0 ]; then
-        echo
-        echo "This installer needs root privileges."
-        echo "Run: sudo bash $0"
-        echo
-        exit 1
+        die "Installer could not obtain root privileges."
+    fi
+}
+
+repair_install_permissions() {
+    info "Running installation permission/ownership audit..."
+    cd "$INSTALL_DIR" || die "Cannot enter $INSTALL_DIR."
+    # Do NOT chmod 777 recursively. That would expose credentials and panel data.
+    # Directories need traversal; regular files need read/write. Executable bits
+    # are restored only for known launchers and native binaries.
+    find "$INSTALL_DIR" -type d -exec chmod u+rwx,g+rx,o-rwx {} + 2>/dev/null || true
+    find "$INSTALL_DIR" -type f -exec chmod u+rw,g+r,o-rwx {} + 2>/dev/null || true
+    find "$INSTALL_DIR" -type f \( -name '*.sh' -o -name '*.bin' \) -exec chmod u+rwx,g+rx,o-rwx {} + 2>/dev/null || true
+    for file in "$INSTALL_DIR/backend/cli.js" "$INSTALL_DIR/backend/index.js" "$INSTALL_DIR/backend/launcher.js" "$INSTALL_DIR/backend/service.js" "$INSTALL_DIR/backend/host_agent.js" "$INSTALL_DIR/backend/nexus_mark_native.js"; do
+        [ -f "$file" ] && chmod 750 "$file" || true
+    done
+    chmod 600 "$INSTALL_DIR/data/setup_token" "$INSTALL_DIR/data/cookie_secret" 2>/dev/null || true
+    chmod 750 /usr/local/bin/nexuspanel 2>/dev/null || true
+    if [ "$SERVICE_USER" != "root" ]; then
+        local group="$(id -gn "$SERVICE_USER")"
+        chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/servers" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel 2>/dev/null || true
+    fi
+    # Verify the service identity can traverse and write its mutable roots.
+    if [ "$SERVICE_USER" != "root" ]; then
+        if ! runuser -u "$SERVICE_USER" -- test -r "$INSTALL_DIR" -a -x "$INSTALL_DIR"; then
+            warn "Service user cannot traverse the installation root after repair."
+        fi
+        if ! runuser -u "$SERVICE_USER" -- test -w "$INSTALL_DIR/data"; then
+            warn "Service user cannot write data after permission repair."
+        fi
     fi
 }
 
@@ -473,6 +533,13 @@ prepare_paths() {
     cd "$INSTALL_DIR" || die "Cannot enter installation directory."
     mkdir -p data servers software backups backupfolder update/backups data/huggingface /var/lib/nexuspanel /var/lib/nexuspanel/backups /var/lib/nexuspanel/logs /var/lib/nexuspanel/nexus-mark
     printf '%s\n' "$EDITION" > "$INSTALL_DIR/data/edition"
+    if [ ! -s "$INSTALL_DIR/data/setup_token" ] || ! grep -Eq '^[A-Za-z0-9_-]{43}$' "$INSTALL_DIR/data/setup_token" 2>/dev/null; then
+        SETUP_TOKEN="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+        printf '%s\n' "$SETUP_TOKEN" > "$INSTALL_DIR/data/setup_token"
+        chmod 600 "$INSTALL_DIR/data/setup_token"
+    else
+        SETUP_TOKEN="$(tr -d '\r\n' < "$INSTALL_DIR/data/setup_token")"
+    fi
     if [ -f "$INSTALL_DIR/update/update.sh" ]; then
         chmod 755 "$INSTALL_DIR/update/update.sh" || true
     fi
@@ -481,6 +548,7 @@ prepare_paths() {
         local group="$(id -gn "$SERVICE_USER")"
         chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/servers" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel 2>/dev/null || true
     fi
+    repair_install_permissions
 }
 
 install_cli() {
@@ -504,37 +572,30 @@ EOF
 }
 
 setup_owner() {
-    info "[8/9] Owner account setup..."
+    info "[9/10] First-run account setup..."
     cd "$INSTALL_DIR" || die "Cannot enter installation directory."
-    if [ ! -f "$INSTALL_DIR/backend/cli.js" ]; then
-        warn "backend/cli.js missing. Owner setup skipped."
-        return 0
+    if [ ! -f "$INSTALL_DIR/data/setup_token" ]; then
+        warn "First-run setup token is missing; generating one now..."
+        SETUP_TOKEN="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+        printf '%s\n' "$SETUP_TOKEN" > "$INSTALL_DIR/data/setup_token"
+        chmod 600 "$INSTALL_DIR/data/setup_token"
+    else
+        SETUP_TOKEN="$(tr -d '\r\n' < "$INSTALL_DIR/data/setup_token")"
     fi
+
+    # Credentials supplied through the environment are the only non-web
+    # setup path. Never block a remote installer waiting for stdin.
     if [ -n "${NEXUSPANEL_OWNER_EMAIL:-}" ] && [ -n "${NEXUSPANEL_OWNER_PASSWORD:-}" ]; then
         info "Using configured owner credentials."
         if NEXUSPANEL_SERVICE_USER="$SERVICE_USER" "$NODE_PATH" "$INSTALL_DIR/backend/cli.js" setup-owner; then
-            info "Owner setup completed."
+            info "Owner account created successfully."
             return 0
-        else
-            warn "Automatic owner setup failed."
         fi
+        warn "Configured owner setup failed; continuing with web setup."
     fi
-    if [ -t 0 ] && [ -t 1 ]; then
-        echo
-        echo "=================================================="
-        echo " NexusPanel Owner Setup"
-        echo "=================================================="
-        echo
-        if NEXUSPANEL_SERVICE_USER="$SERVICE_USER" "$NODE_PATH" "$INSTALL_DIR/backend/cli.js" setup-owner; then
-            info "Owner setup completed."
-        else
-            warn "Owner setup failed."
-            warn "You can run it later: sudo nexuspanel setup-owner"
-        fi
-    else
-        warn "No interactive terminal. Owner setup skipped."
-        echo "Run later: sudo nexuspanel setup-owner"
-    fi
+
+    info "Web account setup is ready. The installer will not block on interactive input."
+    info "Open the one-time setup URL printed at the end of installation."
 }
 
 systemd_available() {
@@ -542,7 +603,7 @@ systemd_available() {
 }
 
 install_service() {
-    info "[9/9] Installing NexusPanel service..."
+    info "[9/10] Installing NexusPanel service..."
     if ! systemd_available; then
         warn "systemd is not running."
         echo "Manual start: cd $INSTALL_DIR && npm start"
@@ -664,6 +725,10 @@ final_check() {
         warn "package.json is missing."
         problems=$((problems + 1))
     fi
+    if [ ! -s "$INSTALL_DIR/data/setup_token" ] && [ ! -s "$INSTALL_DIR/data/nexuspanel.sqlite" ]; then
+        warn "First-run setup token is missing."
+        problems=$((problems + 1))
+    fi
     if ! command_exists node; then
         warn "Node.js is missing."
         problems=$((problems + 1))
@@ -685,6 +750,12 @@ show_info() {
     echo "=================================================="
     echo
     echo "Panel: http://${public_ip}:3000"
+    if [ -z "$SETUP_TOKEN" ] && [ -f "$INSTALL_DIR/data/setup_token" ]; then SETUP_TOKEN="$(tr -d '\r\n' < "$INSTALL_DIR/data/setup_token")"; fi
+    if [ -n "$SETUP_TOKEN" ]; then
+        echo "First-run setup: http://${public_ip}:3000/setup.html?token=${SETUP_TOKEN}"
+    else
+        echo "First-run setup: already completed (or use sudo nexuspanel setup-owner)."
+    fi
     echo
     echo "Service: $SERVICE_NAME"
     echo "Install directory: $INSTALL_DIR"
@@ -742,8 +813,8 @@ main() {
     install_advanced_ai
     prepare_paths
     install_cli
-    setup_owner
     install_service
+    setup_owner
     if ! final_check; then
         warn "Installation finished with warnings."
         diagnostics || true

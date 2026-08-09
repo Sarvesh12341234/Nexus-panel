@@ -203,7 +203,7 @@ function ensureRuntimeEnvironment(root) {
   return dirs;
 }
 
-function startServer(server, software) {
+function startServer(server, software, options = {}) {
   const serverId = Number(server.id);
   if (processes.has(serverId)) return { ok: true, message: 'Server already running.' };
   if (!server.executable_path || !fs.existsSync(server.executable_path)) {
@@ -213,6 +213,7 @@ function startServer(server, software) {
   const root = ensureServerDirs(server);
   const runtimeEnv = ensureRuntimeEnvironment(root);
   appendLog(serverId, `[NexusPanel] Working directory: ${root}`);
+  if (options.disableNative) appendLog(serverId, '[NexusPanel] Native Nexus-Mark launch retry disabled; using compatibility isolation path.');
   const executable = server.executable_path;
   const totalCpuCores = hostCpuCount();
   const dbMemoryMb = Math.max(256, Math.round(Number(server.max_memory_mb) || 1024));
@@ -297,7 +298,7 @@ function startServer(server, software) {
     envConfig: runtimeEnv.config,
   };
   appendLog(serverId, `[NexusPanel] Nexus-Mark allocation enforced from database: ${dbMemoryMb} MB RAM, ${dbCpuCores} CPU core(s).`);
-  const wrapped = wrapCommand(command, args, profile);
+  const wrapped = wrapCommand(command, args, profile, options);
   if (wrapped.identity?.available) {
     appendLog(serverId, `[NexusPanel] Dedicated kernel identity active: ${wrapped.identity.name} (UID ${wrapped.identity.uid}), isolated from other server processes.`);
   } else if (process.platform === 'linux') {
@@ -355,10 +356,52 @@ function startServer(server, software) {
     if (child.nexusGuardTimer) clearInterval(child.nexusGuardTimer);
     if (child.nexusThrottleTimer) clearTimeout(child.nexusThrottleTimer);
     const intentional = intentionalStops.delete(serverId);
+    const uptimeMs = Date.now() - child.startedAt;
     appendLog(serverId, `[NexusPanel] Process exited code=${code ?? 'none'} signal=${signal ?? 'none'}`);
-    processes.delete(serverId);
-    players.delete(serverId);
-    partialLines.delete(serverId);
+
+    // A native sandbox can fail before Java/Paper has emitted anything. Capture
+    // the supervisor's authoritative result instead of hiding it behind exit=200.
+    if (wrapped.unit && code !== 0 && uptimeMs < 15000) {
+      try {
+        const show = spawnSync('systemctl', [
+          'show', wrapped.unit,
+          '--no-pager',
+          '--property=Result,ExecMainCode,ExecMainStatus,StatusText,SubState,ActiveState',
+        ], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+        const detail = String(show.stdout || '').trim();
+        if (detail) appendLog(serverId, `[NexusPanel] Supervisor failure detail: ${detail.replace(/\\n/g, ' | ')}`);
+        const journal = spawnSync('journalctl', ['-u', wrapped.unit, '-n', '80', '--no-pager', '-o', 'cat'], {
+          encoding: 'utf8', windowsHide: true, timeout: 5000,
+        });
+        const journalText = String(journal.stdout || journal.stderr || '').trim();
+        if (journalText) appendLog(serverId, `[NexusPanel] Native/supervisor stderr:\n${journalText.slice(-12000)}`);
+      } catch (error) {
+        appendLog(serverId, `[NexusPanel] Could not collect supervisor diagnostics: ${error.message}`);
+      }
+    }
+
+    // If the native kernel wrapper dies almost immediately, retry exactly once
+    // without the native wrapper. This preserves systemd resource isolation and
+    // makes a host-incompatible Landlock/seccomp policy self-healing.
+    const nativeLaunch = String(wrapped.engine || '').startsWith('native-');
+    const fallbackEligible = nativeLaunch && !options.disableNative && !intentional && uptimeMs < 5000 && code !== 0;
+    if (fallbackEligible) {
+      appendLog(serverId, `[NexusPanel] Native sandbox exited too early (code=${code ?? 'none'}). Retrying once with compatibility isolation so Paper can expose its real error.`);
+      processes.delete(serverId);
+      players.delete(serverId);
+      partialLines.delete(serverId);
+      try {
+        const retry = startServer(server, software, { ...options, disableNative: true });
+        if (retry?.ok) return;
+      } catch (error) {
+        appendLog(serverId, `[NexusPanel] Compatibility retry failed to launch: ${error.message}`);
+      }
+    } else {
+      processes.delete(serverId);
+      players.delete(serverId);
+      partialLines.delete(serverId);
+    }
+
     if (exitHandler) {
       Promise.resolve(exitHandler({
         server,
@@ -366,7 +409,7 @@ function startServer(server, software) {
         code,
         signal,
         intentional,
-        uptimeMs: Date.now() - child.startedAt,
+        uptimeMs,
         recoveryReason: child.recoveryReason || '',
       }))
         .catch((error) => appendLog(server.id, `[NexusPanel] Exit recovery failed: ${error.message}`));
