@@ -1,6 +1,6 @@
 # 🚀 NexusPanel - Minecraft Server Control Panel
 
-**Current engine: v3.2.3 Advanced Cross-Platform**
+**Current engine: v3.0.5 Advanced Cross-Platform**
 
 A lightweight, powerful, and user-friendly web-based control panel for Minecraft **Bedrock and Java** servers.
 
@@ -29,13 +29,13 @@ Open `http://localhost:3000`.
 Linux/Ubuntu one-command installer:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v3.2.3/nexuspanel-normal-v3.2.3-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v3.0.0/nexuspanel-normal-v3.0.0-linux-installer.sh | sudo bash
 ```
 
 Host edition:
 
 ```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/host-v3.2.3/nexuspanel-host-v3.2.3-linux-installer.sh | sudo bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/host-v3.0.0/nexuspanel-host-v3.0.0-linux-installer.sh | sudo bash
 ```
 
 ## VPS Background Service
@@ -93,21 +93,15 @@ bash update/update.sh
 
 Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the external backup store.
 
-## v3.2.3 Editions
+## v3.0.0 Editions
 
-- `normal-v3.2.3`: advanced solo panel with normal-only tunnel helpers, DDoS Guard, faster console metrics, backups, plugin/file/software managers, shared admin visibility, Nexus-Mark hardening, and host-only features hidden.
-- `host-v3.2.3`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, assigned-user server isolation, backups, DDoS Guard, and the host-agent wrapper installer.
-- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v3.2.3` or `host-v3.2.3`.
+- `normal-v3.0.0`: advanced solo panel with normal-only tunnel helpers, DDoS Guard, faster console metrics, backups, plugin/file/software managers, shared admin visibility, and host-only features hidden.
+- `host-v3.0.0`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, assigned-user server isolation, backups, and DDoS Guard.
+- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v3.0.0` or `host-v3.0.0`.
 - The update repository is locked to `Sarvesh12341234/Nexus-panel`; users cannot change it from the panel UI.
 - If an update finds server folders such as `5-summa` missing from SQLite, NexusPanel recovers them into the server list on boot.
 
-## v3.2.3 Fixes
-
-- Non-root local runs and tests now fall back to workspace-local data storage when `/var/lib/nexuspanel` is not writable.
-- Linux normal and host installer assets now match the release tags and pull the correct `v3.2.3` source.
-- In-panel updates now target the matching `normal-v3.2.3` or `host-v3.2.3` tag.
-
-## v3.x Protection
+## v3.0.0 Protection
 
 ### Native v3 host control plane
 

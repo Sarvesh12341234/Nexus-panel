@@ -1,6 +1,6 @@
 {
   "name": "nexuspanel",
-  "version": "3.2.3",
+  "version": "5.2.0",
   "description": "Lightweight cross-platform Minecraft server panel with adaptive intelligence, secure AI providers, Nexus-Mark isolation, evidence-bound automation, predictive health, and safe change planning.",
   "main": "backend/index.js",
   "bin": {

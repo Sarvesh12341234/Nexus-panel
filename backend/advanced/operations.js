@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusPanel Advanced Operations Core 3.2.3
+ * NexusPanel Advanced Operations Core 3.2.2
  * Lightweight, dependency-free orchestration primitives.
  *
  * Features:

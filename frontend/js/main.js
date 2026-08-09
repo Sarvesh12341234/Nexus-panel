@@ -2450,7 +2450,7 @@ function renderSettings() {
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '3.0.0')}"></label>
       <label>Visible servers before scrolling <input name="serverSwitcherVisibleCount" type="number" min="1" max="20" value="${Number(settings.serverSwitcherVisibleCount || 3)}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
-      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v3.2.3"></label>
+      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v3.0.0"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
       <div class="settings-group">
         <strong>Advanced AI reasoning</strong>

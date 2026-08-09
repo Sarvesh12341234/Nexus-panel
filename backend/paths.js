@@ -4,27 +4,17 @@ const path = require('node:path');
 const workspaceRoot = path.resolve(__dirname, '..');
 const serversRoot = path.join(workspaceRoot, 'servers');
 const softwareRoot = path.join(workspaceRoot, 'software');
-const configuredDataRoot = process.env.NEXUSPANEL_DATA_ROOT
+const externalDataRoot = process.env.NEXUSPANEL_DATA_ROOT
   || (process.platform === 'win32'
     ? path.join(process.env.ProgramData || workspaceRoot, 'NexusPanel')
     : '/var/lib/nexuspanel');
-const fallbackDataRoot = path.join(workspaceRoot, 'data');
-let externalDataRoot = configuredDataRoot;
-let backupsRoot = process.env.NEXUSPANEL_BACKUP_ROOT || path.join(externalDataRoot, 'backups');
+const backupsRoot = process.env.NEXUSPANEL_BACKUP_ROOT || path.join(externalDataRoot, 'backups');
 const legacyBackupsRoot = path.join(workspaceRoot, 'backups');
 const legacyBackupFolderRoot = path.join(workspaceRoot, 'backupfolder');
 
 fs.mkdirSync(serversRoot, { recursive: true });
 fs.mkdirSync(softwareRoot, { recursive: true });
-try {
-  fs.mkdirSync(backupsRoot, { recursive: true });
-} catch (error) {
-  const explicitStorage = process.env.NEXUSPANEL_DATA_ROOT || process.env.NEXUSPANEL_BACKUP_ROOT;
-  if (explicitStorage || !['EACCES', 'EPERM', 'EROFS'].includes(error.code)) throw error;
-  externalDataRoot = fallbackDataRoot;
-  backupsRoot = path.join(externalDataRoot, 'backups');
-  fs.mkdirSync(backupsRoot, { recursive: true });
-}
+fs.mkdirSync(backupsRoot, { recursive: true });
 for (const legacyRoot of [legacyBackupsRoot, legacyBackupFolderRoot]) {
   if (path.resolve(legacyRoot) !== path.resolve(backupsRoot) && fs.existsSync(legacyRoot)) {
     fs.cpSync(legacyRoot, backupsRoot, { recursive: true, force: false, errorOnExist: false });

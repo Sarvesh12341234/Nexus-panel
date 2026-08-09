@@ -274,7 +274,7 @@ try {
 }
 
 
-// NexusPanel 3.2.3 advanced diagnostics commands.
+// NexusPanel 3.2.2 advanced diagnostics commands.
 if (process.argv[2] === 'advanced-health') {
   const {HealthEngine}=require('./advanced/operations');
   const h=new HealthEngine();

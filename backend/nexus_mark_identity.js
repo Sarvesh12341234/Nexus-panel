@@ -124,11 +124,28 @@ function applyAcl(name, serverRoot, nativeBinary = '') {
   }
   run('setfacl', ['-m', `u:${name}:--x`, '--', serversRoot], 10000);
   if (nativeBinary && fs.existsSync(nativeBinary)) {
+    // Native launcher and Java runtime must retain execute permission. The
+    // broad ACL above intentionally grants only rw- to ordinary files; add
+    // r-x explicitly to executables so systemd-run does not fail with 203/EXEC.
+    const javaMeta = path.join(serverRoot, 'runtime', 'java-runtime.json');
+    let javaBinary = '';
+    try {
+      const meta = JSON.parse(fs.readFileSync(javaMeta, 'utf8'));
+      javaBinary = meta?.javaBinary || '';
+    } catch {}
+    for (const executable of [nativeBinary, javaBinary].filter(Boolean)) {
+      if (!fs.existsSync(executable)) continue;
+      try {
+        const st = fs.statSync(executable);
+        if ((st.mode & 0o111) === 0) fs.chmodSync(executable, st.mode | 0o100);
+      } catch {}
+    }
     const paths = [
       externalDataRoot,
       path.join(externalDataRoot, 'nexus-mark'),
       path.dirname(nativeBinary),
       nativeBinary,
+      javaBinary,
     ].filter((entry, index, values) => values.indexOf(entry) === index && fs.existsSync(entry));
     const binaryAcl = run('setfacl', ['-m', `u:${name}:r-x`, '--', ...paths], 10000);
     if (binaryAcl.status !== 0) {

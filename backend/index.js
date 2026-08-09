@@ -90,7 +90,7 @@ let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const dummyPasswordHash = hashPassword(crypto.randomBytes(24).toString('base64url'));
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
-const PANEL_VERSION = '3.2.3';
+const PANEL_VERSION = '3.2.2';
 let updateStatus = {
   running: false,
   progress: 0,
@@ -316,7 +316,7 @@ const repairAgentModelFreshness = ensureRepairAgentModelFresh();
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
-  const defaultTag = edition === 'host' ? 'host-v3.2.3' : 'normal-v3.2.3';
+  const defaultTag = edition === 'host' ? 'host-v3.0.0' : 'normal-v3.0.0';
   let configuredTag = settingValue('update_target_tag', defaultTag);
   if (/^(?:normal|host)-v[12]\./.test(configuredTag)) {
     configuredTag = defaultTag;

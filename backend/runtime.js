@@ -186,7 +186,51 @@ function bundledJavaBinary(root, requiredMajor = 0) {
   const meta = parseJsonFile(path.join(root, 'runtime', 'java-runtime.json'));
   if (!meta?.javaBinary || !fs.existsSync(meta.javaBinary)) return '';
   if (requiredMajor && Number(meta.major || 0) < requiredMajor) return '';
+
+  // A bundled runtime is an executable dependency, not an ordinary data file.
+  // Archives/downloads can lose the executable bit. Repair only the runtime
+  // launcher instead of using unsafe recursive chmod 777.
+  try {
+    const st = fs.statSync(meta.javaBinary);
+    if (!st.isFile()) return '';
+    if ((st.mode & 0o111) !== 0) return meta.javaBinary;
+    fs.chmodSync(meta.javaBinary, st.mode | 0o100);
+
+  } catch (error) {
+    // Return the path so the identity/supervisor diagnostics can report the
+    // authoritative failure instead of hiding it as "Java not found".
+  }
   return meta.javaBinary;
+}
+
+function verifyExecutablePath(binary, serverRoot) {
+  if (!binary || !fs.existsSync(binary)) {
+    return { ok: false, reason: 'java-runtime-missing', path: binary || '' };
+  }
+  try {
+    const stat = fs.statSync(binary);
+    if (!stat.isFile()) return { ok: false, reason: 'java-runtime-not-file', path: binary };
+    if ((stat.mode & 0o111) === 0) {
+      fs.chmodSync(binary, stat.mode | 0o100);
+    }
+    fs.accessSync(binary, fs.constants.R_OK | fs.constants.X_OK);
+  } catch (error) {
+    return { ok: false, reason: `java-runtime-not-executable:${error.code || error.message}`, path: binary };
+  }
+
+  // Detect the common mount-level failure where chmod succeeds but exec is
+  // prohibited by a noexec mount. findmnt is advisory; the supervisor remains
+  // the final authority.
+  if (process.platform === 'linux') {
+    const probe = spawnSync('findmnt', ['-T', serverRoot || path.dirname(binary), '-n', '-o', 'OPTIONS'], {
+      encoding: 'utf8', windowsHide: true, timeout: 3000,
+    });
+    const options = String(probe.stdout || '').trim();
+    if (/\bnoexec\b/.test(options)) {
+      return { ok: false, reason: 'filesystem-noexec', mountOptions: options, path: binary };
+    }
+  }
+  return { ok: true, path: binary };
 }
 
 function ensureRuntimeEnvironment(root) {
@@ -236,6 +280,14 @@ function startServer(server, software, options = {}) {
       throw new Error(`${software.name} ${server.software_version || 'latest'} requires Java ${requiredMajor}, but this VPS is running Java ${javaMajor}. Reinstall with an older Minecraft version or install Java ${requiredMajor}+ on the VPS.`);
     }
     command = bundledJava || 'java';
+    if (bundledJava) {
+      const executableCheck = verifyExecutablePath(bundledJava, root);
+      if (!executableCheck.ok) {
+        appendLog(serverId, `[NexusPanel] Java preflight failed: ${executableCheck.reason}.`);
+        throw new Error(`Bundled Java cannot be executed: ${executableCheck.reason}`);
+      }
+      appendLog(serverId, `[NexusPanel] Java execution preflight passed: ${bundledJava}`);
+    }
     const nativeReserveMb = Math.max(128, Math.min(768, Math.ceil(dbMemoryMb * 0.15)));
     const heapMaxMb = Math.max(128, dbMemoryMb - nativeReserveMb);
     args = [
