@@ -5443,10 +5443,11 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
       const selected = selectedFilePaths();
-      const zipFiles = selected.filter((item) => item.toLowerCase().endsWith('.zip'));
-      if (!zipFiles.length) return showToast('Select one or more .zip files first.');
-      showToast(`Unzipping ${zipFiles.length} file(s)...`);
-      const payload = { paths: zipFiles, destination: filePath, mode: 'fail' };
+      const archiveExtensions = /\.(?:zip|7z|rar|tar|tgz|tbz2?|txz|tzst|tar\.(?:gz|bz2?|xz|zst|zstd)|gz|bz2?|xz|zst|zstd)$/i;
+      const archives = selected.filter((item) => archiveExtensions.test(item));
+      if (!archives.length) return showToast('Select one or more supported archives first (ZIP, TAR, GZ, BZ2, XZ, ZST, 7Z, or RAR).');
+      showToast(`Extracting ${archives.length} archive(s)...`);
+      const payload = { paths: archives, destination: filePath, mode: 'fail' };
       try {
         await api(`/api/servers/${server.id}/files/extract`, { method: 'POST', body: JSON.stringify(payload) });
       } catch (error) {
@@ -5455,7 +5456,7 @@ document.addEventListener('click', async (event) => {
         payload.mode = replace ? 'replace' : 'skip';
         await api(`/api/servers/${server.id}/files/extract`, { method: 'POST', body: JSON.stringify(payload) });
       }
-      showToast('Unzip complete.');
+      showToast('Archive extraction complete.');
       await renderFiles();
       return;
     }

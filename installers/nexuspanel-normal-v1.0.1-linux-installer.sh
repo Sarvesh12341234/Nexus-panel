@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# NexusPanel Linux Installer v1.0.0
+# NexusPanel Linux Installer v1.0.1
 # Smart Ubuntu/Linux installer
 #
 
 set -uo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 REPO_URL="${NEXUSPANEL_REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
 INSTALL_DIR="${NEXUSPANEL_INSTALL_DIR:-/opt/nexuspanel}"
 SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
 SERVICE_NAME="${NEXUSPANEL_SERVICE_NAME:-nexuspanel}"
 EDITION="${NEXUSPANEL_EDITION:-normal}"
-REF="${NEXUSPANEL_REF:-v1.0.0}"
+REF="${NEXUSPANEL_REF:-v1.0.1}"
 INSTALL_AI="${NEXUSPANEL_INSTALL_AI:-ask}"
 SKIP_TUNNELS="${NEXUSPANEL_SKIP_TUNNELS:-no}"
 MAX_RETRIES="${NEXUSPANEL_MAX_RETRIES:-3}"
@@ -147,22 +147,22 @@ install_system_packages() {
             info "Updating APT..."
             retry apt-get update || die "APT update failed."
             info "Installing required packages..."
-            retry apt-get install -y curl ca-certificates git unzip tar xz-utils build-essential systemd acl passwd util-linux procps iproute2 rsync file jq openssl python3 python3-minimal || die "Ubuntu dependency installation failed."
+            retry apt-get install -y curl ca-certificates git unzip tar xz-utils libarchive-tools build-essential systemd acl passwd util-linux procps iproute2 rsync file jq openssl python3 python3-minimal || die "Ubuntu dependency installation failed."
             ;;
         dnf)
             retry dnf makecache || true
-            retry dnf install -y curl ca-certificates git unzip tar xz gcc gcc-c++ make nodejs npm systemd acl shadow-utils util-linux procps-ng iproute rsync file jq openssl python3 || die "DNF dependency installation failed."
+            retry dnf install -y curl ca-certificates git unzip tar xz libarchive gcc gcc-c++ make nodejs npm systemd acl shadow-utils util-linux procps-ng iproute rsync file jq openssl python3 || die "DNF dependency installation failed."
             ;;
         yum)
             retry yum makecache || true
-            retry yum install -y curl ca-certificates git unzip tar xz gcc gcc-c++ make nodejs npm systemd acl shadow-utils util-linux procps iproute rsync file jq openssl python3 || die "YUM dependency installation failed."
+            retry yum install -y curl ca-certificates git unzip tar xz libarchive gcc gcc-c++ make nodejs npm systemd acl shadow-utils util-linux procps iproute rsync file jq openssl python3 || die "YUM dependency installation failed."
             ;;
         zypper)
             retry zypper --non-interactive refresh || true
-            retry zypper --non-interactive install curl ca-certificates git unzip tar xz gcc gcc-c++ make nodejs npm systemd acl shadow util-linux procps iproute2 rsync file jq openssl python3 || die "Zypper dependency installation failed."
+            retry zypper --non-interactive install curl ca-certificates git unzip tar xz libarchive gcc gcc-c++ make nodejs npm systemd acl shadow util-linux procps iproute2 rsync file jq openssl python3 || die "Zypper dependency installation failed."
             ;;
         pacman)
-            retry pacman -Sy --noconfirm --needed curl ca-certificates git unzip tar xz gcc make nodejs npm systemd acl shadow util-linux procps iproute2 rsync file jq openssl python || die "Pacman dependency installation failed."
+            retry pacman -Sy --noconfirm --needed curl ca-certificates git unzip tar xz libarchive gcc make nodejs npm systemd acl shadow util-linux procps iproute2 rsync file jq openssl python || die "Pacman dependency installation failed."
             ;;
         *) die "Unsupported Linux distribution/package manager." ;;
     esac

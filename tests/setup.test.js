@@ -4,7 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const projectRoot = path.join(__dirname, '..');
-const installer = fs.readFileSync(path.join(projectRoot, 'installers', 'nexuspanel-normal-v3.0.4-linux-installer.sh'), 'utf8');
+const installer = fs.readFileSync(path.join(projectRoot, 'installers', 'nexuspanel-normal-v1.0.1-linux-installer.sh'), 'utf8');
 const index = fs.readFileSync(path.join(projectRoot, 'backend', 'index.js'), 'utf8');
 const setupPage = fs.readFileSync(path.join(projectRoot, 'frontend', 'setup.html'), 'utf8');
 const setupScript = fs.readFileSync(path.join(projectRoot, 'frontend', 'js', 'setup.js'), 'utf8');

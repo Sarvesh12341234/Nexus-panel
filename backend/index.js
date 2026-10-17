@@ -21,7 +21,7 @@ const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = r
 const { kernelStatus, nativeStatus, profileForServer, writeProfile } = require('./asf');
 const { removeServerIdentity } = require('./asf_identity');
 const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer, subscribeConsole } = require('./runtime');
-const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions, zipEntries } = require('./zip_utils');
+const { archiveCollisions, archiveEntries, archiveFormat, copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { processTreeMetrics } = require('./process_metrics');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
@@ -6800,20 +6800,18 @@ app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_
   await safeTimelinePoint(server, req, 'Before archive extract', `Captured state before extracting ${requested.length} archive(s).`);
   for (const relative of requested) {
     const source = safeServerFile(server, relative);
-    if (!source.relative || !source.relative.toLowerCase().endsWith('.zip')) {
-      return res.status(400).json({ error: 'Select one or more .zip files to unzip.' });
+    if (!source.relative || !archiveFormat(source.absolute)) {
+      return res.status(400).json({ error: 'Select one or more supported archives: ZIP, TAR, GZ, BZ2, XZ, ZST, 7Z, or RAR.' });
     }
     const stats = await fs.promises.stat(source.absolute).catch(() => null);
     if (!stats || !stats.isFile()) return res.status(404).json({ error: `${source.relative} is not a file.` });
-    if (!isZipFile(source.absolute)) {
-      return res.status(422).json({ error: `${source.relative} is not a complete valid ZIP. It may be an unfinished upload/download. Re-upload it or use a fresh backup/archive.` });
-    }
-    const blockedEntry = zipEntries(source.absolute).find((entry) => !isUserVisibleServerEntry(path.posix.join(destinationDir.relative.replaceAll('\\', '/'), entry)));
+    const entries = archiveEntries(source.absolute);
+    const blockedEntry = entries.find((entry) => !isUserVisibleServerEntry(path.posix.join(destinationDir.relative.replaceAll('\\', '/'), entry)));
     if (blockedEntry) {
       return res.status(403).json({ error: `Archive contains protected NexusPanel metadata/runtime path: ${blockedEntry}` });
     }
     if (mode === 'fail') {
-      const collisions = zipCollisions(source.absolute, destinationDir.absolute);
+      const collisions = archiveCollisions(source.absolute, destinationDir.absolute);
       if (collisions.length) {
         return res.status(409).json({
           error: `Extract would replace ${collisions.length} existing file(s). Choose Replace all or Skip existing.`,

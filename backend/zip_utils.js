@@ -50,12 +50,118 @@ function isZipFile(archivePath) {
   }
 }
 
+function archiveFormat(archivePath) {
+  const name = path.basename(String(archivePath || '')).toLowerCase();
+  if (name.endsWith('.zip')) return 'zip';
+  if (/\.(?:tar|tgz|tbz2?|txz|tzst)$/.test(name) || /\.tar\.(?:gz|bz2?|xz|zst|zstd)$/.test(name)) return 'tar';
+  if (name.endsWith('.7z')) return '7z';
+  if (name.endsWith('.rar')) return 'rar';
+  if (name.endsWith('.gz')) return 'gzip';
+  if (name.endsWith('.bz2') || name.endsWith('.bz')) return 'bzip2';
+  if (name.endsWith('.xz')) return 'xz';
+  if (name.endsWith('.zst') || name.endsWith('.zstd')) return 'zstd';
+  return '';
+}
+
+function runArchiveTool(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 64 * 1024 * 1024,
+    ...options,
+  });
+  if (result.error?.code === 'ENOENT') return null;
+  return result;
+}
+
+function assertNoArchiveLinks(archivePath, command, args) {
+  const result = runArchiveTool(command, args);
+  if (!result || result.status !== 0) return;
+  const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+  if (lines.some((line) => /^[lhbcp][rwxStTs-]{9}\s/.test(line))) {
+    throw new Error('Archive contains a link or special file; only regular files and folders can be extracted.');
+  }
+}
+
+function archiveEntries(archivePath) {
+  const format = archiveFormat(archivePath);
+  if (format === 'zip') {
+    if (!isZipFile(archivePath)) {
+      throw new Error('This file is not a complete valid ZIP archive.');
+    }
+    const entries = zipEntries(archivePath);
+    assertNoArchiveLinks(archivePath, 'unzip', ['-Z', '-l', archivePath]);
+    return entries;
+  }
+  if (['gzip', 'bzip2', 'xz', 'zstd'].includes(format)) {
+    const extension = path.extname(archivePath);
+    const outputName = path.basename(archivePath).slice(0, -extension.length);
+    if (!outputName || outputName === '.' || outputName === '..') {
+      throw new Error('Could not determine the extracted filename.');
+    }
+    return [outputName];
+  }
+  if (!format) throw new Error('This archive format is not supported for extraction.');
+
+  if (format === 'tar') {
+    const result = runArchiveTool('tar', ['-tf', archivePath]);
+    if (!result) throw new Error('tar is required to list this archive.');
+    if (result.status === 0) {
+      assertNoArchiveLinks(archivePath, 'tar', ['-tvf', archivePath]);
+      return result.stdout.split(/\r?\n/).filter(Boolean);
+    }
+    throw new Error(result.stderr || result.stdout || 'Could not read the tar archive contents.');
+  }
+
+  const result = runArchiveTool('bsdtar', ['-tf', archivePath]);
+  if (result?.status === 0) {
+    assertNoArchiveLinks(archivePath, 'bsdtar', ['-tvf', archivePath]);
+    return result.stdout.split(/\r?\n/).filter(Boolean);
+  }
+  throw new Error(`bsdtar (libarchive-tools) is required to list ${format.toUpperCase()} archives.`);
+}
+
+function archiveCollisions(archivePath, destination) {
+  return archiveEntries(archivePath)
+    .filter((entry) => !entry.endsWith('/'))
+    .filter((entry) => fs.existsSync(path.join(destination, entry)))
+    .slice(0, 50);
+}
+
+function decompressSingleFile(archivePath, destination, format, options) {
+  const extension = path.extname(archivePath);
+  const outputName = path.basename(archivePath).slice(0, -extension.length);
+  const outputPath = path.join(destination, outputName);
+  const temporaryPath = path.join(destination, `.nexuspanel-extract-${process.pid}-${Date.now()}`);
+  const commands = {
+    gzip: ['gzip', ['-dc', '--', archivePath]],
+    bzip2: ['bzip2', ['-dc', '--', archivePath]],
+    xz: ['xz', ['-dc', '--', archivePath]],
+    zstd: ['zstd', ['-dc', '--', archivePath]],
+  };
+  const [command, args] = commands[format];
+  let fd;
+  try {
+    fd = fs.openSync(temporaryPath, 'wx', 0o666);
+    const result = runArchiveTool(command, args, { encoding: null, stdio: ['ignore', fd, 'pipe'] });
+    if (!result) throw new Error(`${command} is required to decompress .${extension.slice(1)} files.`);
+    if (result.status !== 0) {
+      throw new Error(result.stderr?.toString() || result.stdout?.toString() || `Failed to decompress ${path.basename(archivePath)}.`);
+    }
+    if (options.mode === 'skip' && fs.existsSync(outputPath)) return;
+    if (options.mode === 'fail' && fs.existsSync(outputPath)) throw new Error(`${outputName} already exists.`);
+    fs.renameSync(temporaryPath, outputPath);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    fs.rmSync(temporaryPath, { force: true });
+  }
+}
+
 function extractArchiveInto(archivePath, destination, options = {}) {
   fs.mkdirSync(destination, { recursive: true });
-  if (archivePath.toLowerCase().endsWith('.zip')) {
-    if (!isZipFile(archivePath)) {
-      throw new Error('This file is not a complete valid ZIP. It may be an unfinished upload/download; re-upload it or use a fresh backup/archive.');
-    }
+  const format = archiveFormat(archivePath);
+  if (format === 'zip') {
+    archiveEntries(archivePath);
     // Zip Slip defense: every entry must stay inside the destination.
     assertSafeArchive(archivePath, destination);
     const mode = ['replace', 'skip', 'fail'].includes(options.mode) ? options.mode : 'replace';
@@ -69,16 +175,19 @@ function extractArchiveInto(archivePath, destination, options = {}) {
     if (result.status !== 0) throw new Error(result.stderr || result.stdout || 'Failed to extract zip.');
     return;
   }
-  // tar archives: list entries first and reject traversal before extracting.
-  const listing = spawnSync('tar', ['-tzf', archivePath], { encoding: 'utf8', windowsHide: true });
-  if (listing.error && listing.error.code === 'ENOENT') throw new Error('tar is required to extract this archive.');
-  if (listing.status === 0) {
-    for (const entry of String(listing.stdout || '').split(/\r?\n/).filter(Boolean)) {
-      assertSafeArchiveEntry(entry, destination);
-    }
+  const mode = ['replace', 'skip', 'fail'].includes(options.mode) ? options.mode : 'replace';
+  const entries = archiveEntries(archivePath);
+  for (const entry of entries) assertSafeArchiveEntry(entry, destination);
+  if (['gzip', 'bzip2', 'xz', 'zstd'].includes(format)) {
+    decompressSingleFile(archivePath, destination, format, { mode });
+    return;
   }
-  const result = spawnSync('tar', ['-xzf', archivePath, '-C', destination], { encoding: 'utf8', windowsHide: true });
-  if (result.error && result.error.code === 'ENOENT') throw new Error('tar is required to extract this archive.');
+
+  const tarArgs = ['-xf', archivePath, '-C', destination];
+  const tarCommand = format === 'tar' ? 'tar' : 'bsdtar';
+  if (mode === 'skip') tarArgs.unshift('-k');
+  const result = runArchiveTool(tarCommand, tarArgs);
+  if (!result) throw new Error(`${tarCommand} is required to extract this archive.`);
   if (result.status !== 0) throw new Error(result.stderr || result.stdout || 'Failed to extract archive.');
 }
 
@@ -130,4 +239,4 @@ function copyDirectoryContents(source, destination) {
   }
 }
 
-module.exports = { assertSafeArchive, assertSafeArchiveEntry, copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions, zipEntries };
+module.exports = { archiveCollisions, archiveEntries, archiveFormat, assertSafeArchive, assertSafeArchiveEntry, copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions, zipEntries };
