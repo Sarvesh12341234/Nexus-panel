@@ -126,6 +126,12 @@ button {
   overflow-wrap: anywhere;
   box-shadow: 0 0 0 1px rgba(255,255,255,.04) inset, 0 0 24px var(--glow);
   transition: box-shadow .08s ease, border-color .08s ease, opacity .08s ease;
+  /* Alignment hardening: buttons never stretch to weird heights inside flex
+     rows, never shrink below their label, and baseline-align with siblings. */
+  flex: 0 0 auto;
+  align-self: center;
+  text-align: center;
+  line-height: 1.2;
 }
 
 button:hover:not(:disabled) { box-shadow: 0 0 0 1px rgba(255,255,255,.06) inset, 0 0 34px var(--glow); }
@@ -423,6 +429,15 @@ code {
   color: var(--muted);
 }
 
+.error-message {
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 105, 120, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 105, 120, 0.1);
+  color: #ff9aa2;
+}
+
 .quick-stats strong {
   font-size: 2rem;
   line-height: 1;
@@ -538,6 +553,30 @@ code {
   gap: 0.75rem;
 }
 
+/* Row alignment hardening: the info block flexes to fill, the action block
+   hugs the end, and nothing overflows on narrow screens. */
+.plugin-row > div:first-child {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.plugin-row .row-actions {
+  flex: 0 1 auto;
+  margin-left: auto;
+}
+
+.plugin-row input[type="text"],
+.plugin-row input[type="password"],
+.plugin-row input:not([type]) {
+  min-height: 42px;
+  min-width: 0;
+}
+
+.plugin-row code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .server-actions,
 .user-actions,
 .file-toolbar {
@@ -548,6 +587,27 @@ code {
   border-radius: 16px;
   border: 1px solid var(--line);
   background: linear-gradient(135deg, rgba(255,255,255,.055), rgba(255,255,255,.025));
+}
+
+/* File toolbar: the current-path readout sits inline with the buttons, so it
+   must be height-matched and allowed to shrink on narrow screens instead of
+   forcing the whole toolbar to overflow. */
+.file-toolbar code {
+  flex: 1 1 160px;
+  min-width: 0;
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.45rem 0.7rem;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .badge,
@@ -822,6 +882,45 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   align-items: end;
 }
 
+/* Form alignment hardening: labels are grid cells that must fill their track
+   and stretch their control, so every input in a row shares one height and
+   the submit button lines up with the last field instead of floating. */
+.command-row label,
+.server-config-form label,
+.plugin-form label,
+.admin-form label,
+.modrinth-form label,
+.settings-form label,
+.terminal-form label,
+.whitelist-form label {
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+  min-width: 0;
+}
+
+.command-row label > input,
+.command-row label > select,
+.command-row label > textarea,
+.server-config-form label > input,
+.server-config-form label > select,
+.plugin-form label > input,
+.plugin-form label > select,
+.admin-form label > input,
+.admin-form label > select,
+.modrinth-form label > input,
+.modrinth-form label > select,
+.settings-form label > input,
+.settings-form label > select,
+.settings-form label > textarea,
+.terminal-form label > input,
+.terminal-form label > select,
+.whitelist-form label > input,
+.whitelist-form label > select {
+  width: 100%;
+  min-width: 0;
+}
+
 .server-config-form {
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   padding: .9rem;
@@ -833,6 +932,19 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 .settings-form,
 .terminal-form {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+/* The submit button spans its own full row so it never sits squeezed in a
+   half-filled grid cell next to an empty gap. */
+.settings-form > button[type="submit"],
+.terminal-form > button[type="submit"],
+.admin-form > button[type="submit"],
+.modrinth-form > button[type="submit"],
+.whitelist-form > button[type="submit"],
+.server-config-form > button[type="submit"] {
+  grid-column: 1 / -1;
+  justify-self: start;
+  min-width: 180px;
 }
 
 .settings-form button,
@@ -1386,6 +1498,32 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   flex-wrap: wrap;
   gap: 0.65rem;
   justify-content: flex-end;
+  /* Alignment hardening: keep every control on one visual line and stop
+     text inputs from ballooning or shrinking inside action rows. */
+  align-items: center;
+}
+
+.row-actions input[type="text"],
+.row-actions input[type="password"],
+.row-actions input[type="number"],
+.row-actions input:not([type]) {
+  flex: 1 1 180px;
+  min-width: 0;
+  max-width: 340px;
+  min-height: 42px;
+  height: auto;
+}
+
+.row-actions select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 260px;
+  min-height: 42px;
+}
+
+.row-actions code {
+  align-self: center;
+  overflow-wrap: anywhere;
 }
 
 .server-rows-list,
@@ -2599,3 +2737,259 @@ body[data-privacy-shield="true"] input {
 
 .advanced-ops-card{margin-top:18px;border:1px solid var(--border-color,#273044);border-radius:18px;padding:18px;background:linear-gradient(145deg,rgba(255,255,255,.03),rgba(255,255,255,.01))}
 .advanced-ops-card h3{margin:.2rem 0}
+
+/* ==========================================================================
+   NexusPanel 1.0.0 � new sections alignment hardening
+   (Tebex, Databases, Port Allocations)
+   ========================================================================== */
+
+/* --- Tebex live payment console ----------------------------------------- */
+.tebex-console {
+  display: grid;
+  gap: 0.6rem;
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 0.9rem;
+  font-family: inherit;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.tebex-console .empty-state {
+  margin: 0;
+}
+
+.tebex-payment-row {
+  animation: tebex-payment-in .28s ease;
+}
+
+@keyframes tebex-payment-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.tebex-payment-row .badge {
+  white-space: nowrap;
+}
+
+/* --- Allocation / database forms ---------------------------------------- */
+#allocationForm,
+#databaseForm {
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  align-items: end;
+}
+
+#allocationForm > button[type="submit"],
+#databaseForm > button[type="submit"] {
+  grid-column: 1 / -1;
+  justify-self: start;
+  min-width: 200px;
+}
+
+/* Inline inputs inside allocation/database rows stay one line tall and never
+   push the row wider than its container. */
+.plugin-row [data-rank-input] {
+  flex: 0 1 160px;
+  width: 160px;
+  min-width: 0;
+}
+
+.plugin-row [data-command-input] {
+  flex: 1 1 280px;
+  width: 100%;
+  max-width: 420px;
+  min-width: 0;
+}
+
+/* --- Section heads inside the new panels -------------------------------- */
+#tebexPanel h3,
+#databasesPanel h3,
+#allocationsPanel h3 {
+  margin: 1.1rem 0 0.6rem;
+}
+
+#tebexPanel code,
+#databasesPanel code,
+#allocationsPanel code {
+  padding: 0.1rem 0.4rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  font-size: 0.86em;
+  overflow-wrap: anywhere;
+}
+
+#tebexPanel .muted,
+#databasesPanel .muted,
+#allocationsPanel .muted {
+  overflow-wrap: anywhere;
+}
+
+/* --- Responsive: stack the new forms on narrow screens ------------------ */
+@media (max-width: 760px) {
+  #allocationForm,
+  #databaseForm {
+    grid-template-columns: 1fr;
+  }
+
+  #allocationForm > button[type="submit"],
+  #databaseForm > button[type="submit"] {
+    width: 100%;
+    justify-self: stretch;
+  }
+
+  .plugin-row [data-rank-input],
+  .plugin-row [data-command-input] {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .tebex-console {
+    max-height: 320px;
+  }
+}
+
+/* ==========================================================================
+   NexusPanel 1.0.0 � modernized admin account creation
+   ========================================================================== */
+
+.admin-panel {
+  display: grid;
+  gap: 1.25rem;
+  padding: 1.25rem;
+}
+
+.admin-form {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.admin-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.admin-field {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.admin-field > span:first-child {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.admin-field > input,
+.admin-field > select {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+}
+
+.admin-field-duration .admin-duration-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 0.5rem;
+}
+
+.admin-field-duration .admin-duration-row > input,
+.admin-field-duration .admin-duration-row > select {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+}
+
+.admin-permissions {
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.admin-permissions legend {
+  padding: 0 0.5rem;
+  color: var(--text);
+  font-weight: 800;
+}
+
+.admin-permission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+
+.admin-permission-actions button {
+  min-height: 36px;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.82rem;
+}
+
+.permission-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.9rem;
+}
+
+.permission-group {
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.permission-group h4 {
+  margin: 0 0 0.25rem;
+  color: var(--green);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.permission-group label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 30px;
+  color: var(--text);
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+
+.permission-group label input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  accent-color: var(--green);
+}
+
+.admin-form-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.admin-form-actions button[type="submit"] {
+  min-width: 200px;
+}
+
+@media (max-width: 760px) {
+  .admin-form-grid,
+  .permission-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-form-actions button[type="submit"] {
+    width: 100%;
+  }
+}

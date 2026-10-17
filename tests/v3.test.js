@@ -7,9 +7,9 @@ const service = require('../backend/service');
 
 assert.equal(fs.existsSync(hostAgent.localStatus().sourcePath), true, 'native host agent source is missing');
 assert.match(service.serviceContent(), /nexuspanel-host-agent\.service/);
-assert.match(service.serviceContent(), /nexuspanel-nexusmark\.service/);
+assert.match(service.serviceContent(), /nexuspanel-asf\.service/);
 assert.match(service.hostAgentServiceContent(), /RestrictAddressFamilies=AF_UNIX/);
-assert.match(service.nexusMarkServiceContent(), /Type=oneshot/);
+assert.match(service.asfServiceContent(), /Type=oneshot/);
 
 const playerTestServerId = 987654;
 trackPlayerLine(String(playerTestServerId), '[Server thread/INFO]: \u001b[32mJavaPlayer\u001b[0m joined the game');

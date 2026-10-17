@@ -1,7 +1,7 @@
 {
   "name": "nexuspanel",
-  "version": "5.2.2",
-  "description": "Lightweight cross-platform Minecraft server panel with adaptive intelligence, secure AI providers, Nexus-Mark isolation, evidence-bound automation, predictive health, and safe change planning.",
+  "version": "1.0.0",
+  "description": "Lightweight cross-platform Minecraft server panel with the ASF (Advanced Sandbox Fabric) isolation protocol, secure server management, and safe change planning.",
   "main": "backend/index.js",
   "bin": {
     "nexuspanel": "backend/cli.js"
@@ -16,21 +16,19 @@
     "service:logs": "journalctl -u nexuspanel -f",
     "cli": "node backend/cli.js",
     "update": "bash update/update.sh",
-    "test": "npm run test:auth && npm run test:v3 && npm run test:intelligence && npm run test:ai && npm run test:micro && npm run test:security && npm run test:advanced && npm run test:nexusmark",
+    "test": "npm run test:auth && npm run test:v3 && npm run test:security && npm run test:advanced && npm run test:exploit && npm run test:asf",
     "test:auth": "node tests/auth.test.js",
     "test:v3": "node tests/v3.test.js && node tests/setup.test.js",
     "test-auth": "npm run test:auth",
     "debug-users": "node scripts/debug-users.js",
     "reset-password": "node scripts/reset-password.js",
-    "build:nexusmark": "node backend/nexus_mark_native.js",
+    "build:asf": "node backend/asf_native.js",
     "build:host-agent": "node backend/host_agent.js",
-    "test:nexusmark": "bash native/nexusmark/tests/test.sh",
-    "audit:nexusmark": "sudo bash native/nexusmark/tests/test-audit.sh",
-    "benchmark:nexusmark": "bash native/nexusmark/tests/benchmark.sh",
-    "test:intelligence": "node tests/intelligence.test.js",
-    "test:ai": "node tests/ai.test.js",
+    "test:asf": "bash native/asf/tests/test.sh",
+    "audit:asf": "sudo bash native/asf/tests/test-audit.sh",
+    "benchmark:asf": "bash native/asf/tests/benchmark.sh",
     "test:security": "node tests/security-regression.test.js",
-    "test:micro": "node tests/micro.test.js",
+    "test:exploit": "node tests/security-exploit.test.js",
     "test:advanced": "node tests/advanced-ops.test.js"
   },
   "keywords": [],
@@ -38,13 +36,14 @@
   "license": "MIT",
   "type": "commonjs",
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.5.0 <25",
+    "npm": ">=10.0.0"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.3.0"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^3.8.1",
-    "node-pty": "^1.1.0"
+    "better-sqlite3": "^11.0.0"
   }
 }

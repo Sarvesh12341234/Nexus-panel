@@ -12,8 +12,6 @@ const state = {
   settings: null,
   loginEvents: [],
   health: null,
-  adaptiveInsights: [],
-  repairBrain: null,
   metricHistory: {},
   activeView: 'dashboard',
   activeServerId: null,
@@ -45,6 +43,7 @@ const elements = {
   authView: document.querySelector('#authView'),
   dashboardView: document.querySelector('#dashboardView'),
   loginForm: document.querySelector('#loginForm'),
+  loginError: document.querySelector('#loginError'),
   setupNotice: document.querySelector('#setupNotice'),
   serverForm: document.querySelector('#serverForm'),
   softwareSelect: document.querySelector('#softwareSelect'),
@@ -103,8 +102,9 @@ const elements = {
   uploadSessionList: document.querySelector('#uploadSessionList'),
   settingsPanel: document.querySelector('#settingsPanel'),
   networkPanel: document.querySelector('#networkPanel'),
-  terminalPanel: document.querySelector('#terminalPanel'),
-  terminalNav: document.querySelector('#terminalNav'),
+  allocationsPanel: document.querySelector('#allocationsPanel'),
+  databasesPanel: document.querySelector('#databasesPanel'),
+  tebexPanel: document.querySelector('#tebexPanel'),
   backupPanel: document.querySelector('#backupPanel'),
   viewEyebrow: document.querySelector('#viewEyebrow'),
   viewTitle: document.querySelector('#viewTitle'),
@@ -118,7 +118,6 @@ let currentUpload = { path: '', size: 0, paused: false, canceled: false };
 let uploadProgressBroadcast = { timer: 0, pending: null, lastSentAt: 0 };
 let consoleStickToBottom = true;
 let consoleRenderToken = 0;
-let terminalSession = { id: '', cursor: 0, timer: 0 };
 const versionCache = new Map();
 const dateFormatterCache = new Map();
 const publicBackupLinks = new Map();
@@ -252,10 +251,12 @@ const viewTitles = {
   backups: ['Safety', 'Backups'],
   optimizer: ['Host', 'Optimizer'],
   network: ['Host', 'Network'],
+  allocations: ['Host', 'Port Allocations'],
+  databases: ['Host', 'Databases'],
+  tebex: ['Store', 'Tebex Ranks'],
   admins: ['Owner', 'Admin Access'],
   security: ['Security', 'Health, Audit and Repairs'],
   settings: ['Panel', 'Settings'],
-  terminal: ['Owner', 'VPS Terminal'],
 };
 const viewAccess = {
   dashboard: { keys: [], level: 'VIEW_ONLY' },
@@ -270,10 +271,12 @@ const viewAccess = {
   backups: { keys: [CAPABILITIES.BACKUPS_MANAGE], level: 'MANAGE_FILES' },
   optimizer: { keys: [CAPABILITIES.OPTIMIZER_MANAGE], level: 'MANAGE_SERVERS' },
   network: { keys: [CAPABILITIES.NETWORK_MANAGE], level: 'MANAGE_SERVERS' },
+  allocations: { keys: [CAPABILITIES.NETWORK_MANAGE], level: 'MANAGE_SERVERS' },
+  databases: { keys: [CAPABILITIES.SERVER_MANAGE], level: 'MANAGE_SERVERS' },
+  tebex: { keys: [CAPABILITIES.SERVER_MANAGE], level: 'MANAGE_SERVERS' },
   admins: { keys: [CAPABILITIES.ADMINS_MANAGE], level: 'MANAGE_ADMINS' },
   security: { keys: [CAPABILITIES.SECURITY_VIEW], level: 'MANAGE_ADMINS' },
   settings: { keys: [CAPABILITIES.SETTINGS_MANAGE, CAPABILITIES.TIMEZONE_MANAGE], level: 'MANAGE_ADMINS' },
-  terminal: { keys: [CAPABILITIES.SETTINGS_MANAGE], level: 'MANAGE_ADMINS' },
 };
 const defaultNavOrder = Object.keys(viewTitles);
 
@@ -319,18 +322,54 @@ function loadUiPreferences() {
     denseForms: false,
   };
   try {
-    const saved = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) || '{}');
+    const saved = safeJsonParse(localStorage.getItem(UI_PREFERENCES_KEY), null);
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return defaults;
+    // Only accept values with the expected type; a corrupted key falls back to
+    // the default instead of poisoning the layout pipeline later.
+    const objectField = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
+    const numberField = (value, fallback) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
+    const boolField = (value, fallback) => (typeof value === 'boolean' ? value : fallback);
     return {
       ...defaults,
-      ...saved,
-      navOrder: Array.isArray(saved.navOrder) ? saved.navOrder : [],
-      actionPriority: Array.isArray(saved.actionPriority) ? saved.actionPriority : defaults.actionPriority,
-      buttonLayout: saved.buttonLayout && typeof saved.buttonLayout === 'object' ? saved.buttonLayout : {},
-      buttonWidths: saved.buttonWidths && typeof saved.buttonWidths === 'object' ? saved.buttonWidths : {},
-      buttonPositions: saved.buttonPositions && typeof saved.buttonPositions === 'object' ? saved.buttonPositions : {},
-      componentLayout: saved.componentLayout && typeof saved.componentLayout === 'object' ? saved.componentLayout : {},
-      componentWidths: saved.componentWidths && typeof saved.componentWidths === 'object' ? saved.componentWidths : {},
-      componentPositions: saved.componentPositions && typeof saved.componentPositions === 'object' ? saved.componentPositions : {},
+      ...Object.fromEntries(Object.entries(saved).filter(([, value]) => value !== undefined && value !== null)),
+      navOrder: Array.isArray(saved.navOrder) ? saved.navOrder.map(String) : [],
+      actionPriority: Array.isArray(saved.actionPriority) ? saved.actionPriority.map(String) : defaults.actionPriority,
+      buttonLayout: objectField(saved.buttonLayout),
+      buttonWidths: objectField(saved.buttonWidths),
+      buttonPositions: objectField(saved.buttonPositions),
+      componentLayout: objectField(saved.componentLayout),
+      componentWidths: objectField(saved.componentWidths),
+      componentPositions: objectField(saved.componentPositions),
+      compact: boolField(saved.compact, defaults.compact),
+      reducedMotion: boolField(saved.reducedMotion, defaults.reducedMotion),
+      liveRefresh: boolField(saved.liveRefresh, defaults.liveRefresh),
+      stickyTopbar: boolField(saved.stickyTopbar, defaults.stickyTopbar),
+      showQuickStats: boolField(saved.showQuickStats, defaults.showQuickStats),
+      showEyebrows: boolField(saved.showEyebrows, defaults.showEyebrows),
+      uppercaseButtons: boolField(saved.uppercaseButtons, defaults.uppercaseButtons),
+      highContrast: boolField(saved.highContrast, defaults.highContrast),
+      focusBoost: boolField(saved.focusBoost, defaults.focusBoost),
+      denseForms: boolField(saved.denseForms, defaults.denseForms),
+      sidebarWidth: numberField(saved.sidebarWidth, defaults.sidebarWidth),
+      fontScale: numberField(saved.fontScale, defaults.fontScale),
+      accentHue: numberField(saved.accentHue, defaults.accentHue),
+      surfaceOpacity: numberField(saved.surfaceOpacity, defaults.surfaceOpacity),
+      contentWidth: numberField(saved.contentWidth, defaults.contentWidth),
+      rowGap: numberField(saved.rowGap, defaults.rowGap),
+      borderWidth: numberField(saved.borderWidth, defaults.borderWidth),
+      shadowStrength: numberField(saved.shadowStrength, defaults.shadowStrength),
+      navFontSize: numberField(saved.navFontSize, defaults.navFontSize),
+      buttonGap: numberField(saved.buttonGap, defaults.buttonGap),
+      cardRadius: numberField(saved.cardRadius, defaults.cardRadius),
+      inputRadius: numberField(saved.inputRadius, defaults.inputRadius),
+      sidebarOpacity: numberField(saved.sidebarOpacity, defaults.sidebarOpacity),
+      backdropBlur: numberField(saved.backdropBlur, defaults.backdropBlur),
+      lineHeight: numberField(saved.lineHeight, defaults.lineHeight),
+      consoleFontSize: numberField(saved.consoleFontSize, defaults.consoleFontSize),
+      animationSpeed: numberField(saved.animationSpeed, defaults.animationSpeed),
+      toolbarScale: numberField(saved.toolbarScale, defaults.toolbarScale),
+      buttonShape: ['soft', 'round', 'square'].includes(saved.buttonShape) ? saved.buttonShape : defaults.buttonShape,
+      buttonSize: ['small', 'medium', 'large'].includes(saved.buttonSize) ? saved.buttonSize : defaults.buttonSize,
     };
   } catch {
     return defaults;
@@ -934,8 +973,13 @@ function decodeBase64Utf8(value) {
 }
 
 function parseLayoutPayload(value) {
-  const payload = JSON.parse(value);
-  if (![1, 2].includes(payload.version) || !payload.preferences || typeof payload.preferences !== 'object' || Array.isArray(payload.preferences)) {
+  let payload;
+  try {
+    payload = JSON.parse(value);
+  } catch {
+    throw new Error('Unsupported layout code.');
+  }
+  if (!payload || ![1, 2].includes(payload.version) || !payload.preferences || typeof payload.preferences !== 'object' || Array.isArray(payload.preferences)) {
     throw new Error('Unsupported layout code.');
   }
   return payload.preferences;
@@ -1295,7 +1339,6 @@ function can(capability, legacyLevel = 0) {
 function canView(view) {
   if (!state.user || !Object.hasOwn(viewAccess, view)) return false;
   if (view === 'templates' && state.settings?.edition !== 'host') return false;
-  if (view === 'terminal') return state.user.role === 'owner';
   const access = viewAccess[view];
   if (!access.keys.length) return true;
   return can(access.keys, Number(state.permissions[access.level] || 0));
@@ -1582,6 +1625,7 @@ async function uploadFiles(files) {
   if (!server) return showToast('Create a server first.');
   const queue = [...files].filter((file) => file && file.name);
   if (!queue.length) return;
+  if (!elements.uploadPanel || !elements.uploadLabel || !elements.uploadProgress) return;
   elements.uploadPanel.hidden = false;
   for (let index = 0; index < queue.length; index += 1) {
     const file = queue[index];
@@ -1605,12 +1649,14 @@ async function uploadFiles(files) {
   await renderFiles();
   await renderUploadSessions();
   setTimeout(() => {
+    if (!elements.uploadSessionList || !elements.uploadPanel || !elements.uploadProgress) return;
     if (!elements.uploadSessionList.innerHTML.trim()) elements.uploadPanel.hidden = true;
     elements.uploadProgress.style.width = '0%';
   }, 2600);
 }
 
 function renderAccount() {
+  if (!elements.accountBox) return;
   if (!state.user) {
     elements.accountBox.textContent = 'Logged out';
     return;
@@ -1619,15 +1665,15 @@ function renderAccount() {
 }
 
 function renderAuth() {
-  elements.authView.hidden = Boolean(state.user);
-  elements.dashboardView.hidden = !state.user;
+  if (elements.authView) elements.authView.hidden = Boolean(state.user);
+  if (elements.dashboardView) elements.dashboardView.hidden = !state.user;
 }
 
 function renderStats() {
-  elements.serverCount.textContent = state.servers.length;
-  elements.onlineCount.textContent = state.servers.filter((server) => server.status === 'online').length;
-  elements.softwareCount.textContent = state.servers.filter((server) => server.installStatus === 'installed').length;
-  elements.accessLabel.textContent = state.user ? accessName(state.user.accessLevel) : 'View';
+  if (elements.serverCount) elements.serverCount.textContent = state.servers.length;
+  if (elements.onlineCount) elements.onlineCount.textContent = state.servers.filter((server) => server.status === 'online').length;
+  if (elements.softwareCount) elements.softwareCount.textContent = state.servers.filter((server) => server.installStatus === 'installed').length;
+  if (elements.accessLabel) elements.accessLabel.textContent = state.user ? accessName(state.user.accessLevel) : 'View';
   const maxMemory = state.settings?.maxAllocatableMemoryMb;
   if (maxMemory) {
     const createRam = elements.serverForm?.maxMemoryMb;
@@ -1659,11 +1705,12 @@ function renderView() {
     button.classList.toggle('is-active', button.dataset.view === state.activeView);
   });
   const [eyebrow, title] = viewTitles[state.activeView] || viewTitles.dashboard;
-  elements.viewEyebrow.textContent = eyebrow;
-  elements.viewTitle.textContent = title;
+  if (elements.viewEyebrow) elements.viewEyebrow.textContent = eyebrow;
+  if (elements.viewTitle) elements.viewTitle.textContent = title;
 }
 
 function renderServerSwitcher() {
+  if (!elements.serverList || !elements.activeServerSelect) return;
   const visibleCount = Math.max(1, Math.min(20, Number(state.settings?.serverSwitcherVisibleCount || 3)));
   elements.serverList.style.setProperty('--server-switch-max-height', `${(visibleCount * 64) + (Math.max(0, visibleCount - 1) * 8)}px`);
   const options = state.servers.map((server) => `<option value="${server.id}" ${server.id === state.activeServerId ? 'selected' : ''}>${escapeHtml(server.name)}</option>`).join('');
@@ -1702,7 +1749,8 @@ function renderServerRows() {
 }
 
 function renderServers() {
-  elements.serverForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
+  if (elements.serverForm) elements.serverForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
+  if (!elements.serverGrid) return;
   if (!state.servers.length) {
     elements.serverGrid.innerHTML = '<p class="empty-state">No servers yet. Create one above, then install software from the Software tab.</p>';
     return;
@@ -1800,6 +1848,7 @@ function renderTemplates() {
 
 function renderSoftware() {
   const server = activeServer();
+  if (!elements.softwareGrid) return;
   if (!server) {
     elements.softwareGrid.innerHTML = '<p class="empty-state">Create a server before installing software.</p>';
     return;
@@ -1880,10 +1929,12 @@ async function renderActiveView({ shellScroll = null } = {}) {
     if (view === 'backups') renderBackups();
     if (view === 'optimizer') await renderOptimizer();
     if (view === 'network') await renderNetwork();
+    if (view === 'allocations') await renderAllocations();
+    if (view === 'databases') await renderDatabases();
+    if (view === 'tebex') await renderTebex();
     if (view === 'admins') renderAdmins();
     if (view === 'security') await renderSecurity();
     if (view === 'settings') renderSettings();
-    if (view === 'terminal') renderTerminal();
     reapplyDynamicLayout();
   } finally {
     if (state.activeView === view) {
@@ -1903,58 +1954,50 @@ function animateCommandButton(button) {
 function renderPlugins() {
   const canManagePlugins = can(CAPABILITIES.PLUGINS_MANAGE, state.permissions.MANAGE_FILES);
   if (elements.pluginForm) elements.pluginForm.hidden = true;
-  elements.pluginAccessNote.hidden = canManagePlugins;
+  if (elements.pluginAccessNote) elements.pluginAccessNote.hidden = canManagePlugins;
   const server = activeServer();
   if (elements.pluginServerSelect) {
     elements.pluginServerSelect.innerHTML = state.servers.map((item) => `<option value="${item.id}" ${item.id === server?.id ? 'selected' : ''}>${escapeHtml(item.name)} (${escapeHtml(item.softwareName)})</option>`).join('') || '<option value="">Create a server first</option>';
   }
 
   if (!canManagePlugins) {
-    elements.pluginList.innerHTML = '<p class="empty-state">Plugin manager is locked until file access level 80.</p>';
+    if (elements.pluginList) elements.pluginList.innerHTML = '<p class="empty-state">Plugin manager is locked until file access level 80.</p>';
     return;
   }
 
   if (!server) {
-    elements.pluginList.innerHTML = '<p class="empty-state">Create a server to install plugins.</p>';
+    if (elements.pluginList) elements.pluginList.innerHTML = '<p class="empty-state">Create a server to install plugins.</p>';
     return;
   }
+  if (!elements.modrinthForm || !elements.modrinthGrid) return;
   const projectTypeSelect = elements.modrinthForm.querySelector('[name="projectType"]');
   const loaderSelect = elements.modrinthForm.querySelector('[name="loader"]');
+  const queryInput = elements.modrinthForm.querySelector('input[name="query"]');
 
   if (server.softwareKey === 'bedrock-vanilla') {
-    elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Bedrock packs: upload .mcpack or .mcaddon';
-    projectTypeSelect.innerHTML = '<option value="">Behavior / resource pack</option>';
-    projectTypeSelect.disabled = true;
-    loaderSelect.innerHTML = '<option value="">Bedrock</option>';
-    loaderSelect.disabled = true;
+    if (queryInput) queryInput.placeholder = 'Bedrock packs: upload .mcpack or .mcaddon';
+    if (projectTypeSelect) { projectTypeSelect.innerHTML = '<option value="">Behavior / resource pack</option>'; projectTypeSelect.disabled = true; }
+    if (loaderSelect) { loaderSelect.innerHTML = '<option value="">Bedrock</option>'; loaderSelect.disabled = true; }
     elements.modrinthGrid.innerHTML = '<p class="empty-state">Bedrock Dedicated Server supports resource and behavior packs, but automatic marketplace install needs manifest registration. Upload .mcpack or .mcaddon in File Manager for now.</p>';
   } else if (server.softwareKey === 'pocketmine') {
-    elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Poggit: PurePerms, ScoreHud, Worlds';
-    projectTypeSelect.innerHTML = '<option value="plugin">Plugin</option>';
-    projectTypeSelect.disabled = true;
-    loaderSelect.innerHTML = '<option value="pocketmine">PocketMine / Poggit</option>';
-    loaderSelect.disabled = true;
+    if (queryInput) queryInput.placeholder = 'Search Poggit: PurePerms, ScoreHud, Worlds';
+    if (projectTypeSelect) { projectTypeSelect.innerHTML = '<option value="plugin">Plugin</option>'; projectTypeSelect.disabled = true; }
+    if (loaderSelect) { loaderSelect.innerHTML = '<option value="pocketmine">PocketMine / Poggit</option>'; loaderSelect.disabled = true; }
     loadPluginMarketplace({ featured: true }).catch(() => {});
   } else if (['fabric', 'forge'].includes(server.softwareKey)) {
     const loaderName = server.softwareKey === 'fabric' ? 'Fabric' : 'Forge';
-    projectTypeSelect.innerHTML = '<option value="mod">Mod</option>';
-    projectTypeSelect.disabled = true;
-    loaderSelect.innerHTML = `<option value="${server.softwareKey}">${loaderName}</option>`;
-    loaderSelect.disabled = true;
-    elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Modrinth mods: Lithium, FerriteCore, Create';
+    if (projectTypeSelect) { projectTypeSelect.innerHTML = '<option value="mod">Mod</option>'; projectTypeSelect.disabled = true; }
+    if (loaderSelect) { loaderSelect.innerHTML = `<option value="${server.softwareKey}">${loaderName}</option>`; loaderSelect.disabled = true; }
+    if (queryInput) queryInput.placeholder = 'Search Modrinth mods: Lithium, FerriteCore, Create';
     loadPluginMarketplace({ featured: true }).catch(() => {});
   } else if (['paper', 'purpur'].includes(server.softwareKey)) {
-    projectTypeSelect.innerHTML = '<option value="plugin">Plugin</option>';
-    projectTypeSelect.disabled = true;
-    loaderSelect.innerHTML = '<option value="paper">Paper / Purpur / Spigot</option>';
-    loaderSelect.disabled = true;
-    elements.modrinthForm.querySelector('input[name="query"]').placeholder = 'Search Modrinth plugins: Geyser, LuckPerms, ViaVersion';
+    if (projectTypeSelect) { projectTypeSelect.innerHTML = '<option value="plugin">Plugin</option>'; projectTypeSelect.disabled = true; }
+    if (loaderSelect) { loaderSelect.innerHTML = '<option value="paper">Paper / Purpur / Spigot</option>'; loaderSelect.disabled = true; }
+    if (queryInput) queryInput.placeholder = 'Search Modrinth plugins: Geyser, LuckPerms, ViaVersion';
     loadPluginMarketplace({ featured: true }).catch(() => {});
   } else {
-    projectTypeSelect.innerHTML = '<option value="">Unavailable</option>';
-    loaderSelect.innerHTML = '<option value="">No compatible loader</option>';
-    projectTypeSelect.disabled = true;
-    loaderSelect.disabled = true;
+    if (projectTypeSelect) { projectTypeSelect.innerHTML = '<option value="">Unavailable</option>'; projectTypeSelect.disabled = true; }
+    if (loaderSelect) { loaderSelect.innerHTML = '<option value="">No compatible loader</option>'; loaderSelect.disabled = true; }
     elements.modrinthGrid.innerHTML = '<p class="empty-state">Select Paper/Purpur for plugins or Fabric/Forge for mods.</p>';
   }
 
@@ -1985,14 +2028,15 @@ function renderPlugins() {
 }
 
 function prepareConsoleShell(server) {
+  if (!elements.consoleBox) return;
   if (!server) {
     elements.consoleBox.innerHTML = '<div>[NexusPanel] Create a server to use console.</div>';
     if (elements.consoleMetrics) elements.consoleMetrics.innerHTML = '';
     return;
   }
   fillServerConfigForm(server);
-  elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
-  elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
+  if (elements.serverConfigForm) elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
+  if (elements.commandForm) elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
   syncConsoleActionButtons(server, server.status);
   const cached = state.consoleLineCache[server.id];
   if (cached?.length && elements.consoleBox.dataset.serverId !== String(server.id)) {
@@ -2006,6 +2050,7 @@ function prepareConsoleShell(server) {
 }
 
 function renderConsoleLines(lines, server) {
+  if (!elements.consoleBox) return;
   const consoleSignature = `${server?.id || 0}:${lines.length}:${lines.at(-1) || ''}`;
   if (elements.consoleBox.dataset.rendered === consoleSignature) return;
   elements.consoleBox.innerHTML = lines.map((line) => `<div>${escapeHtml(formatConsoleLine(line))}</div>`).join('');
@@ -2044,7 +2089,7 @@ function openConsoleStream(server) {
   stream.addEventListener('snapshot', (event) => {
     if (state.activeView !== 'console' || state.activeServerId !== server.id) return;
     state.consoleStreamReady = true;
-    const payload = JSON.parse(event.data || '{}');
+    const payload = safeJsonParse(event.data);
     const lines = Array.isArray(payload.lines) ? payload.lines : [];
     state.consoleLineCache[server.id] = lines;
     if (payload.status && server.status !== payload.status) {
@@ -2058,7 +2103,7 @@ function openConsoleStream(server) {
   stream.addEventListener('line', (event) => {
     if (state.activeView !== 'console' || state.activeServerId !== server.id) return;
     state.consoleStreamReady = true;
-    const payload = JSON.parse(event.data || '{}');
+    const payload = safeJsonParse(event.data);
     const line = payload.line;
     if (!line) return;
     const lines = state.consoleLineCache[server.id] || [];
@@ -2075,13 +2120,13 @@ function openConsoleStream(server) {
   });
   stream.addEventListener('ping', (event) => {
     if (state.activeView !== 'console' || state.activeServerId !== server.id) return;
-    const payload = JSON.parse(event.data || '{}');
+    const payload = safeJsonParse(event.data);
     if (payload.status) syncConsoleActionButtons(server, payload.status);
   });
   stream.addEventListener('metrics', (event) => {
     if (state.activeView !== 'console' || state.activeServerId !== server.id) return;
     state.consoleStreamReady = true;
-    const payload = JSON.parse(event.data || '{}');
+    const payload = safeJsonParse(event.data);
     if (payload.server?.status && server.status !== payload.server.status) {
       server.status = payload.server.status;
       renderStats();
@@ -2098,6 +2143,7 @@ function openConsoleStream(server) {
 
 async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
   const server = activeServer();
+  if (!elements.consoleBox) return;
   if (!server) {
     elements.consoleBox.innerHTML = '<div>[NexusPanel] Create a server to use console.</div>';
     if (elements.consoleMetrics) elements.consoleMetrics.innerHTML = '';
@@ -2120,8 +2166,8 @@ async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
     });
     if (renderToken !== consoleRenderToken || state.activeServerId !== serverId) return;
     if (elements.serverConfigForm?.dataset.dirty !== '1') fillServerConfigForm(server);
-    elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
-    elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
+    if (elements.serverConfigForm) elements.serverConfigForm.hidden = !can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
+    if (elements.commandForm) elements.commandForm.hidden = !can(CAPABILITIES.CONSOLE_COMMAND, state.permissions.SEND_COMMANDS);
     if (data.status && server.status !== data.status) {
       server.status = data.status;
       renderStats();
@@ -2253,6 +2299,7 @@ function renderConsoleMetrics(server, serverMetrics) {
     if (elements.consoleMetrics) elements.consoleMetrics.innerHTML = '';
     return;
   }
+  if (!server) return;
   const serverUsedBytes = Number(serverMetrics?.rssBytes ?? Number(serverMetrics?.rssMb || 0) * 1024 * 1024);
   const serverLimitBytes = Number(serverMetrics?.maxMemoryMb || 0) * 1024 * 1024;
   const serverRamPercent = serverLimitBytes ? Math.min(100, Math.round((serverUsedBytes / serverLimitBytes) * 100)) : 0;
@@ -2290,6 +2337,7 @@ function metricCard(label, value, percent, history, key) {
 
 async function renderProperties() {
   const server = activeServer();
+  if (!elements.propertyForm) return;
   if (!server) {
     elements.propertyForm.innerHTML = '<p class="empty-state">Create a server to edit properties.</p>';
     return;
@@ -2316,6 +2364,7 @@ function propertyControl(item, value = '') {
 
 async function renderWhitelist() {
   const server = activeServer();
+  if (!elements.whitelistList) return;
   if (!server) {
     elements.whitelistList.innerHTML = '<p class="empty-state">Create a server to manage whitelist.</p>';
     return;
@@ -2332,6 +2381,7 @@ async function renderWhitelist() {
 
 async function renderFiles() {
   const server = activeServer();
+  if (!elements.fileList) return;
   if (!server) {
     elements.fileList.innerHTML = '<p class="empty-state">Create a server to browse files.</p>';
     return;
@@ -2341,22 +2391,24 @@ async function renderFiles() {
     return null;
   });
   if (!data) return;
-  elements.filePathLabel.textContent = `/${data.path || ''}`;
+  if (elements.filePathLabel) elements.filePathLabel.textContent = `/${data.path || ''}`;
   if (data.type === 'file') {
     elements.fileList.innerHTML = '';
     if (data.editable) {
-      elements.filePreview.hidden = true;
-      elements.fileEditor.hidden = false;
-      elements.fileEditor.path.value = data.path;
-      elements.fileEditor.content.value = data.content;
+      if (elements.filePreview) elements.filePreview.hidden = true;
+      if (elements.fileEditor) {
+        elements.fileEditor.hidden = false;
+        elements.fileEditor.path.value = data.path;
+        elements.fileEditor.content.value = data.content;
+      }
     } else {
-      elements.fileEditor.hidden = true;
+      if (elements.fileEditor) elements.fileEditor.hidden = true;
       renderFilePreview(data, server);
     }
     return;
   }
-  elements.fileEditor.hidden = true;
-  elements.filePreview.hidden = true;
+  if (elements.fileEditor) elements.fileEditor.hidden = true;
+  if (elements.filePreview) elements.filePreview.hidden = true;
   elements.fileList.innerHTML = data.entries.map((entry) => `
     <div class="file-row">
       <label class="file-check"><input type="checkbox" class="file-pick" value="${escapeHtml(entry.path)}" data-file-type="${escapeHtml(entry.type)}"><span></span></label>
@@ -2381,6 +2433,7 @@ function fileTypeLabel(entry) {
 }
 
 function renderFilePreview(file, server) {
+  if (!elements.filePreview) return;
   const previewUrl = `/api/servers/${server.id}/files/preview?path=${encodeURIComponent(file.path)}`;
   const downloadUrl = `/api/servers/${server.id}/files/download?path=${encodeURIComponent(file.path)}`;
   let preview = '<p class="empty-state">Safe inline preview is not available for this format. Download it to open with its native application.</p>';
@@ -2402,23 +2455,6 @@ function applyFileManagerLayout() {
   if (elements.fileLayoutButton) elements.fileLayoutButton.textContent = `Layout: ${fileLayoutMode[0].toUpperCase()}${fileLayoutMode.slice(1)}`;
 }
 
-async function refreshOpenRouterModels(force = false) {
-  const select = document.querySelector('#openRouterModel');
-  const info = document.querySelector('#openRouterModelInfo');
-  if (!select) return;
-  select.innerHTML = '<option value="">Loading free models...</option>';
-  try {
-    const data = await api(`/api/advanced-ai/providers/openrouter/models?freeOnly=${document.querySelector('#openRouterFreeOnly')?.checked === false ? '0' : '1'}${force ? '&refresh=1' : ''}`, { timeoutMs: 20000, cacheTtlMs: 30000 });
-    const current = state.settings?.openRouter?.model || '';
-    select.innerHTML = `<option value="">Auto / MicroLM fallback</option>${(data.models || []).map((model) => `<option value="${escapeHtml(model.id)}" ${model.id === current ? 'selected' : ''}>${escapeHtml(model.name)} — ${model.free ? 'FREE' : 'paid'} · ${Math.round((model.contextLength || 0) / 1000)}K ctx${model.supportedParameters?.includes('tools') ? ' · tools' : ''}</option>`).join('')}`;
-    const selected = (data.models || []).find((model) => model.id === current);
-    if (info) info.textContent = selected ? `${selected.description || selected.name} | ${selected.supportedParameters?.includes('tools') ? 'tool calling supported' : 'text-only'} | ${selected.contextLength || 0} context` : `${data.count || 0} models available.`;
-  } catch (error) {
-    select.innerHTML = '<option value="">Unable to load catalog</option>';
-    if (info) info.textContent = error.message;
-  }
-}
-
 function renderSettings() {
   if (!elements.settingsPanel) return;
   const settings = state.settings || {};
@@ -2436,47 +2472,20 @@ function renderSettings() {
     <div class="section-head"><div><p class="eyebrow">Settings</p><h2>${canManageSettings ? 'Panel engine' : 'Account preferences'}</h2></div>${canManageSettings ? '<button type="button" data-action="run-panel-update">Update from GitHub</button>' : ''}</div>
     <form class="settings-form" id="settingsForm">
       ${canManageSettings ? `
-      <label class="switch"><input name="terminalEnabled" type="checkbox" ${settings.terminalEnabled ? 'checked' : ''}><span></span>Owner terminal row</label>
-      <label class="switch"><input name="nexusMarkEnabled" type="checkbox" ${settings.nexusMarkEnabled ? 'checked' : ''}><span></span>Nexus-Mark controls</label>
+      <label class="switch"><input name="asfEnabled" type="checkbox" ${settings.asfEnabled ? 'checked' : ''}><span></span>ASF kernel isolation controls</label>
       <div class="settings-group">
-        <strong>Nexus-Mark native kernel runtime</strong>
-        <p class="muted" id="nexusMarkDoctorStatus">${settings.nexusMarkNative?.available
-          ? `Active: ${escapeHtml(settings.nexusMarkNative.detail || 'native Landlock and seccomp runtime ready')}. Each server also receives cgroup CPU, RAM, swap, task, device, and namespace limits.`
-          : `Native runtime unavailable: ${escapeHtml(settings.nexusMarkNative?.reason || 'unsupported host')}. Linux keeps the systemd kernel-isolation fallback.`}</p>
-        <div class="row-actions"><button class="secondary" type="button" data-action="nexusmark-doctor">Run Kernel Doctor</button></div>
+        <strong>ASF — Advanced Sandbox Fabric (native kernel runtime)</strong>
+        <p class="muted" id="asfDoctorStatus">${settings.asfNative?.available
+          ? `Active: ${escapeHtml(settings.asfNative.detail || 'native Landlock and seccomp runtime ready')}. Each server also receives cgroup CPU, RAM, swap, task, device, and namespace limits.`
+          : `Native runtime unavailable: ${escapeHtml(settings.asfNative?.reason || 'unsupported host')}. Linux keeps the systemd kernel-isolation fallback.`}</p>
+        <div class="row-actions"><button class="secondary" type="button" data-action="asf-doctor">Run Kernel Doctor</button></div>
       </div>
-      <label class="switch"><input name="repairWebEnabled" type="checkbox" ${settings.repairWebEnabled ? 'checked' : ''}><span></span>Repair agent web research</label>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
-      <label>Panel version <input readonly value="${escapeHtml(settings.version || '3.0.0')}"></label>
+      <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.0.0')}"></label>
       <label>Visible servers before scrolling <input name="serverSwitcherVisibleCount" type="number" min="1" max="20" value="${Number(settings.serverSwitcherVisibleCount || 3)}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
-      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v3.0.0"></label>
+      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v1.0.0"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
-      <div class="settings-group">
-        <strong>Advanced AI reasoning</strong>
-        <p class="muted" id="advancedAiStatus">Optional local Qwen2.5-Coder 0.5B q4 ONNX planner. It reasons over diagnostics, files and runtime state, then proposes typed tools whose mutations require a time-limited owner unlock.</p>
-        <div class="row-actions">
-          <button class="secondary" type="button" data-action="advanced-ai-status">AI Status</button>
-          <button class="secondary" type="button" data-action="advanced-ai-install">Install Advanced AI</button>
-          <button class="secondary" type="button" data-action="advanced-ai-enable">Enable Advanced AI</button>
-          <button class="danger" type="button" data-action="advanced-ai-disable">Disable Advanced AI</button>
-        </div>
-      </div>
-      <div class="settings-group ai-provider-card">
-        <div class="section-head"><div><strong>OpenRouter AI Hub</strong><p class="muted">Connect a provider once, then browse the live model catalog and select any free model. API keys stay server-side and are never returned to the browser.</p></div><span class="pill ${settings.openRouter?.configured ? 'is-on' : ''}" id="openRouterState">${settings.openRouter?.configured ? 'Connected' : 'Not configured'}</span></div>
-        <label>OpenRouter API key <input id="openRouterKey" type="password" autocomplete="off" placeholder="${settings.openRouter?.configured ? 'Saved — paste a replacement to rotate' : 'sk-or-v1-...'}"></label>
-        <div class="row-actions">
-          <button class="secondary" type="button" data-action="openrouter-save">Save key</button>
-          <button class="secondary" type="button" data-action="openrouter-test">Test connection</button>
-          <button class="secondary" type="button" data-action="openrouter-refresh">Refresh free models</button>
-          <button class="danger" type="button" data-action="openrouter-remove">Remove key</button>
-        </div>
-        <div class="ai-model-picker">
-          <label>Preferred model <select id="openRouterModel" name="openRouterModel"><option value="">Loading model catalog...</option></select></label>
-          <label class="switch"><input id="openRouterFreeOnly" name="openRouterFreeOnly" type="checkbox" ${settings.openRouter?.freeOnly !== false ? 'checked' : ''}><span></span>Show/select free models only</label>
-          <p class="muted" id="openRouterModelInfo">The catalog is fetched from OpenRouter only when requested and cached for 10 minutes.</p>
-        </div>
-      </div>
       <div class="settings-group">
         <strong>World converter</strong>
         <p class="muted" id="worldConverterStatus">Converts the selected server world into a new opposite-edition server. It never deletes or overwrites the source server.</p>
@@ -2596,8 +2605,6 @@ function renderSettings() {
       </div>
     </details>
   `;
-
-  refreshOpenRouterModels(false).catch(() => {});
 }
 function updateSettingsLiveStatus() {
   if (state.activeView !== 'settings') return;
@@ -2692,71 +2699,9 @@ function startPlayitTerminalPolling() {
 }
 
 
-function renderTerminal() {
-  if (!elements.terminalPanel) return;
-  if (!state.settings?.terminalEnabled || state.user?.role !== 'owner') {
-    elements.terminalPanel.innerHTML = state.user?.role === 'owner'
-      ? '<div class="section-head"><div><p class="eyebrow">Owner Terminal</p><h2>Persistent VPS shell</h2></div><button type="button" data-action="terminal-enable">Enable Terminal</button></div><p class="empty-state">Terminal is owner-only and currently disabled. Enable it here or in Settings.</p>'
-      : '<p class="empty-state">No permission. Terminal is owner-only.</p>';
-    return;
-  }
-  elements.terminalPanel.innerHTML = `
-    <div class="section-head"><div><p class="eyebrow">Owner Terminal</p><h2>Persistent VPS shell</h2></div><button class="danger" type="button" data-action="terminal-close">Stop Terminal</button></div>
-    <form class="terminal-form" id="terminalUnlockForm" ${terminalSession.id ? 'hidden' : ''}>
-      <label>Owner password <input name="password" type="password" autocomplete="current-password" required></label>
-      <button type="submit">Unlock Terminal</button>
-    </form>
-    <pre class="terminal-output" id="terminalOutput">${terminalSession.id ? 'Connected. Waiting for shell output...' : 'Terminal locked. Owner password required.'}</pre>
-    <form class="terminal-form" id="terminalInputForm" ${terminalSession.id ? '' : 'hidden'}>
-      <label>Repair learning target <select name="serverId">
-        <option value="">Do not associate</option>
-        ${state.servers.map((server) => `<option value="${server.id}" ${server.id === state.activeServerId ? 'selected' : ''}>${escapeHtml(server.name)}</option>`).join('')}
-      </select></label>
-      <label>Input <input name="input" placeholder="systemctl status nexuspanel --no-pager" autocomplete="off"></label>
-      <button type="submit">Send</button>
-    </form>
-  `;
-  if (terminalSession.id) startTerminalPolling();
-}
-
-function appendTerminalOutput(text) {
-  const output = document.querySelector('#terminalOutput');
-  if (!output || !text) return;
-  output.textContent = `${output.textContent}${text}`.slice(-160000);
-  output.scrollTop = output.scrollHeight;
-}
-
-function startTerminalPolling() {
-  if (!terminalSession.id || terminalSession.timer) return;
-  terminalSession.timer = window.setInterval(async () => {
-    if (!terminalSession.id || state.activeView !== 'terminal') return;
-    try {
-      const data = await api(`/api/terminal/session/${encodeURIComponent(terminalSession.id)}/output?cursor=${terminalSession.cursor}`);
-      terminalSession.cursor = data.cursor;
-      appendTerminalOutput(data.output || '');
-      if (!data.active) {
-        window.clearInterval(terminalSession.timer);
-        terminalSession = { id: '', cursor: 0, timer: 0 };
-      }
-    } catch (error) {
-      appendTerminalOutput(`\n[NexusPanel] ${error.message}\n`);
-      window.clearInterval(terminalSession.timer);
-      terminalSession = { id: '', cursor: 0, timer: 0 };
-    }
-    }, 250);
-}
-
-async function closeTerminalSession() {
-  if (!terminalSession.id) return;
-  const id = terminalSession.id;
-  if (terminalSession.timer) window.clearInterval(terminalSession.timer);
-  terminalSession = { id: '', cursor: 0, timer: 0 };
-  await api(`/api/terminal/session/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
-  renderTerminal();
-}
-
 function renderBackups() {
   const server = activeServer();
+  if (!elements.backupPanel) return;
   if (!server) {
     elements.backupPanel.innerHTML = '<p class="empty-state">Create a server to manage backups.</p>';
     return;
@@ -2906,6 +2851,7 @@ function renderBackups() {
 
 async function renderOptimizer() {
   if (!can(CAPABILITIES.OPTIMIZER_MANAGE, state.permissions.MANAGE_SERVERS)) return;
+  if (!elements.optimizerSummary) return;
 
   try {
     const optimizer = state.optimizer || await api('/api/optimizer/status').catch(() => ({}));
@@ -2959,6 +2905,223 @@ async function renderNetwork(speed = null) {
   `;
 }
 
+/* ------------------------------------------------------------------ */
+/* Port allocations (Pterodactyl-style)                               */
+/* ------------------------------------------------------------------ */
+
+async function renderAllocations() {
+  if (!elements.allocationsPanel) return;
+  const server = activeServer();
+  const data = await api(`/api/network/allocations${server ? `?serverId=${server.id}` : ''}`).catch(() => ({ allocations: [] }));
+  const allocations = data.allocations || [];
+  elements.allocationsPanel.innerHTML = `
+    <div class="section-head"><div><p class="eyebrow">Allocations</p><h2>Port & IP assignments</h2></div></div>
+    <form class="settings-form" id="allocationForm">
+      <label>IP <input name="ip" value="127.0.0.1" required></label>
+      <label>Port <input name="port" type="number" min="1024" max="65535" required></label>
+      <label>Protocol <select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">Both</option></select></label>
+      <label>Label <input name="label" placeholder="Voice, plugin port..." maxlength="60"></label>
+      <button type="submit">Create allocation</button>
+    </form>
+    <div class="plugin-list">
+      ${allocations.map((allocation) => `
+        <div class="plugin-row" data-allocation-id="${allocation.id}">
+          <div>
+            <strong>${escapeHtml(allocation.ip)}:${allocation.port}</strong>
+            <div class="muted">${escapeHtml(allocation.protocol.toUpperCase())}${allocation.label ? ` · ${escapeHtml(allocation.label)}` : ''}${allocation.serverId ? ` · server #${allocation.serverId}` : ' · unassigned'}</div>
+          </div>
+          <div class="row-actions">
+            <button class="secondary" type="button" data-action="probe-allocation" data-allocation-id="${allocation.id}">Probe</button>
+            <button class="danger" type="button" data-action="delete-allocation" data-allocation-id="${allocation.id}">Delete</button>
+          </div>
+        </div>
+      `).join('') || '<p class="empty-state">No allocations yet. Create one above.</p>'}
+    </div>
+  `;
+}
+
+/* ------------------------------------------------------------------ */
+/* Database connections (Pterodactyl-style)                            */
+/* ------------------------------------------------------------------ */
+
+async function renderDatabases() {
+  if (!elements.databasesPanel) return;
+  const server = activeServer();
+  const data = await api(`/api/databases${server ? `?serverId=${server.id}` : ''}`).catch(() => ({ connections: [] }));
+  const connections = data.connections || [];
+  elements.databasesPanel.innerHTML = `
+    <div class="section-head"><div><p class="eyebrow">Databases</p><h2>External connections</h2></div></div>
+    <form class="settings-form" id="databaseForm">
+      <label>Name <input name="name" placeholder="Main MySQL" required minlength="2" maxlength="80"></label>
+      <label>Driver <select name="driver"><option value="mysql">MySQL / MariaDB</option><option value="postgres">PostgreSQL</option></select></label>
+      <label>Host <input name="host" placeholder="127.0.0.1" required maxlength="200"></label>
+      <label>Port <input name="port" type="number" min="1" max="65535" value="3306" required></label>
+      <label>Username <input name="username" required maxlength="80"></label>
+      <label>Password <input name="password" type="password" autocomplete="new-password" maxlength="200"></label>
+      <label>Database <input name="database" placeholder="minecraft_main" required maxlength="80"></label>
+      <button type="submit">Create connection</button>
+    </form>
+    <p class="muted">Passwords are encrypted at rest (AES-256-GCM) and never returned by the API.</p>
+    <div class="plugin-list">
+      ${connections.map((connection) => `
+        <div class="plugin-row" data-connection-id="${connection.id}">
+          <div>
+            <strong>${escapeHtml(connection.name)}</strong>
+            <div class="muted">${escapeHtml(connection.driver)} · ${escapeHtml(connection.host)}:${connection.port} / ${escapeHtml(connection.database)} · user ${escapeHtml(connection.username)}</div>
+          </div>
+          <div class="row-actions">
+            <button class="secondary" type="button" data-action="test-connection" data-connection-id="${connection.id}">Test</button>
+            <button class="danger" type="button" data-action="delete-connection" data-connection-id="${connection.id}">Delete</button>
+          </div>
+        </div>
+      `).join('') || '<p class="empty-state">No database connections yet.</p>'}
+    </div>
+  `;
+}
+
+/* ------------------------------------------------------------------ */
+/* Tebex rank giving + live payment console                            */
+/* ------------------------------------------------------------------ */
+
+let tebexPaymentStream = null;
+
+function closeTebexStream() {
+  if (tebexPaymentStream) {
+    tebexPaymentStream.close();
+    tebexPaymentStream = null;
+  }
+}
+
+function appendTebexPayment(payment) {
+  const feed = document.querySelector('#tebexPaymentFeed');
+  if (!feed) return;
+  const row = document.createElement('div');
+  row.className = 'plugin-row tebex-payment-row';
+  const amount = (Number(payment.priceCents || 0) / 100).toFixed(2);
+  row.innerHTML = `
+    <div>
+      <strong>${escapeHtml(payment.username || 'Unknown player')}</strong>
+      <div class="muted">${escapeHtml(payment.packageName || 'Package')} · ${escapeHtml(payment.rank ? `rank ${payment.rank}` : 'no rank')}${payment.uuid ? ` · ${escapeHtml(payment.uuid)}` : ''}</div>
+    </div>
+    <div class="row-actions">
+      <span class="badge is-on">${escapeHtml(amount)} ${escapeHtml(payment.currency || 'USD')}</span>
+      <span class="muted">${escapeHtml(formatPanelDate(payment.at || payment.created_at || Date.now()))}</span>
+    </div>
+  `;
+  feed.prepend(row);
+  while (feed.children.length > 100) feed.lastChild.remove();
+}
+
+async function renderTebex() {
+  if (!elements.tebexPanel) return;
+  const server = activeServer();
+  if (!server) {
+    elements.tebexPanel.innerHTML = '<p class="empty-state">Create a server to configure Tebex rank giving.</p>';
+    return;
+  }
+  const data = await api(`/api/servers/${server.id}/tebex`).catch((error) => ({ tebex: null, error: error.message }));
+  const tebex = data.tebex;
+  if (!tebex) {
+    elements.tebexPanel.innerHTML = `<p class="empty-state">${escapeHtml(data.error || 'Could not load Tebex status.')}</p>`;
+    return;
+  }
+  closeTebexStream();
+  elements.tebexPanel.innerHTML = `
+    <div class="section-head"><div><p class="eyebrow">Tebex</p><h2>Rank giving via payments</h2></div>${tebex.configured ? '<button class="danger" type="button" data-action="tebex-remove">Remove integration</button>' : ''}</div>
+    ${tebex.configured ? `
+      <div class="quick-stats">
+        <article><span>Webstore</span><strong>${escapeHtml(tebex.webstoreId || '—')}</strong></article>
+        <article><span>Packages</span><strong>${tebex.packages.length}</strong></article>
+        <article><span>Payments</span><strong>${tebex.payments.length}</strong></article>
+        <article><span>Last check</span><strong>${tebex.lastCheckOk ? 'OK' : 'Failed'}</strong></article>
+      </div>
+      <p class="muted">Webhook URL — paste this into your Tebex webstore → Developer → Webhooks:</p>
+      <p><code class="tebex-webhook-url">${escapeHtml(tebex.webhookUrl || `${location.origin}/api/tebex/webhook/${server.id}`)}</code></p>
+      <p class="muted">Using a separate store website (own domain, Tebex hosted store, or another server)? Any of them can deliver to this webhook URL — the panel only verifies the signature, not the source. Copy the URL above into that store's webhook settings.</p>
+    ` : `
+      <form class="settings-form" id="tebexSetupForm">
+        <label>Game server secret <input name="webstoreSecret" type="password" autocomplete="off" placeholder="Tebex → Game Servers" required minlength="8" maxlength="128"></label>
+        <label>Webhook signing secret <input name="webhookSecret" type="password" autocomplete="off" placeholder="Tebex → Developers → Webhooks → endpoint" required minlength="8" maxlength="256"></label>
+        <button type="submit">Auto-configure Tebex</button>
+      </form>
+      <p class="muted">Use the Game Server secret for Tebex API access and the separate Webhook signing secret shown in your Tebex webhook endpoint. The panel syncs packages, generates rank commands, and writes the plugin config automatically.</p>
+    `}
+    ${tebex.configured && !tebex.webhookConfigured ? `
+      <form class="settings-form" id="tebexWebhookSecretForm">
+        <label>Webhook signing secret <input name="webhookSecret" type="password" autocomplete="off" placeholder="Tebex → Developers → Webhooks → endpoint" required minlength="8" maxlength="256"></label>
+        <button type="submit">Save webhook signing secret</button>
+      </form>
+      <p class="muted">The existing integration is missing the separate webhook signing secret. Tebex uses this secret to authenticate payment notifications.</p>
+    ` : ''}
+    ${tebex.configured && tebex.webhookConfigured ? '<p class="muted">Tebex webhook signing secret is configured.</p>' : ''}
+    ${tebex.configured && tebex.packages.length ? `
+      <h3>Packages & ranks</h3>
+      <div class="plugin-list">
+        ${tebex.packages.map((pkg) => {
+          const command = tebex.commands.find((item) => item.package_id === pkg.id);
+          return `
+          <div class="plugin-row" data-package-id="${pkg.id}">
+            <div>
+              <strong>${escapeHtml(pkg.name)}</strong>
+              <div class="muted">${(pkg.price_cents / 100).toFixed(2)} ${escapeHtml(pkg.currency)} · rank <code>${escapeHtml(pkg.rank)}</code></div>
+            </div>
+            <div class="row-actions">
+              <input type="text" data-rank-input value="${escapeHtml(pkg.rank)}" maxlength="32" placeholder="rank">
+              <button class="secondary" type="button" data-action="tebex-set-rank" data-package-id="${pkg.id}">Set rank</button>
+            </div>
+          </div>
+          <div class="plugin-row" data-package-id="${pkg.id}">
+            <div class="muted">Command: <code>{username}</code> and <code>{rank}</code> placeholders are supported.</div>
+            <div class="row-actions">
+              <input type="text" data-command-input value="${escapeHtml(command?.command || '')}" maxlength="300" placeholder="lp user {username} parent set {rank}">
+              <button class="secondary" type="button" data-action="tebex-set-command" data-package-id="${pkg.id}">Save command</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    ` : ''}
+    ${tebex.configured ? `
+      <h3>Live payment console</h3>
+      <p class="muted">Read-only stream of payments as Tebex confirms them. Player name, package, rank, and amount appear the moment a purchase lands.</p>
+      <div class="console-box tebex-console" id="tebexPaymentFeed"></div>
+    ` : ''}
+  `;
+  if (tebex.configured) {
+    // Seed the feed with recent history, then open the live stream.
+    const feed = document.querySelector('#tebexPaymentFeed');
+    if (feed) {
+      for (const payment of [...tebex.payments].reverse()) {
+        appendTebexPayment({
+          ...payment,
+          packageName: tebex.packages.find((pkg) => pkg.id === payment.package_id)?.name || 'Package',
+          rank: tebex.packages.find((pkg) => pkg.id === payment.package_id)?.rank || '',
+          at: payment.created_at,
+        });
+      }
+      if (!tebex.payments.length) feed.innerHTML = '<p class="empty-state">No payments yet. Purchases appear here live.</p>';
+    }
+    if (typeof EventSource === 'function') {
+      tebexPaymentStream = new EventSource(`/api/servers/${server.id}/tebex/payments/stream`);
+      tebexPaymentStream.addEventListener('snapshot', (event) => {
+        const payload = safeJsonParse(event.data);
+        if (Array.isArray(payload.payments) && payload.payments.length) {
+          const feedNode = document.querySelector('#tebexPaymentFeed');
+          if (feedNode) feedNode.innerHTML = '';
+          for (const payment of [...payload.payments].reverse()) appendTebexPayment(payment);
+        }
+      });
+      tebexPaymentStream.addEventListener('payment', (event) => {
+        const payload = safeJsonParse(event.data);
+        const feedNode = document.querySelector('#tebexPaymentFeed');
+        if (feedNode?.querySelector('.empty-state')) feedNode.innerHTML = '';
+        appendTebexPayment(payload);
+        showToast(`${payload.username || 'A player'} purchased ${payload.packageName || 'a package'}.`);
+      });
+      tebexPaymentStream.onerror = () => {};
+    }
+  }
+}
+
 function renderAdmins() {
   if (elements.adminServerAssign) {
     const selected = elements.adminServerAssign.value;
@@ -2969,8 +3132,9 @@ function renderAdmins() {
       elements.adminServerAssign.value = selected;
     }
   }
-  elements.adminPanel.hidden = !can(CAPABILITIES.ADMINS_MANAGE, state.permissions.MANAGE_ADMINS);
+  if (elements.adminPanel) elements.adminPanel.hidden = !can(CAPABILITIES.ADMINS_MANAGE, state.permissions.MANAGE_ADMINS);
   if (!can(CAPABILITIES.ADMINS_MANAGE, state.permissions.MANAGE_ADMINS)) return;
+  if (!elements.userList) return;
 
   if (!state.users || state.users.length === 0) {
     elements.userList.innerHTML = '<p class="empty-state">No admin users yet.</p>';
@@ -3007,17 +3171,14 @@ async function renderFixed() {
     `;
     return;
   }
-  const [data, agentData] = await Promise.all([
+  const [data] = await Promise.all([
     api('/api/fixed/logs').catch((error) => ({
       error: error.message,
       logs: [],
       retentionDays: 1,
       consoleLogPolicy: {},
     })),
-    api('/api/repair/agent/status').catch(() => ({ agent: state.repairBrain?.agent || { terminal: {} } })),
   ]);
-  const agent = agentData.agent || {};
-  const terminal = agent.terminal || {};
   const policy = data.consoleLogPolicy || {};
   elements.fixedPanel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Fixed</p><h2>Repair and action history</h2></div><button class="secondary" type="button" data-action="refresh-fixed">Refresh</button></div>
@@ -3026,27 +3187,6 @@ async function renderFixed() {
       <article><span>Console memory cap</span><strong>${Number(policy.memoryLinesPerServer || 600)} lines</strong></article>
       <article><span>Disk log rotation</span><strong>${formatBytes(Number(policy.diskRotateBytes || 4 * 1024 * 1024))}</strong></article>
       <article><span>Lag risk</span><strong>${escapeHtml(policy.lagRisk || 'low')}</strong></article>
-      <article><span>Owner shell queue</span><strong>${terminal.fullAccessEnabled ? 'Unlocked' : 'Locked'}</strong></article>
-      <article><span>Live diagnostics</span><strong>${terminal.liveEnabled ? 'On' : 'Off'}</strong></article>
-      <article><span>Pending commands</span><strong>${Number(terminal.pendingFullAccessCommands || 0)}</strong></article>
-    </div>
-    ${state.user?.role === 'owner' ? `<div class="backup-settings">
-      <button class="${terminal.fullAccessEnabled ? 'danger' : 'secondary'}" type="button" data-action="${terminal.fullAccessEnabled ? 'agent-full-access-lock' : 'agent-full-access-unlock'}">${terminal.fullAccessEnabled ? 'Lock owner shell' : 'Unlock owner shell'}</button>
-      <button class="secondary" type="button" data-action="${terminal.liveEnabled ? 'agent-live-disable' : 'agent-live-enable'}">${terminal.liveEnabled ? 'Disable live diagnostics' : 'Enable live diagnostics'}</button>
-      <button class="secondary" type="button" data-action="agent-queue-command">Queue Command</button>
-    </div>` : ''}
-    <h3>Owner shell queue</h3>
-    <div class="plugin-list">
-      ${(terminal.commandQueue || []).map((item) => `
-        <div class="plugin-row">
-          <div>
-            <strong>${escapeHtml(item.commandPreview || 'command')}</strong>
-            <div class="muted">${escapeHtml(item.serverName || 'Panel')} &middot; ${escapeHtml(item.purpose || '')} &middot; ${escapeHtml(item.risk || 'high')} &middot; ${escapeHtml(item.status || '')}${item.exitCode == null ? '' : ` &middot; exit ${item.exitCode}`}</div>
-            ${item.outputPreview ? `<div class="muted">${escapeHtml(item.outputPreview).slice(-420)}</div>` : ''}
-          </div>
-          <div class="row-actions">${item.status === 'pending' && state.user?.role === 'owner' ? `<button class="danger" type="button" data-action="agent-command-approve" data-command-id="${item.id}">Approve & Run</button>` : ''}</div>
-        </div>
-      `).join('') || '<p class="empty-state">No full access commands queued.</p>'}
     </div>
     <h3>Last 24 hours</h3>
     <div class="plugin-list">
@@ -3116,11 +3256,11 @@ async function renderSecurity(forceHealth = false) {
         ${checks.map((check) => `<article class="${check.ok ? 'is-ok' : 'is-bad'}"><strong>${escapeHtml(check.name)}</strong><span>${escapeHtml(check.message)}</span></article>`).join('') || '<p class="empty-state">Run a health check to verify panel folders, database, software, and Java.</p>'}
       </div>
       <div class="settings-group advanced-ops-card">
-        <div class="section-head"><div><p class="eyebrow">Nexus Intelligence</p><h3>Live operational picture</h3></div><span class="pill">${escapeHtml(String(advanced?.health?.length || 0))} servers</span></div>
+        <div class="section-head"><div><p class="eyebrow">Server Health</p><h3>Live operational picture</h3></div><span class="pill">${escapeHtml(String(advanced?.health?.length || 0))} servers</span></div>
         <div class="health-grid">
           ${(advanced?.health || []).map((item) => `<article class="${item.health.score >= 85 ? 'is-ok' : 'is-bad'}"><strong>${escapeHtml(item.server.name)}</strong><span>Health ${item.health.score}/100 · ${escapeHtml(item.health.risk)} risk · ${Math.round(item.health.confidence * 100)}% confidence</span></article>`).join('') || '<p class="empty-state">No server telemetry available yet.</p>'}
         </div>
-        <p class="muted">The lightweight health engine runs locally; larger AI models are only used when deeper reasoning is required.</p>
+        <p class="muted">Health is computed locally from live CPU, memory, and error signals.</p>
       </div>
     `;
   }
@@ -3253,8 +3393,6 @@ async function refresh({ keepView = true } = {}) {
     state.settings = overview.settings || null;
     state.loginEvents = overview.loginEvents || [];
     state.health = overview.health || null;
-    state.adaptiveInsights = overview.adaptiveInsights || [];
-    state.repairBrain = overview.repairBrain || null;
 
     if (state.activeServerId && !state.servers.some((server) => server.id === state.activeServerId)) {
       state.activeServerId = null;
@@ -3407,6 +3545,19 @@ function escapeHtml(value) {
   return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#039;');
 }
 
+/**
+ * Parse JSON without ever throwing. Used for SSE payloads and any untrusted
+ * string so a single malformed frame cannot break a live stream or renderer.
+ */
+function safeJsonParse(value, fallback = {}) {
+  try {
+    const parsed = JSON.parse(value || '');
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function copyText(value) {
   if (navigator.clipboard?.writeText) {
     try {
@@ -3537,14 +3688,37 @@ function startRefreshLoop() {
 
 elements.loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  const submitButton = elements.loginForm.querySelector('button[type="submit"]');
+  if (elements.loginError) {
+    elements.loginError.textContent = '';
+    elements.loginError.hidden = true;
+  }
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.textContent = 'Logging in...';
+  }
   try {
     await api('/api/login', { method: 'POST', body: JSON.stringify(formData(elements.loginForm)) });
     showToast('Logged in.');
     await refresh({ keepView: false });
     startRefreshLoop();
   } catch (error) {
-    showToast(error.message);
+    if (elements.loginError) {
+      elements.loginError.textContent = error.message || 'Login failed. Please try again.';
+      elements.loginError.hidden = false;
+    }
+  } finally {
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.textContent = 'Login';
+    }
   }
+});
+
+elements.loginForm.addEventListener('input', () => {
+  if (!elements.loginError || elements.loginError.hidden) return;
+  elements.loginError.textContent = '';
+  elements.loginError.hidden = true;
 });
 
 elements.serverForm.addEventListener('submit', async (event) => {
@@ -3820,41 +3994,6 @@ document.addEventListener('submit', (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
-  if (event.target.id !== 'terminalUnlockForm') return;
-  event.preventDefault();
-  const output = document.querySelector('#terminalOutput');
-  if (output) output.textContent = 'Opening shell...\n';
-  try {
-    const result = await api('/api/terminal/session', { method: 'POST', body: JSON.stringify(formData(event.target)) });
-    terminalSession = { id: result.session.id, cursor: 0, timer: 0 };
-    renderTerminal();
-    startTerminalPolling();
-  } catch (error) {
-    if (output) output.textContent = error.message;
-    showToast(error.message);
-  }
-});
-
-document.addEventListener('submit', async (event) => {
-  if (event.target.id !== 'terminalInputForm') return;
-  event.preventDefault();
-  const input = event.target.input.value;
-  if (!terminalSession.id || !input.trim()) return;
-  event.target.input.value = '';
-  appendTerminalOutput(`\n$ ${input}\n`);
-  try {
-    const result = await api(`/api/terminal/session/${encodeURIComponent(terminalSession.id)}/input`, {
-      method: 'POST',
-      body: JSON.stringify({ input, serverId: event.target.serverId.value }),
-    });
-    if (result.learning) showToast('Repair learner is observing this command and its outcome.');
-  } catch (error) {
-    appendTerminalOutput(`\n[NexusPanel] ${error.message}\n`);
-    showToast(error.message);
-  }
-});
-
-document.addEventListener('submit', async (event) => {
   if (event.target.id !== 'backupSettingsForm') return;
   event.preventDefault();
   const server = activeServer();
@@ -3868,6 +4007,69 @@ document.addEventListener('submit', async (event) => {
     await refresh();
   } catch (error) {
     showToast(error.message);
+  }
+});
+
+document.addEventListener('submit', async (event) => {
+  if (event.target.id !== 'allocationForm') return;
+  event.preventDefault();
+  const server = activeServer();
+  const payload = formData(event.target);
+  payload.port = Number(payload.port);
+  if (server) payload.serverId = server.id;
+  try {
+    await api('/api/network/allocations', { method: 'POST', body: JSON.stringify(payload) });
+    showToast('Allocation created.');
+    await renderAllocations();
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+document.addEventListener('submit', async (event) => {
+  if (event.target.id !== 'databaseForm') return;
+  event.preventDefault();
+  const server = activeServer();
+  const payload = formData(event.target);
+  payload.port = Number(payload.port);
+  if (server) payload.serverId = server.id;
+  try {
+    await api('/api/databases', { method: 'POST', body: JSON.stringify(payload) });
+    showToast('Database connection created.');
+    await renderDatabases();
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+document.addEventListener('submit', async (event) => {
+  if (!['tebexSetupForm', 'tebexWebhookSecretForm'].includes(event.target.id)) return;
+  event.preventDefault();
+  const server = activeServer();
+  if (!server) return showToast('Create a server first.');
+  const payload = formData(event.target);
+  const button = event.target.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    if (event.target.id === 'tebexWebhookSecretForm') {
+      await api(`/api/servers/${server.id}/tebex/webhook-secret`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      showToast('Tebex webhook signing secret saved.');
+      await renderTebex();
+      return;
+    }
+    const result = await api(`/api/servers/${server.id}/tebex/auto-config`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: 30000,
+    });
+    showToast(`Tebex configured: ${result.autoConfig.packages} package(s) synced.`);
+    await renderTebex();
+  } catch (error) {
+    showToast(error.message);
+    if (button) button.disabled = false;
   }
 });
 
@@ -4245,6 +4447,16 @@ elements.adminForm.addEventListener('submit', async (event) => {
   }
 });
 
+// Duration fields only apply to Temporary accounts; hide them for Permanent.
+if (elements.adminForm?.adminDurationMode) {
+  const durationField = elements.adminForm.querySelector('.admin-field-duration');
+  const syncDurationVisibility = () => {
+    if (durationField) durationField.hidden = elements.adminForm.adminDurationMode.value !== 'temporary';
+  };
+  elements.adminForm.adminDurationMode.addEventListener('change', syncDurationVisibility);
+  syncDurationVisibility();
+}
+
 document.addEventListener('click', async (event) => {
   const actionTarget = event.target.closest('[data-action]');
   const viewTarget = event.target.closest('[data-view]');
@@ -4390,91 +4602,26 @@ document.addEventListener('click', async (event) => {
       }
       return;
     }
-    if (action === 'terminal-enable') {
-      await api('/api/settings', {
-        method: 'PUT',
-        body: JSON.stringify({ ...state.settings, terminalEnabled: true }),
-      });
-      showToast('Terminal enabled.');
-      await refresh();
-      return setView('terminal');
-    }
-    if (action === 'nexusmark-doctor') {
-      const statusNode = document.querySelector('#nexusMarkDoctorStatus');
+    if (action === 'asf-doctor') {
+      const statusNode = document.querySelector('#asfDoctorStatus');
       try {
         if (statusNode) statusNode.textContent = 'Testing native runtime, cgroup controllers, and compatible systemd policies...';
-        const data = await api('/api/settings/nexusmark/doctor', { method: 'POST', timeoutMs: 60000 });
-        const mark = data.nexusMark || {};
-        const native = mark.native || {};
-        const systemdSummary = mark.systemdActive
-          ? (mark.systemdVersion ? `active v${mark.systemdVersion}` : 'active, runner restricted')
+        const data = await api('/api/settings/asf/doctor', { method: 'POST', timeoutMs: 60000 });
+        const asf = data.asf || {};
+        const native = asf.native || {};
+        const systemdSummary = asf.systemdActive
+          ? (asf.systemdVersion ? `active v${asf.systemdVersion}` : 'active, runner restricted')
           : 'not active';
-        const summary = `Tier ${mark.tier || 'unknown'} | native ${native.available ? `ready, ABI ${native.landlockAbi || '?'}` : native.reason || 'unavailable'} | cgroup v2 ${mark.cgroupV2 ? 'active' : 'fallback'} | systemd ${systemdSummary} | preflight ${mark.preflightPassed ? 'passed' : 'native fallback'}`;
+        const summary = `Tier ${asf.tier || 'unknown'} | native ${native.available ? `ready, ABI ${native.landlockAbi || '?'}` : native.reason || 'unavailable'} | cgroup v2 ${asf.cgroupV2 ? 'active' : 'fallback'} | systemd ${systemdSummary} | preflight ${asf.preflightPassed ? 'passed' : 'native fallback'}`;
         if (statusNode) statusNode.textContent = summary;
-        showToast('Nexus-Mark kernel doctor completed.');
+        showToast('ASF kernel doctor completed.');
       } catch (error) {
         if (statusNode) statusNode.textContent = error.message;
         showToast(error.message);
       }
       return;
     }
-    if (action === 'openrouter-save') {
-      try {
-        const key = String(document.querySelector('#openRouterKey')?.value || '').trim();
-        if (!key) return showToast('Enter an OpenRouter API key first.');
-        const data = await api('/api/advanced-ai/providers/openrouter/key', { method: 'POST', body: JSON.stringify({ apiKey: key }) });
-        state.settings.openRouter = data.provider;
-        const selected = document.querySelector('#openRouterModel')?.value || '';
-        await api('/api/advanced-ai/providers/openrouter', { method: 'PUT', body: JSON.stringify({ model: selected, freeOnly: document.querySelector('#openRouterFreeOnly')?.checked !== false }) });
-        showToast('OpenRouter key saved securely on the server.');
-        await refresh();
-      } catch (error) { showToast(error.message); }
-      return;
-    }
-    if (action === 'openrouter-test') {
-      try {
-        const data = await api('/api/advanced-ai/providers/openrouter/test', { method: 'POST', timeoutMs: 25000 });
-        showToast(`OpenRouter connected. ${data.test?.count || 0} models available.`);
-      } catch (error) { showToast(error.message); }
-      return;
-    }
-    if (action === 'openrouter-refresh') {
-      await refreshOpenRouterModels(true);
-      return;
-    }
-    if (action === 'openrouter-remove') {
-      try {
-        await api('/api/advanced-ai/providers/openrouter/key', { method: 'DELETE' });
-        showToast('OpenRouter key removed.');
-        await refresh();
-      } catch (error) { showToast(error.message); }
-      return;
-    }
-    if (action === 'advanced-ai-status' || action === 'advanced-ai-install' || action === 'advanced-ai-enable' || action === 'advanced-ai-disable') {
-      const status = document.querySelector('#advancedAiStatus');
-      try {
-        if (status) status.textContent = action === 'advanced-ai-install' ? 'Installing advanced AI. This can take several minutes on first download...' : 'Checking advanced AI...';
-        const endpoint = action === 'advanced-ai-install'
-          ? '/api/advanced-ai/install'
-          : action === 'advanced-ai-enable' || action === 'advanced-ai-disable'
-            ? '/api/advanced-ai/enabled'
-            : '/api/advanced-ai/status';
-        const data = await api(endpoint, {
-          method: action === 'advanced-ai-status' ? 'GET' : 'POST',
-          body: action === 'advanced-ai-enable' || action === 'advanced-ai-disable'
-            ? JSON.stringify({ enabled: action === 'advanced-ai-enable' })
-            : undefined,
-          timeoutMs: action === 'advanced-ai-install' ? 0 : 15000,
-        });
-        const ai = data.advancedAi || {};
-        if (status) status.textContent = `${ai.enabled ? 'Enabled' : 'Disabled'} | package ${ai.packageInstalled ? 'installed' : 'missing'} | ${ai.modelTask || 'model'} | ${ai.modelId || 'unknown'} | estimated download ${ai.estimatedDownloadMb || 0} MB`;
-        showToast('Advanced AI status updated.');
-      } catch (error) {
-        if (status) status.textContent = error.message;
-        showToast(error.message);
-      }
-      return;
-    }
+    // OpenRouter / advanced-AI actions were removed in 1.0.0.
     if (action === 'world-converter-status' || action === 'world-converter-install' || action === 'convert-world-java' || action === 'convert-world-bedrock') {
       const status = document.querySelector('#worldConverterStatus');
       try {
@@ -4514,63 +4661,89 @@ document.addEventListener('click', async (event) => {
       showToast('Fixed history refreshed.');
       return;
     }
-    if (action === 'agent-full-access-unlock') {
-      const password = prompt('Owner password to unlock AI full access for 15 minutes:');
-      if (!password) return;
-      await api('/api/repair/agent/full-access', {
-        method: 'POST',
-        body: JSON.stringify({ enabled: true, minutes: 15, password }),
-      });
-      showToast('AI full access unlocked for 15 minutes.');
-      await refresh();
-      return renderFixed();
+    if (action === 'probe-allocation') {
+      const id = actionTarget.dataset.allocationId;
+      try {
+        const data = await api(`/api/network/allocations/${encodeURIComponent(id)}/probe`, { method: 'POST', timeoutMs: 10000 });
+        const probe = data.probe || {};
+        showToast(probe.note || (probe.listening ? 'Port is in use (a service is listening).' : `Port check: ${probe.detail || 'free'}`));
+      } catch (error) { showToast(error.message); }
+      return;
     }
-    if (action === 'agent-full-access-lock') {
-      await api('/api/repair/agent/full-access', {
-        method: 'POST',
-        body: JSON.stringify({ enabled: false, minutes: 1, password: prompt('Owner password to lock AI full access:') || '' }),
-      });
-      showToast('AI full access locked.');
-      await refresh();
-      return renderFixed();
+    if (action === 'delete-allocation') {
+      const id = actionTarget.dataset.allocationId;
+      if (!confirm('Delete this port allocation?')) return;
+      try {
+        await api(`/api/network/allocations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        showToast('Allocation deleted.');
+        await renderAllocations();
+      } catch (error) { showToast(error.message); }
+      return;
     }
-    if (action === 'agent-live-enable' || action === 'agent-live-disable') {
-      const enabled = action === 'agent-live-enable';
-      if (enabled && !confirm('Enable live diagnostics? It will scan console/files during adaptive maintenance, run safe offline fixes, and queue high-risk commands for owner approval.')) return;
-      await api('/api/repair/agent/live', {
-        method: 'POST',
-        body: JSON.stringify({ enabled }),
-      });
-      showToast(enabled ? 'Live diagnostics enabled.' : 'Live diagnostics disabled.');
-      await refresh();
-      return renderFixed();
+    if (action === 'test-connection') {
+      const id = actionTarget.dataset.connectionId;
+      actionTarget.disabled = true;
+      try {
+        const data = await api(`/api/databases/${encodeURIComponent(id)}/test`, { method: 'POST', timeoutMs: 10000 });
+        const test = data.test || {};
+        showToast(test.ok ? `Connected in ${test.latencyMs} ms.` : `Connection failed: ${test.detail}`);
+      } catch (error) { showToast(error.message); }
+      actionTarget.disabled = false;
+      return;
     }
-    if (action === 'agent-queue-command') {
-      const command = prompt('Command to queue for owner-approved full access execution:');
-      if (!command) return;
-      const purpose = prompt('Purpose for this command:', 'owner-requested') || 'owner-requested';
-      await api('/api/repair/agent/commands', {
-        method: 'POST',
-        body: JSON.stringify({ serverId: state.activeServerId || null, command, purpose, risk: 'owner-approved' }),
-      });
-      showToast('Command queued.');
-      await refresh();
-      return renderFixed();
+    if (action === 'delete-connection') {
+      const id = actionTarget.dataset.connectionId;
+      if (!confirm('Delete this database connection?')) return;
+      try {
+        await api(`/api/databases/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        showToast('Connection deleted.');
+        await renderDatabases();
+      } catch (error) { showToast(error.message); }
+      return;
     }
-    if (action === 'agent-command-approve') {
-      const id = actionTarget.dataset.commandId;
-      if (!id) return;
-      if (!confirm('Approve and run this full access command now?')) return;
-      const password = prompt('Owner password to run queued command:');
-      if (!password) return;
-      const result = await api(`/api/repair/agent/commands/${encodeURIComponent(id)}/approve`, {
-        method: 'POST',
-        body: JSON.stringify({ password, timeoutMs: 30000 }),
-      });
-      showToast(result.ok ? 'Full access command completed.' : 'Full access command failed.');
-      await refresh();
-      return renderFixed();
+    if (action === 'tebex-set-rank') {
+      const server = activeServer();
+      const packageId = actionTarget.dataset.packageId;
+      const input = actionTarget.closest('[data-package-id]').querySelector('[data-rank-input]');
+      if (!server || !packageId || !input) return;
+      try {
+        await api(`/api/servers/${server.id}/tebex/packages/${encodeURIComponent(packageId)}/rank`, {
+          method: 'PUT',
+          body: JSON.stringify({ rank: input.value }),
+        });
+        showToast('Rank updated.');
+        await renderTebex();
+      } catch (error) { showToast(error.message); }
+      return;
     }
+    if (action === 'tebex-set-command') {
+      const server = activeServer();
+      const packageId = actionTarget.dataset.packageId;
+      const input = actionTarget.closest('[data-package-id]').querySelector('[data-command-input]');
+      if (!server || !packageId || !input) return;
+      try {
+        await api(`/api/servers/${server.id}/tebex/packages/${encodeURIComponent(packageId)}/command`, {
+          method: 'PUT',
+          body: JSON.stringify({ command: input.value }),
+        });
+        showToast('Command saved.');
+        await renderTebex();
+      } catch (error) { showToast(error.message); }
+      return;
+    }
+    if (action === 'tebex-remove') {
+      const server = activeServer();
+      if (!server) return;
+      if (!confirm('Remove the Tebex integration for this server? Packages, commands, and payment history will be deleted.')) return;
+      try {
+        await api(`/api/servers/${server.id}/tebex`, { method: 'DELETE' });
+        closeTebexStream();
+        showToast('Tebex integration removed.');
+        await renderTebex();
+      } catch (error) { showToast(error.message); }
+      return;
+    }
+    // AI agent actions (full-access, live, command queue) were removed in 1.0.0.
     if (action === 'manage-server') {
       state.activeServerId = Number(actionTarget.closest('[data-server-id]').dataset.serverId);
       filePath = '';
@@ -4639,11 +4812,6 @@ document.addEventListener('click', async (event) => {
       await navigator.clipboard?.writeText(data.token).catch(() => {});
       prompt('New host API token copied if browser allowed it:', data.token);
       await refresh();
-      return;
-    }
-    if (action === 'terminal-close') {
-      await closeTerminalSession();
-      showToast('Terminal session closed.');
       return;
     }
     if (action === 'install-software') {
@@ -4894,25 +5062,6 @@ document.addEventListener('click', async (event) => {
       showToast('Running panel health check...');
       await renderSecurity(true);
       showToast('Health check complete.');
-      return;
-    }
-    if (action === 'adaptive-heal') {
-      const result = await api('/api/adaptive/heal', { method: 'POST', body: '{}' });
-      showToast(result.actions?.length ? `Adaptive heal completed ${result.actions.length} action(s).` : 'Adaptive heal found no safe repairs.');
-      await refresh();
-      if (state.activeView === 'security') await renderSecurity();
-      return;
-    }
-    if (action === 'agent-feedback') {
-      const feedback = actionTarget.dataset.feedback;
-      if (!confirm(`Mark this repair-agent episode as ${feedback}? This changes its learned neural weights.`)) return;
-      const result = await api(`/api/repair/agent/episodes/${encodeURIComponent(actionTarget.dataset.episodeId)}/feedback`, {
-        method: 'POST',
-        body: JSON.stringify({ feedback }),
-      });
-      showToast(`Agent feedback recorded: ${feedback} (${result.learning?.updated || 0} weight updates).`);
-      await refresh();
-      if (state.activeView === 'security') await renderSecurity();
       return;
     }
     if (action === 'delete-server') {

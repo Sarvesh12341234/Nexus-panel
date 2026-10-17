@@ -4,20 +4,67 @@ const path = require('node:path');
 const workspaceRoot = path.resolve(__dirname, '..');
 const serversRoot = path.join(workspaceRoot, 'servers');
 const softwareRoot = path.join(workspaceRoot, 'software');
-const externalDataRoot = process.env.NEXUSPANEL_DATA_ROOT
-  || (process.platform === 'win32'
-    ? path.join(process.env.ProgramData || workspaceRoot, 'NexusPanel')
-    : '/var/lib/nexuspanel');
+
+/**
+ * External data root resolution order:
+ *   1. NEXUSPANEL_DATA_ROOT env var (explicit, always honoured)
+ *   2. Windows: %ProgramData%\NexusPanel
+ *   3. Linux root user: /var/lib/nexuspanel (production default)
+ *   4. Linux non-root (dev/CI/codespace): <workspace>/.nexuspanel-data
+ *
+ * The non-root fallback prevents the EACCES crash when the panel or its tests
+ * run as a regular user (codespaces, CI, local dev). Production installs run
+ * as root via systemd and keep using /var/lib/nexuspanel.
+ */
+function resolveDataRoot() {
+  const explicit = process.env.NEXUSPANEL_DATA_ROOT;
+  if (explicit) return path.resolve(explicit);
+  if (process.platform === 'win32') {
+    return path.join(process.env.ProgramData || workspaceRoot, 'NexusPanel');
+  }
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  if (isRoot) return '/var/lib/nexuspanel';
+  return path.join(workspaceRoot, '.nexuspanel-data');
+}
+
+const externalDataRoot = resolveDataRoot();
 const backupsRoot = process.env.NEXUSPANEL_BACKUP_ROOT || path.join(externalDataRoot, 'backups');
 const legacyBackupsRoot = path.join(workspaceRoot, 'backups');
 const legacyBackupFolderRoot = path.join(workspaceRoot, 'backupfolder');
 
-fs.mkdirSync(serversRoot, { recursive: true });
-fs.mkdirSync(softwareRoot, { recursive: true });
-fs.mkdirSync(backupsRoot, { recursive: true });
+/**
+ * Directory creation that never crashes the process at module load. If the
+ * target is not writable (e.g. a root-owned dir from a previous root run),
+ * we log a clear hint instead of throwing — the panel can still serve reads
+ * and the operator can fix ownership with one chown.
+ */
+function ensureWritableDir(directory) {
+  try {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o750 });
+    return true;
+  } catch (error) {
+    if (error.code === 'EACCES' || error.code === 'EPERM') {
+      console.error(
+        `[NexusPanel] Cannot create ${directory}: permission denied.\n`
+        + `  Fix: sudo mkdir -p ${directory} && sudo chown -R $(id -u):$(id -g) ${path.dirname(directory)}\n`
+        + `  Or set NEXUSPANEL_DATA_ROOT to a writable location.`,
+      );
+      return false;
+    }
+    throw error;
+  }
+}
+
+ensureWritableDir(serversRoot);
+ensureWritableDir(softwareRoot);
+ensureWritableDir(backupsRoot);
 for (const legacyRoot of [legacyBackupsRoot, legacyBackupFolderRoot]) {
   if (path.resolve(legacyRoot) !== path.resolve(backupsRoot) && fs.existsSync(legacyRoot)) {
-    fs.cpSync(legacyRoot, backupsRoot, { recursive: true, force: false, errorOnExist: false });
+    try {
+      fs.cpSync(legacyRoot, backupsRoot, { recursive: true, force: false, errorOnExist: false });
+    } catch (error) {
+      console.error(`[NexusPanel] Legacy backup migration skipped (${error.code || error.message}).`);
+    }
   }
 }
 

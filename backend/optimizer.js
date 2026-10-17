@@ -100,7 +100,7 @@ const TECHNIQUE_PACK = [
   {
     name: 'Cgroup quota plan',
     command: 'systemd-run --scope -p CPUQuota=<n>% -p MemoryMax=<m>M',
-    reason: 'Future Nexus-Mark isolation path for host-edition resource control.',
+    reason: 'Future ASF isolation path for host-edition resource control.',
   },
 ];
 

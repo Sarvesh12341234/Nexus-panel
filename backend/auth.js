@@ -135,11 +135,44 @@ function publicUser(user) {
   };
 }
 
+/**
+ * Password strength policy. Requires length plus a mix of character classes so
+ * a 12-char all-lowercase password is rejected. Returns null when valid, or a
+ * human-readable reason when not.
+ */
+function passwordPolicyError(password) {
+  const value = String(password || '');
+  if (value.length < 12) return 'Password must be at least 12 characters.';
+  if (value.length > 256) return 'Password must be at most 256 characters.';
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((pattern) => pattern.test(value)).length;
+  if (classes < 3) return 'Password must include at least 3 of: lowercase, uppercase, numbers, symbols.';
+  if (/^(.)\1+$/.test(value)) return 'Password cannot be a single repeated character.';
+  if (/^(?:password|123456|qwerty|letmein|admin|nexuspanel)/i.test(value)) return 'Password is too common.';
+  return null;
+}
+
+/**
+ * Email validation. Rejects control characters, whitespace, and malformed
+ * addresses before they reach the database.
+ */
+function emailPolicyError(email) {
+  const value = String(email || '').trim();
+  if (!value) return 'A valid email is required.';
+  if (value.length > 254) return 'Email must be at most 254 characters.';
+  if (/[\s\u0000-\u001f\u007f]/.test(value)) return 'Email must not contain spaces or control characters.';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return 'Enter a valid email address.';
+  return null;
+}
+
 function createUser({ email, name, password, role = 'admin', accessLevel = 0, permissionKeys = null, expiresAt = 0 }) {
   const normalizedEmail = normalizeEmail(email);
-  if (!normalizedEmail.includes('@')) throw new Error('A valid email is required.');
-  if (!name || String(name).trim().length < 2) throw new Error('Name must be at least 2 characters.');
-  if (!password || String(password).length < 12) throw new Error('Password must be at least 12 characters.');
+  const emailError = emailPolicyError(normalizedEmail);
+  if (emailError) throw new Error(emailError);
+  const cleanName = String(name || '').trim();
+  if (cleanName.length < 2) throw new Error('Name must be at least 2 characters.');
+  if (cleanName.length > 100) throw new Error('Name must be at most 100 characters.');
+  const passwordError = passwordPolicyError(password);
+  if (passwordError) throw new Error(passwordError);
 
   const cleanRole = role === 'owner' ? 'owner' : 'admin';
   const cleanAccessLevel = cleanRole === 'owner' ? 100 : Math.max(0, Math.min(100, Number(accessLevel) || 0));
@@ -151,7 +184,7 @@ function createUser({ email, name, password, role = 'admin', accessLevel = 0, pe
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
     normalizedEmail,
-    String(name).trim(),
+    cleanName,
     hashPassword(password),
     cleanRole,
     cleanAccessLevel,
@@ -271,9 +304,11 @@ module.exports = {
   clearSessionCookie,
   createSession,
   createUser,
+  emailPolicyError,
   hashPassword,
   hasPermission,
   normalizePermissionKeys,
+  passwordPolicyError,
   permissionKeysForUser,
   publicUser,
   requireAccess,

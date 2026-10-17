@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="Cache-Control" content="no-store">
     <title>NexusPanel</title>
-    <link rel="stylesheet" href="/css/main.css?v=3.0.0-3">
+    <link rel="stylesheet" href="/css/main.css?v=1.0.0">
   </head>
   <body>
     <div class="backplate" aria-hidden="true"></div>
@@ -30,6 +30,7 @@
         </label>
         <button type="submit">Login</button>
         <a class="button-link" href="/reset.html">Forgot password</a>
+        <p class="error-message" id="loginError" role="alert" aria-live="polite" hidden></p>
       </form>
     
 <!-- NEXUS-AUTONOMY-ACTIVITY-5.1.0 -->
@@ -84,10 +85,12 @@
           <button class="nav-item" type="button" data-view="backups">Backups</button>
           <button class="nav-item" type="button" data-view="optimizer">Optimizer</button>
           <button class="nav-item" type="button" data-view="network">Network</button>
+          <button class="nav-item" type="button" data-view="allocations">Allocations</button>
+          <button class="nav-item" type="button" data-view="databases">Databases</button>
+          <button class="nav-item" type="button" data-view="tebex">Tebex</button>
           <button class="nav-item" type="button" data-view="admins">Admins</button>
           <button class="nav-item" type="button" data-view="security">Security</button>
           <button class="nav-item" type="button" data-view="settings">Settings</button>
-          <button class="nav-item" type="button" data-view="terminal" id="terminalNav" hidden>Terminal</button>
         </nav>
 
         <div class="server-switcher">
@@ -296,18 +299,66 @@
           <div class="surface tool-surface" id="networkPanel"></div>
         </section>
 
+        <section class="view-section" id="view-allocations" hidden>
+          <div class="surface tool-surface" id="allocationsPanel"></div>
+        </section>
+
+        <section class="view-section" id="view-databases" hidden>
+          <div class="surface tool-surface" id="databasesPanel"></div>
+        </section>
+
+        <section class="view-section" id="view-tebex" hidden>
+          <div class="surface tool-surface" id="tebexPanel"></div>
+        </section>
+
         <section class="view-section" id="view-admins" hidden>
           <section class="admin-panel surface" id="adminPanel" hidden>
-            <form class="admin-form" id="adminForm">
-              <input name="name" placeholder="Admin name" required>
-              <input name="email" type="email" placeholder="Admin email" required>
-              <input name="password" type="password" placeholder="Password (12+ characters)" minlength="12" autocomplete="new-password" required>
-              <select name="assignedServerId" id="adminServerAssign"><option value="">No server assignment</option><option value="all">Assign all current servers</option></select>
-              <select name="adminDurationMode"><option value="permanent">Permanent</option><option value="temporary">Temporary</option></select>
-              <input name="adminDurationValue" type="number" min="1" max="525600" value="60">
-              <select name="adminDurationUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select>
-              <input name="accessLevel" type="hidden" value="5">
+            <div class="section-head">
+              <div><p class="eyebrow">Owner</p><h2>Create admin account</h2></div>
               <span class="pill" id="adminAccessPreview">View (5)</span>
+            </div>
+            <form class="admin-form" id="adminForm">
+              <div class="admin-form-grid">
+                <label class="admin-field">
+                  <span>Admin name</span>
+                  <input name="name" placeholder="Jane Doe" required minlength="2" maxlength="100" autocomplete="off">
+                </label>
+                <label class="admin-field">
+                  <span>Email</span>
+                  <input name="email" type="email" placeholder="jane@example.com" required maxlength="254" autocomplete="off">
+                </label>
+                <label class="admin-field">
+                  <span>Password</span>
+                  <input name="password" type="password" placeholder="12+ chars, mixed case, number or symbol" minlength="12" maxlength="256" autocomplete="new-password" required>
+                </label>
+                <label class="admin-field">
+                  <span>Server assignment</span>
+                  <select name="assignedServerId" id="adminServerAssign">
+                    <option value="">No server assignment</option>
+                    <option value="all">Assign all current servers</option>
+                  </select>
+                </label>
+                <label class="admin-field">
+                  <span>Account lifetime</span>
+                  <select name="adminDurationMode">
+                    <option value="permanent">Permanent</option>
+                    <option value="temporary">Temporary</option>
+                  </select>
+                </label>
+                <label class="admin-field admin-field-duration">
+                  <span>Duration</span>
+                  <span class="admin-duration-row">
+                    <input name="adminDurationValue" type="number" min="1" max="525600" value="60">
+                    <select name="adminDurationUnit">
+                      <option value="minutes">Minutes</option>
+                      <option value="hours">Hours</option>
+                      <option value="days">Days</option>
+                      <option value="years">Years</option>
+                    </select>
+                  </span>
+                </label>
+              </div>
+              <input name="accessLevel" type="hidden" value="5">
               <fieldset class="admin-permissions">
                 <legend>Exact permissions</legend>
                 <div class="admin-permission-actions">
@@ -350,7 +401,9 @@
                   </div>
                 </div>
               </fieldset>
-              <button type="submit">Create admin</button>
+              <div class="admin-form-actions">
+                <button type="submit">Create admin</button>
+              </div>
             </form>
             <div class="user-list" id="userList"></div>
           </section>
@@ -365,17 +418,13 @@
         <section class="view-section" id="view-settings" hidden>
           <div class="surface tool-surface" id="settingsPanel"></div>
         </section>
-
-        <section class="view-section" id="view-terminal" hidden>
-          <div class="surface tool-surface" id="terminalPanel"></div>
-        </section>
       </section>
 
       <p class="toast" id="toast" hidden></p>
     </main>
 
-    <script src="/js/password-toggle.js?v=3.0.0-3" defer></script>
-    <script src="/js/main.js?v=3.0.0-3" defer></script>
+    <script src="/js/password-toggle.js?v=1.0.0" defer></script>
+    <script src="/js/main.js?v=1.0.0" defer></script>
   
 <!-- NEXUS-NEURAL-GRAPH-3.2.4 -->
 <style>

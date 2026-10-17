@@ -4,9 +4,9 @@ function getUserTimezone(userId) {
   // Check user-specific timezone first
   const userResult = db.prepare('SELECT value FROM panel_settings WHERE key = ?')
     .get(`timezone_${userId}`);
-  
+
   if (userResult) return userResult.value;
-  
+
   // Fallback to global default
   const globalResult = db.prepare(`
     SELECT value FROM panel_settings
@@ -14,7 +14,7 @@ function getUserTimezone(userId) {
     ORDER BY CASE key WHEN 'time_zone' THEN 0 ELSE 1 END
     LIMIT 1
   `).get();
-  
+
   return globalResult?.value || 'UTC';
 }
 
@@ -25,9 +25,9 @@ function setUserTimezone(userId, timezone) {
   } catch {
     throw new Error('Invalid timezone');
   }
-  
+
   db.prepare(`
-    INSERT OR REPLACE INTO panel_settings (key, value, updated_at) 
+    INSERT OR REPLACE INTO panel_settings (key, value, updated_at)
     VALUES (?, ?, CURRENT_TIMESTAMP)
   `).run(`timezone_${userId}`, timezone);
 }

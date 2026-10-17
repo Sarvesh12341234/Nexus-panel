@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# NexusPanel Linux Installer v3.2.3
+# NexusPanel Linux Installer v1.0.0
 # Smart Ubuntu/Linux installer
 #
 
 set -uo pipefail
 
-VERSION="3.2.3"
+VERSION="1.0.0"
 REPO_URL="${NEXUSPANEL_REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
 INSTALL_DIR="${NEXUSPANEL_INSTALL_DIR:-/opt/nexuspanel}"
 SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
 SERVICE_NAME="${NEXUSPANEL_SERVICE_NAME:-nexuspanel}"
 EDITION="${NEXUSPANEL_EDITION:-normal}"
-REF="${NEXUSPANEL_REF:-auto}"
+REF="${NEXUSPANEL_REF:-v1.0.0}"
 INSTALL_AI="${NEXUSPANEL_INSTALL_AI:-ask}"
 SKIP_TUNNELS="${NEXUSPANEL_SKIP_TUNNELS:-no}"
 MAX_RETRIES="${NEXUSPANEL_MAX_RETRIES:-3}"
@@ -99,7 +99,7 @@ repair_install_permissions() {
     find "$INSTALL_DIR" -type d -exec chmod u+rwx,g+rx,o-rwx {} + 2>/dev/null || true
     find "$INSTALL_DIR" -type f -exec chmod u+rw,g+r,o-rwx {} + 2>/dev/null || true
     find "$INSTALL_DIR" -type f \( -name '*.sh' -o -name '*.bin' \) -exec chmod u+rwx,g+rx,o-rwx {} + 2>/dev/null || true
-    for file in "$INSTALL_DIR/backend/cli.js" "$INSTALL_DIR/backend/index.js" "$INSTALL_DIR/backend/launcher.js" "$INSTALL_DIR/backend/service.js" "$INSTALL_DIR/backend/host_agent.js" "$INSTALL_DIR/backend/nexus_mark_native.js"; do
+    for file in "$INSTALL_DIR/backend/cli.js" "$INSTALL_DIR/backend/index.js" "$INSTALL_DIR/backend/launcher.js" "$INSTALL_DIR/backend/service.js" "$INSTALL_DIR/backend/host_agent.js" "$INSTALL_DIR/backend/asf_native.js"; do
         [ -f "$file" ] && chmod 750 "$file" || true
     done
     chmod 600 "$INSTALL_DIR/data/setup_token" "$INSTALL_DIR/data/cookie_secret" 2>/dev/null || true
@@ -452,10 +452,10 @@ npm_install_with_recovery() {
 build_components() {
     info "[4/9] Building NexusPanel components..."
     cd "$INSTALL_DIR" || die "Cannot enter installation directory."
-    if npm run build:nexusmark; then
-        info "NexusMark build completed."
+    if npm run build:asf; then
+        info "ASF runtime build completed."
     else
-        warn "NexusMark build failed. Continuing with fallback mode."
+        warn "ASF runtime build failed. Continuing with fallback mode."
     fi
     if npm run build:host-agent; then
         info "Host agent build completed."
@@ -499,39 +499,16 @@ ask_ai() {
 }
 
 install_advanced_ai() {
-    info "[5/9] Advanced AI setup..."
-    if ! ask_ai; then
-        info "Advanced AI skipped."
-        return 0
-    fi
-    cd "$INSTALL_DIR" || die "Cannot enter installation directory."
-    info "Installing Hugging Face Transformers..."
-    if ! retry npm install @huggingface/transformers@latest --no-audit --no-fund; then
-        warn "Could not install @huggingface/transformers."
-        warn "Continuing without Advanced AI."
-        return 0
-    fi
-    if [ ! -f "$INSTALL_DIR/backend/advanced_ai.js" ]; then
-        warn "backend/advanced_ai.js does not exist."
-        info "AI package installed, but model initialization was skipped."
-        return 0
-    fi
-    export HF_HOME="${HF_HOME:-$INSTALL_DIR/data/huggingface}"
-    export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME}"
-    mkdir -p "$HF_HOME"
-    info "Initializing local AI..."
-    if "$NODE_PATH" "$INSTALL_DIR/backend/advanced_ai.js"; then
-        info "Advanced AI initialized successfully."
-    else
-        warn "AI initialization failed."
-        warn "Core NexusPanel installation is continuing."
-    fi
+    # Advanced AI was removed in NexusPanel 1.0.0. Kept as a no-op so the
+    # install step numbering stays stable for existing scripts.
+    info "[5/9] Advanced AI setup skipped (removed in 1.0.0)."
+    return 0
 }
 
 prepare_paths() {
     info "[6/9] Preparing directories..."
     cd "$INSTALL_DIR" || die "Cannot enter installation directory."
-    mkdir -p data servers software backups backupfolder update/backups data/huggingface /var/lib/nexuspanel /var/lib/nexuspanel/backups /var/lib/nexuspanel/logs /var/lib/nexuspanel/nexus-mark
+    mkdir -p data servers software backups backupfolder update/backups data/huggingface /var/lib/nexuspanel /var/lib/nexuspanel/backups /var/lib/nexuspanel/logs /var/lib/nexuspanel/asf
     printf '%s\n' "$EDITION" > "$INSTALL_DIR/data/edition"
     if [ ! -s "$INSTALL_DIR/data/setup_token" ] || ! grep -Eq '^[A-Za-z0-9_-]{43}$' "$INSTALL_DIR/data/setup_token" 2>/dev/null; then
         SETUP_TOKEN="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
@@ -543,7 +520,7 @@ prepare_paths() {
     if [ -f "$INSTALL_DIR/update/update.sh" ]; then
         chmod 755 "$INSTALL_DIR/update/update.sh" || true
     fi
-    chmod 750 data servers software backups backupfolder update/backups /var/lib/nexuspanel /var/lib/nexuspanel/backups /var/lib/nexuspanel/logs /var/lib/nexuspanel/nexus-mark 2>/dev/null || true
+    chmod 750 data servers software backups backupfolder update/backups /var/lib/nexuspanel /var/lib/nexuspanel/backups /var/lib/nexuspanel/logs /var/lib/nexuspanel/asf 2>/dev/null || true
     if [ "$SERVICE_USER" != "root" ]; then
         local group="$(id -gn "$SERVICE_USER")"
         chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/servers" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel 2>/dev/null || true
@@ -771,7 +748,7 @@ show_info() {
     echo "  sudo nexuspanel restart"
     echo "  sudo nexuspanel doctor"
     echo "  sudo nexuspanel agent status"
-    echo "  sudo nexuspanel nexusmark status"
+    echo "  sudo nexuspanel asf status"
     echo
     echo "Systemd:"
     echo "  sudo systemctl status $SERVICE_NAME"

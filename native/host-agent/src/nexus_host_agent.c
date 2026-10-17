@@ -105,6 +105,12 @@ int main(int argc, char **argv) {
   strncpy(address.sun_path, SOCKET_PATH, sizeof(address.sun_path) - 1);
   unlink(SOCKET_PATH);
   if (bind(server, (struct sockaddr *)&address, sizeof(address)) < 0) return 2;
+  /*
+   * The agent runs as root and reports host-wide metrics. The socket must only
+   * be reachable by the panel service user, never by every local account.
+   * 0660 + root:nexuspanel group ownership (set by the systemd unit) keeps
+   * unprivileged local users out.
+   */
   if (chmod(SOCKET_PATH, 0660) < 0) return 3;
   if (listen(server, 64) < 0) return 4;
   while (running) {

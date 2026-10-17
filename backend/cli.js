@@ -33,7 +33,6 @@ function help() {
 Usage:
   nexuspanel version
   nexuspanel doctor
-  nexuspanel intelligence [scope]
   nexuspanel platform
   nexuspanel permissions audit
   nexuspanel permissions repair
@@ -48,9 +47,9 @@ Usage:
   nexuspanel service install
   nexuspanel setup-owner
   nexuspanel setup-url
-  nexuspanel nexusmark status
-  nexuspanel nexusmark rebuild
-  nexuspanel nexusmark restart
+  nexuspanel asf status
+  nexuspanel asf rebuild
+  nexuspanel asf restart
   nexuspanel agent status
   nexuspanel agent restart
   nexuspanel agent logs
@@ -129,22 +128,22 @@ function formatDate(dateString) {
 
 async function main() {
   const command = process.argv[2] || 'status';
-  
+
   // Handle user list command
   if (command === 'users' || command === 'list-users') {
     const { db } = require('./db');
     console.log('\n=== NexusPanel User Database ===\n');
-    
+
     const users = db.prepare('SELECT id, email, name, role, access_level, created_at FROM users ORDER BY created_at DESC').all();
-    
+
     if (users.length === 0) {
       console.log('❌ No users found in database.');
       console.log('   Run: npm start (to create owner account)');
       process.exit(0);
     }
-    
+
     console.log(`Found ${users.length} user(s):\n`);
-    
+
     users.forEach((user, index) => {
       console.log(`${index + 1}. ${user.name} (${user.email})`);
       console.log(`   Role: ${user.role}`);
@@ -152,11 +151,11 @@ async function main() {
       console.log(`   Created: ${formatDate(user.created_at)}`);
       console.log('');
     });
-    
+
     console.log('=== Sessions ===\n');
-    
+
     const sessions = db.prepare('SELECT id, user_id, expires_at FROM sessions LIMIT 10').all();
-    
+
     if (sessions.length === 0) {
       console.log('No active sessions.');
     } else {
@@ -168,21 +167,14 @@ async function main() {
         console.log(`${index + 1}. User ${session.user_id} - ${status} (expires: ${expiresAt})`);
       });
     }
-    
+
     console.log('');
     process.exit(0);
   }
-  
+
   if (command === 'help' || command === '--help' || command === '-h') return help();
   if (command === 'version' || command === '--version' || command === '-v') {
-    console.log('NexusPanel 3.0.6');
-    return;
-  }
-  if (command === 'intelligence') {
-    const { IntelligenceCore } = require('./intelligence_core');
-    const intelligence = new IntelligenceCore(path.join(__dirname, '..'));
-    const scope = String(process.argv[3] || 'system').slice(0, 120);
-    console.log(JSON.stringify({ snapshot: intelligence.snapshot(scope), recommendations: intelligence.recommend({ scope }) }, null, 2));
+    console.log('NexusPanel 1.0.0');
     return;
   }
   if (command === 'setup-url') return setupUrl();
@@ -218,18 +210,18 @@ async function main() {
   if (command === 'status') return status();
   if (command === 'logs') return logsService();
   if (command === 'change' && process.argv[3] === 'panelport') return changePort(process.argv[4]);
-  if (command === 'nexusmark' && (process.argv[3] || 'status') === 'status') {
-    const { kernelStatus } = require('./nexus_mark');
+  if (command === 'asf' && (process.argv[3] || 'status') === 'status') {
+    const { kernelStatus } = require('./asf');
     console.log(JSON.stringify(kernelStatus({ refresh: true }), null, 2));
     return;
   }
-  if (command === 'nexusmark' && process.argv[3] === 'rebuild') {
-    const { nativeStatus } = require('./nexus_mark_native');
+  if (command === 'asf' && process.argv[3] === 'rebuild') {
+    const { nativeStatus } = require('./asf_native');
     console.log(JSON.stringify(nativeStatus({ build: true, force: true }), null, 2));
     return;
   }
-  if (command === 'nexusmark' && ['start', 'stop', 'restart'].includes(process.argv[3])) return componentAction('nexusmark', process.argv[3]);
-  if (command === 'nexusmark' && process.argv[3] === 'logs') return run('journalctl', ['-u', 'nexuspanel-nexusmark', '-n', '100', '--no-pager']);
+  if (command === 'asf' && ['start', 'stop', 'restart'].includes(process.argv[3])) return componentAction('asf', process.argv[3]);
+  if (command === 'asf' && process.argv[3] === 'logs') return run('journalctl', ['-u', 'nexuspanel-asf', '-n', '100', '--no-pager']);
   if (command === 'agent' && (process.argv[3] || 'status') === 'status') {
     const { localStatus, request } = require('./host_agent');
     console.log(JSON.stringify({ ...localStatus(), live: await request('STATUS') }, null, 2));
@@ -247,15 +239,15 @@ async function main() {
     return;
   }
   if (command === 'doctor') {
-    const { kernelStatus } = require('./nexus_mark');
+    const { kernelStatus } = require('./asf');
     const { localStatus, request } = require('./host_agent');
     console.log(JSON.stringify({
-      version: '3.0.5',
+      version: '1.0.0',
       platform: platformDoctor(),
       node: process.version,
       systemd: hasSystemd(),
       service: status({ quiet: true }),
-      nexusmark: kernelStatus({ refresh: true }),
+      asf: kernelStatus({ refresh: true }),
       hostAgent: { ...localStatus(), live: await request('STATUS') },
     }, null, 2));
     return;

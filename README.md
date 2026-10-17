@@ -1,357 +1,106 @@
-# 🚀 NexusPanel - Minecraft Server Control Panel
+# NexusPanel 1.0.0
 
-**Current engine: v3.0.5 Advanced Cross-Platform**
+Linux-native Minecraft server panel with the **ASF (Advanced Sandbox Fabric)**
+kernel isolation protocol — our own Landlock + seccomp + cgroup v2 sandbox that
+outperforms Docker on speed, memory, and version compatibility.
 
-A lightweight, powerful, and user-friendly web-based control panel for Minecraft **Bedrock and Java** servers.
+## Requirements
 
-Repository layout and validation commands are documented in [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md).
+- Ubuntu / Debian / other systemd Linux (x86_64 or ARM64)
+- Node.js ≥ 22.5.0
+- A C compiler for the ASF sandbox (`apt install -y build-essential`)
+- `acl` for per-server identities (`apt install -y acl`)
 
-## 🌍 Cross-platform runtime
-
-NexusPanel uses a capability-driven runtime instead of assuming Ubuntu/systemd.
-
-- **Ubuntu/Debian/Kali and other Linux:** native Nexus-Mark when the kernel/toolchain supports it, with automatic downgrade to compatible systemd/process guards.
-- **Windows 10/11/Server:** portable process-tree/resource/path guard with PowerShell-based host discovery; no Linux-only commands are required.
-- **Other Unix-like systems:** foreground mode with safe path/process guards where supported.
-- Run `nexuspanel platform` or `nexuspanel doctor` to see the exact isolation tier available on that machine.
-
-NexusPanel never requires making the whole installation `777`. Permission repair targets only mutable panel/server paths and preserves secrets as owner-only files.
-
-## 🎯 Features
+## Quick start
 
 ```bash
+# 1. Clone and install
+git clone <repo> nexuspanel && cd nexuspanel
 npm install
-npm start
-```
 
-Open `http://localhost:3000`.
-
-Linux/Ubuntu one-command installer:
-
-```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/normal-v3.0.0/nexuspanel-normal-v3.0.0-linux-installer.sh | sudo bash
-```
-
-Host edition:
-
-```bash
-curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/download/host-v3.0.0/nexuspanel-host-v3.0.0-linux-installer.sh | sudo bash
-```
-
-## VPS Background Service
-
-On Linux VPS hosts with systemd, `npm start` installs/starts NexusPanel as a background system service instead of keeping it attached to your terminal. The service restarts automatically if the panel crashes and starts again after the VPS reboots.
-
-```bash
-npm start
-```
-
-Useful commands:
-
-```bash
-npm run service:status
-npm run service:logs
+# 2. Install the systemd service
 sudo npm run service:install
-sudo npm run service:uninstall
-npm run foreground
+
+# 3. Create the owner account
+sudo nexuspanel setup-url
+# Open the printed URL in a browser
 ```
 
-After service install, Linux also gets the direct command:
+## Installers
+
+The Linux release installers are in [`installers/`](installers/):
+
+- `nexuspanel-normal-v1.0.0-linux-installer.sh` installs the normal edition.
+- `nexuspanel-host-v1.0.0-linux-installer.sh` installs the host edition.
+
+Both installers use the `v1.0.0` source tag by default. Windows users can run
+[`install.bat`](install.bat) from the extracted release source.
+
+## The ASF protocol
+
+ASF isolates every Minecraft server with kernel-enforced rules — no Docker
+daemon, no images, no overlayfs:
+
+| Layer | Mechanism |
+|---|---|
+| Identity | Locked system user `asf-s<id>` + POSIX ACLs |
+| Landlock | Filesystem scope + net-port bind lock (ABI 4+) |
+| Seccomp BPF | Denies mount/swap/reboot/raw-io/privileged syscalls |
+| Cgroup v2 | MemoryMax, CPUQuota, TasksMax, IOWeight |
+| Supervisor | `asf_runtime` static-PIE binary, exit-code contract |
+
+Full spec: [`docs/ASF-PROTOCOL.md`](docs/ASF-PROTOCOL.md)
+
+## CLI
 
 ```bash
-nexuspanel start
-nexuspanel stop
-nexuspanel restart
-nexuspanel status
-nexuspanel logs
-nexuspanel update
-nexuspanel change panelport 8080
-nexuspanel version
-nexuspanel doctor
-nexuspanel agent status
-nexuspanel agent restart
-nexuspanel agent logs
-nexuspanel nexusmark rebuild
-nexuspanel nexusmark restart
+nexuspanel status            # service status
+nexuspanel doctor            # full diagnostic
+nexuspanel asf status        # kernel isolation status
+nexuspanel asf rebuild       # rebuild the sandbox binary
+nexuspanel permissions repair # fix file ownership/modes
+nexuspanel update            # safe self-update with rollback
+nexuspanel help               # everything else
 ```
 
-On first run, `nexuspanel start` or `nexuspanel install` asks for owner account name, email, and password before starting the panel.
+## Security model
 
-- `npm start`: smart mode; on Linux/systemd it moves the panel to the background service.
-- `npm run foreground`: normal console mode for debugging.
-- `npm run service:logs`: live logs from `journalctl -u nexuspanel -f`.
-- Windows/non-systemd machines keep using foreground mode automatically.
+- Sessions: HMAC-signed cookies, 12 h TTL, 2 h idle, UA binding
+- CSRF: `x-nexuspanel-request` header on every mutating call
+- Headers: CSP, HSTS, nosniff, Referrer-Policy, Permissions-Policy
+- Files: path-traversal guard, symlink walk block, Zip Slip protection
+- SSRF: private-address blocking + DNS pinning (rebinding-proof)
+- Uploads: SHA-256 chunk verification, size caps
+- Auth: scrypt password hashing, login throttling, constant-time OTP compare
+- Errors: no stack traces or internal paths leak to clients
 
-## Safe Updates
-
-NexusPanel includes a safe updater that snapshots panel code, pulls/copies updates, runs `npm install`, and restarts the service without touching Minecraft data.
+## Testing
 
 ```bash
-cd /opt/nexuspanel
-bash update/update.sh
+npm test               # full suite
+npm run test:exploit   # 90+ adversarial attack simulations
+npm run build:asf      # build the sandbox
+sudo npm run audit:asf # root sandbox-escape audit
+npm run benchmark:asf  # launch overhead benchmark
 ```
 
-Protected folders: `servers/`, `data/`, `software/`, `node_modules/`, and the external backup store.
+## AI training corpus
 
-## v3.0.0 Editions
+[`docs/AI-TRAINING-CORPUS.md`](docs/AI-TRAINING-CORPUS.md) — 408 coded error
+records, full route registry, CLI reference, Linux command reference, and
+SFT/RAG training formats for the NexusPanel support AI.
 
-- `normal-v3.0.0`: advanced solo panel with normal-only tunnel helpers, DDoS Guard, faster console metrics, backups, plugin/file/software managers, shared admin visibility, and host-only features hidden.
-- `host-v3.0.0`: hosting edition using the same engine plus owner/all-server visibility, host API, templates, assigned-user server isolation, backups, and DDoS Guard.
-- The updater stores the installed edition in `data/edition` and updates from the matching tag: `normal-v3.0.0` or `host-v3.0.0`.
-- The update repository is locked to `Sarvesh12341234/Nexus-panel`; users cannot change it from the panel UI.
-- If an update finds server folders such as `5-summa` missing from SQLite, NexusPanel recovers them into the server list on boot.
+## Layout
 
-## v3.0.0 Protection
-
-### Native v3 host control plane
-
-Version 3 installs `nexuspanel-host-agent`, a hardened C service that answers low-latency health requests through a permission-restricted Unix socket. The public Node.js panel does not receive an unrestricted root shell. The service installer also enables a NexusMark preflight oneshot unit, so native isolation is built and verified before the panel starts.
-
-Security status is rendered and escaped on the server, then delivered under the panel CSP. The optional local AI uses Qwen2.5-Coder 0.5B Instruct in q4 ONNX mode and exposes typed tools for server information, bounded file reads, atomic file edits with recovery points, console commands, audited diagnostics, and separately approved host commands. Mutating tools require the owner to unlock a short full-access window.
-
-Theme Studio includes four composited advanced interfaces—Quantum City, Holographic Forge, Void Architect, and Solar Command—while respecting reduced-motion preferences.
-
-### Nexus-Mark native kernel runtime
-
-Nexus-Mark now includes a small C runtime for Linux x86-64, x86, arm64, ARM, RISC-V 64, PowerPC 64, and s390x. It is built automatically by Ubuntu, Debian, Kali, Fedora, Rocky, openSUSE, Arch, and compatible systemd-based installers and is placed in NexusPanel's protected data directory. It does not run a daemon: after installing its restrictions it replaces itself with the game process using `exec`, so there is no resident native-wrapper RAM cost.
-
-Each Linux server launch layers:
-
-- cgroups v2 limits for memory, swap, CPU, I/O weight, and process count;
-- systemd mount, device, temporary-directory, home, process, hostname, and cgroup isolation;
-- a native Landlock filesystem allowlist limited to the server root and required read-only runtime files;
-- a native seccomp-BPF denylist for mount, namespace, kernel-module, BPF/LSM, raw host inspection, cross-process memory, and signaling operations, including explicit clone namespace-flag filtering and safe clone3 fallback;
-- removed capabilities, `no_new_privs`, private keyrings, restricted socket families, and assigned-port-only binds on supported systemd releases;
-- a locked, non-login Linux account per game server, with inherited POSIX ACLs and a unique UID/GID applied to the actual game process; and
-- recursive removal of group/other server-file access, with private defaults for files created after migration.
-
-The preferred native build is a maximum-hardened static PIE using FORTIFY level 3, stack-clash and control-flow protection, zero automatic-variable initialization, hidden symbols, LTO, RELRO, BIND_NOW, separated executable code, and an NX stack. If a CPU architecture or older compiler cannot provide every option, the builder compiles and self-tests a compatible static PIE before considering a dynamic PIE fallback. Maximum systemd policy also adds a private user namespace and disables cross-security-domain KSM; systemd 257+ adds a PID namespace and systemd 258+ uses strict private cgroup visibility.
-
-Check the installed engine with:
-
-```bash
-nexuspanel nexusmark status
+```
+backend/    Express API, ASF engine, runtime supervisor
+native/     asf_runtime.c sandbox + host agent (C)
+frontend/   Vanilla JS SPA
+tests/      Unit + adversarial security suites
+installers/ Linux install scripts
+update/     Safe updater with rollback
 ```
 
-The same full preflight is available from Settings through **Run Kernel Doctor**. NexusMark tests Maximum, Compatible, and Core systemd policies in order and caches the strongest working tier. Unsupported distro properties therefore downgrade safely instead of breaking game startup. Native upgrades compile to a temporary PIE binary, run a real sandbox self-test, and replace the known-good runtime only after that test passes.
+## License
 
-Runtime metrics read cgroup v2 memory events, OOM counters, CPU throttling, and CPU/memory/I/O pressure directly from the kernel. Cgroup paths are cached to avoid spawning `systemctl show` on every dashboard sample.
-
-The strict native layer requires Landlock ABI 3, normally Linux 6.2 or newer, so file truncation is also confined. Older kernels retain the systemd namespace/cgroup sandbox and clearly report that the native layer is unavailable. Nexus-Mark intentionally shares the host IP namespace so Minecraft ports remain directly reachable without a proxy or NAT daemon; it is a low-overhead game-server sandbox, not an OCI image/runtime implementation.
-
-- Live collaborators show when another owner/admin is viewing the same server.
-- DDoS Guard adds a bounded 999,999-parameter defensive classifier for TCP SYN pressure, UDP/Bedrock floods, connection fanout, bandwidth drops, conntrack pressure, and firewall misconfiguration signals.
-- DDoS Guard uses local VPS telemetry and presents owner-reviewed mitigation commands instead of silently changing firewall rules.
-- Normal edition settings include ngrok TCP/UDP helpers with remote-address status and Playit VPS install/start controls.
-- Repair & Diagnose quarantines incompatible Bedrock packs when recent logs show `min_engine_version` is higher than the installed server supports.
-- Console metrics now read Nexus-Mark cgroups or full process trees, so Java/Bedrock child memory is counted instead of only the wrapper process.
-- Console logs and metrics load together and refresh with shorter throttles to reduce the slow first-open delay.
-
-## v1.2.0 Transfer + Safety
-
-- Upload chunks increased to `32MB`.
-- Uploads use up to `4` parallel chunks per file.
-- Browser calculates SHA-256 for the full file and each chunk.
-- Backend verifies chunk checksum and final file checksum before completing upload.
-- Upload progress now resumes from saved chunks without crashing the browser progress code.
-- File-manager copy/cut/paste is locked to the source server, preventing cross-server paste leaks.
-- Downloads support HTTP range requests for resume/split download managers.
-- Optional Nginx `X-Accel-Redirect` can offload huge downloads from Node.
-- The Network page uses a real browser-to-panel upload/download probe instead of guessing from interface counters.
-- Backups default to `/var/lib/nexuspanel/backups` on Linux, outside `/opt/nexuspanel`.
-- Backup intervals support typed minute or hour values instead of hours only.
-- ZIP extraction validates the file first and asks whether to replace or skip duplicates.
-
-## v1.2.0 Fixes
-
-- Settings updater shows live progress, status text, and final exit state.
-- Backup scheduling has 30-second resolution, per-server owner timezones, visible next-run timing, and offset-stamped archive names.
-- Uploads use server-authoritative ranges, per-file locks, 8 MB chunks, and one-second cross-client progress refresh.
-- Public backup links support a configurable public panel URL and eligible Normal/Host account ownership.
-- Transfer URLs reject normal browser downloads and are consumed through NexusPanel's Import Backup workflow.
-- The Adaptive Engine learns baselines for servers, backups, uploads, CPU, and memory and performs non-destructive maintenance.
-- Alpha UI Studio provides 20 controls, draft previews, explicit save/cancel, undo/redo, navigation order, and command order.
-- Its visual editor has separate Boxes and Buttons modes for mouse, pen, and touch placement. Cards, forms, status blocks, field groups, tool panels, and buttons can be reordered and resized without moving the outer panel shell.
-- Free mode supports bounded pixel-level X/Y placement, 1px arrow-key nudging, Shift+Arrow 10px movement, configurable mouse snapping, layers, position reset, and independent desktop/mobile coordinates. Flow mode retains responsive order-based placement.
-- Component and button layouts share the floating save/undo controls and permanent portable UI codes.
-- Portable UI codes use a versioned `NXUI2` format. Import remains compatible with older URL-safe Base64 codes, standard Base64, raw JSON, and codes pasted with surrounding text.
-- Editor selection survives live panel rerenders, supports Shift/Ctrl multi-select, and can align edges or centers and distribute three or more boxes/buttons horizontally or vertically.
-- Visual-editor undo and redo operate on one drag, nudge, resize, coordinate edit, or alignment action at a time without reverting unrelated sections.
-- Repair & Diagnose learns a redacted crash signature from successful fixes and safely repeats the same built-in repair workflow when that error returns.
-- The repair brain includes 1,248 diagnostic signals across 78 cause families covering game runtimes, plugins, mods, worlds, networks, storage, databases, panel UI failures, and VPS limits.
-- Its bounded hybrid diagnostics ranker uses 349,986 parameters, live VPS/server telemetry, a cause-and-action knowledge graph, and a persistent reinforcement history while keeping its estimated resident model state below 23 MB.
-- Stable recoveries reward matching diagnoses; repeated crashes and owner-marked wrong diagnoses apply negative rewards. Owner feedback is single-vote and web results are never treated as successful fixes.
-- Optional repair research extracts stable error signatures and searches eight bounded adapters: Stack Overflow, Ask Ubuntu, Unix & Linux, Server Fault, Arqade, GitHub Issues, Microsoft Learn, and Wikipedia. Results and code snippets are reference-only, confidence-ranked, cached, size-limited, and never executed by the panel.
-- Research sources have independent health tracking and circuit breakers. Secrets, credentials, email addresses, IP addresses, and local paths are redacted before any request leaves the VPS.
-- Repair & Diagnose now follows a staged pipeline: live telemetry, fast classifier, deterministic knowledge, retrieval/compatibility graph, specialist-model hook, competing plans, sandbox preflight, rollback metadata, controlled production repair, stability validation, and reinforcement learning.
-- Terminal diagnostics use a hidden allowlisted command channel for VPS probes such as disk, memory, systemd, ports, and Java runtime checks. Each probe is timeout-capped, redacted, audited, and protected by an internal hash key.
-- Web research understands plain-English reports such as stuck apt progress, wrong RAM/core allocation, Bedrock LevelDB corruption, missing `server.properties`, and SQLite issues, then extracts simple memory/core/time math before searching.
-- Terminal diagnostics include safe read/probe commands like `df`, `free`, `whoami`, `id`, `uname`, `which`, `findmnt`, `lsblk`, bounded `dmesg`, `systemctl`, `journalctl`, `ss`, and server-root-confined file probes. Unrestricted autonomous `sudo`, raw disk repair, arbitrary `echo`, and editor commands are intentionally not executed by the agent.
-- Owner shell access is available from the Fixed section for owners: unlock it with the owner password for a limited window, queue any shell command, then approve each command before it runs. Commands are risk-labeled, timeout-capped, redacted, and audited.
-- Live diagnostics continuously check console/file repair signals during adaptive maintenance, learn from incidents, apply safe offline repairs, and queue risky shell work for owner approval.
-- The owner terminal uses a real PTY on supported Linux installs, falling back to pipes when unavailable, so commands like `apt update`, `npm install`, and long downloads show progress more reliably.
-- The Fixed section keeps a 24-hour repair/action history separate from game console logs. Server console logs stay bounded to the latest 600 in-memory lines and rotate on disk at 4 MB per server log.
-- Owner-terminal commands can be associated with a crashed server. Exit-zero commands are observed, stability-validated after the game remains online, and replayed only when they are idempotent and confined to that server root; dangerous commands remain redacted evidence.
-- Stored server roots are rediscovered from ID-prefixed folders and real game files. Missing or malformed `server.properties` files are backed up, validated, normalized, and atomically rewritten before startup.
-- Bedrock's `Error opening file: server.properties` startup failure is intercepted live, classified correctly, and repaired automatically. Rebuilt property files are comment-free, restore required defaults, use readable permissions, and are verified before one controlled restart.
-- Nexus-Mark transient systemd services explicitly inherit each server's own `WorkingDirectory`, so Bedrock reads `server.properties`, worlds, permissions, and runtime files from the correct isolated server root. Recovery timers are deduplicated to prevent delayed restart collisions.
-- Admin permissions are individually selectable and server-enforced for Start, Stop, Restart, Kill, console view/commands, server/software/property/whitelist management, plugins, files, backups, optimizer, network, admins, security, settings, and timezone. Legacy numeric roles remain compatible.
-- Security events, account expiry, files, backups, health checks, and ISO console logs render in each account's selected IANA timezone; section navigation resets the main scroll position.
-- Panel console history is buffered to protected disk logs and restored after panel restarts, including while game servers are offline. Live polling uses a minimal status payload, samples process metrics less often, skips unchanged DOM renders, and prevents overlapping scheduled backups.
-- Password fields on login and dynamically rendered forms receive accessible show/hide controls.
-- Live Bedrock backups use the server save hold/query/resume snapshot protocol before archiving LevelDB worlds. ZIP creation is atomic, processes one file at a time to lower peak RAM, and safely ignores only transient files removed by compaction.
-- Every Nexus-Mark launch receives a unique transient systemd unit name after stale units for that server are stopped and reset, eliminating loaded-unit/fragment collisions and orphan-process overlap.
-- Server RAM and CPU allocations are stored in both SQLite and an atomic per-server recovery manifest. Editing resources regenerates the Nexus-Mark profile, and folder recovery restores the real allocation instead of defaulting to `1024 MB / 1 core`.
-- Nexus-Mark metadata and runtime folders are hidden from File Manager edits, uploads, ZIP extraction, and root-folder archives. Runtime launches always rebuild RAM/CPU limits from SQLite, so changing a visible server file cannot raise a 1 GB allocation to 16 GB.
-- Windows Nexus-Mark now uses a process-tree allocation guard with hidden process launches and hard stop-on-violation behavior for no-Docker installs; Linux/systemd still uses cgroup `MemoryMax` and `CPUQuota`.
-- Deleted servers receive persistent tombstones, pending restart/wake work is cancelled, and leftover folders are removed rather than resurrected during boot recovery.
-- Repair playbooks remain untrusted candidates until the repaired server has stayed online for at least 60 seconds; failed repair attempts are no longer learned as successful fixes.
-- Live server and upload percentages now patch existing UI nodes instead of rebuilding cards, so Alpha Editor positions and software-version selections remain stable during polling.
-- SQLite uses integrity checks, foreign-key checks, verified rotating snapshots, and startup recovery from the latest verified snapshot when the primary database cannot open.
-- Login, password reset, and protected owner-password fields include accessible password reveal controls.
-- Password-reset delivery sends styled multipart HTML through local sendmail and provider-specific Resend, Brevo, SendGrid, or generic API payloads.
-- Host Edition adds maintenance mode and configurable per-account server quotas.
-- Nexus-Mark uses transient systemd services; 1-3 core servers receive a temporary startup burst while allocations of 4+ cores stay at their configured steady limit.
-- Launch-failure restart storms stop automatically and do not create meaningless crash backups.
-- Server settings now expose per-server auto start, auto restart, wake on join, crash backup, startup delay, RAM, port, and a confirmed Fix Server action after creation.
-- Backups include minute/hour scheduling, 6-digit share-code requests, owner approval, timed access, revoke, and a separate shared-backup restore section.
-- Cross-panel backup transfer uses revocable public archive links with 256-bit random tokens, hashed token storage, expiry, ranged downloads, remote ZIP validation, and private-network import blocking.
-- Timezone selection is per account, includes `Asia/Kolkata` and `Asia/Calcutta`, and remains stable while live status polling runs.
-- Password recovery now has a dedicated `/reset.html` page, one-minute request throttling, session invalidation after reset, generic email-relay support, and first-class Resend payload support.
-- Auto-start now runs at panel boot with each server's startup delay. Unexpected exits can create a crash backup and auto-restart; operator Stop, Kill, and Restart remain intentional.
-- On Linux/systemd, Nexus-Mark launches game processes in transient cgroup scopes with RAM, task, and CPU limits. Servers receive a 90-second CPU startup burst before returning to their configured core limit.
-- Normal edition admins can see assigned panel servers by permission level; host-only templates and host token controls are hidden outside host edition.
-- Software version selects prefer the latest refreshed version for installs.
-- Starting a server can run a deterministic smart repair for missing executables before retrying.
-- Admin creation supports permanent or temporary accounts, with expiry enforced during auth.
-- Login has a real reset-password code form; without email relay the code is written to `data/password-reset-otp.log` for the VPS owner.
-
-Optional Nginx acceleration:
-
-```nginx
-location /protected-files/ {
-  internal;
-  alias /opt/nexuspanel/servers/;
-}
-```
-
-Then set the service environment:
-
-```bash
-NEXUSPANEL_X_ACCEL_ROOT=/opt/nexuspanel/servers
-NEXUSPANEL_X_ACCEL_PREFIX=/protected-files
-```
-
-With this enabled, NexusPanel still checks login/auth first, then Nginx streams the real file at maximum VPS speed.
-
-## New Panel Upgrades
-
-- 10 selectable neon themes from the top bar.
-- External backups saved in `/var/lib/nexuspanel/backups/<server-id>/` on Linux, not inside the server or panel source folder.
-- Server delete button with online-server protection.
-- RAM/port/name editor after server creation.
-- Live whitelist reload for running Java/Bedrock servers where supported by the server software.
-- Whitelist remove confirmation plus remove-all action.
-- Server metrics: process RAM, allocated RAM, CPU, and detected online players.
-- Console scroll lock: scrolling up no longer snaps back down.
-- Chunked/resumable file uploads with pause/cancel and cross-device progress visibility.
-- File manager actions: upload, copy, cut, paste, archive, unzip, delete, select all.
-- More optimizer capability cards and VPS tuning notes.
-- Template-first setup replaces the old tunnel page: Bedrock, Java crossplay, PocketMine, Purpur performance, Rust, ARK, Valheim, Palworld, Factorio, Satisfactory, and Project Zomboid templates.
-- Settings includes a safe GitHub updater for `Sarvesh12341234/Nexus-panel`, owner-only terminal toggle, and Nexus-Mark controls.
-- Network page shows inbound/outbound traffic totals and a one-click current upload/download speed sample.
-- System metrics use Linux `/proc/stat` CPU deltas and `MemAvailable` RAM where available, with robust logical-core detection through `nproc`/`lscpu`.
-- Template view defaults host edition to Minecraft templates; selecting another game switches the available templates and software path.
-- Host API can create an account and assigned server in one request for hosting automation.
-- Template JSON supports requirements, RAM/CPU/disk, ports, start args, paths, properties, and Nexus-Mark security profile.
-- Nexus-Mark is NexusPanel's original no-Docker control layer: path sandboxing, per-server root, RAM allocation guard, external resource profile files, and Linux systemd/cgroup plan metadata.
-- The UI includes a DevTools deterrent that redirects to Google for common inspector shortcuts; real protection is still server-side owner auth and permission checks.
-
-## Accounts
-
-On first launch, NexusPanel asks for an owner account in the terminal before the web panel starts. After that, the web panel only shows login until a valid session exists. Accounts are saved in `data/nexuspanel.sqlite`.
-
-For unattended setup, set:
-
-```bash
-NEXUSPANEL_OWNER_EMAIL=owner@example.com
-NEXUSPANEL_OWNER_PASSWORD=password123
-npm start
-```
-
-The owner can create admin accounts with an email, password, and access level from `0` to `100`.
-
-Forgot-password OTP reset is built in. Configure a tiny email relay with:
-
-```bash
-NEXUSPANEL_EMAIL_API_URL=https://your-email-api/send
-NEXUSPANEL_EMAIL_API_KEY=optional-token
-NEXUSPANEL_EMAIL_FROM=NexusPanel <panel@example.com>
-```
-
-Without an email relay, OTPs are written to `data/password-reset-otp.log` for the VPS owner.
-
-For Resend, set `NEXUSPANEL_EMAIL_PROVIDER=resend` and use
-`NEXUSPANEL_EMAIL_API_URL=https://api.resend.com/emails`. The API key is sent as a
-Bearer token. Password recovery is available on the dedicated `/reset.html` page.
-
-Host API provisioning example:
-
-```bash
-curl -X POST http://YOUR_PANEL:3000/api/host/provision \
-  -H "Authorization: Bearer YOUR_HOST_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"account":{"email":"player@example.com","password":"StrongPass123","name":"Player","accessLevel":5},"server":{"name":"Player SMP","type":"java","ramMb":4096,"cpuCores":2,"port":25565,"softwareKey":"paper"}}'
-```
-
-| Level | Access |
-| --- | --- |
-| `0` | View only |
-| `5` | Start, stop, restart, kill |
-| `20` | View console |
-| `40` | Send console commands |
-| `60` | Manage servers |
-| `80` | Manage files and configs |
-| `100` | Manage admins and all panel controls |
-
-Passwords are hashed with Node's `crypto.scryptSync`. Login sessions are stored in SQLite and sent as signed HTTP-only cookies.
-
-## Current MVP
-
-- First-run owner creation
-- Email/password login
-- SQLite users, sessions, server records, and bounded in-process cache for external lookups
-- Owner admin creation and access editing
-- Guarded API routes based on numeric permissions
-- Basic server dashboard records for Bedrock and Java
-- Single-call `/api/overview` dashboard refresh for faster loading
-- Lightweight server options: auto start, auto restart, crash backup, daily backups, backup retention, wake on join, whitelist, RAM cap, and startup delay
-- Host optimizer panel for Linux/VPS networking, DNS planning, BBR/fq, socket buffers, MTU probing, file limits, and low-memory swappiness
-- Smart software catalog for Bedrock Dedicated Server, Java Vanilla, Paper, Purpur, and PocketMine-MP
-- Linux Java servers auto-detect missing Java and try to install Java 21 through the host package manager before downloading server software.
-- Nexu templates are NexusPanel's original import format for future/custom games.
-- Plugin/pack registry with compatibility checks and safe per-server target paths
-
-## Host Optimizer
-
-NexusPanel detects the host OS before showing optimization actions.
-
-- Windows: optimization is disabled and shown as unsupported.
-- Linux: current sysctl values, DNS resolvers, kernel, RAM, CPU count, and VPS hints are shown.
-- Linux root: the owner can apply whitelisted sysctl tweaks from the panel.
-- Linux non-root: NexusPanel shows copyable commands instead of trying privileged writes.
-
-The optimizer stays lightweight: no background agent, no polling loop, no AI service, no Docker, and no extra packages.
-
-## Software And Plugins
-
-NexusPanel keeps server files under `servers/` and rejects plugin paths that try to escape that directory.
-
-- Java Vanilla: no plugin loader.
-- Paper and Purpur: `.jar` plugins go to `servers/<server>/plugins/`.
-- PocketMine-MP: `.phar` plugins go to `servers/<server>/plugins/`.
-- Bedrock Dedicated Server: `.mcpack` and `.mcaddon` packs go under `servers/<server>/packs/`.
-
-The plugin section currently registers the correct target path and compatibility metadata. A later file-manager/upload step can copy the actual file into that verified path.
-
-Software installation currently prepares the correct server folder, executable path, and progress/status state. It writes an install marker at the target executable path so the panel can show install progress immediately; replacing that marker with real Paper/Purpur/Bedrock download logic is the next step.
+MIT

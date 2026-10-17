@@ -2,6 +2,29 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+/**
+ * Zip Slip / path-traversal guard.
+ * Rejects any archive entry that is absolute, contains a drive letter, or
+ * resolves outside the extraction destination (e.g. "../../etc/cron.d/x").
+ */
+function assertSafeArchiveEntry(entry, destination) {
+  const raw = String(entry || '').replaceAll('\\', '/');
+  if (!raw) return;
+  if (raw.startsWith('/') || /^[a-zA-Z]:/.test(raw)) {
+    throw new Error(`Archive entry uses an absolute path and was blocked: ${entry}`);
+  }
+  const resolvedDestination = path.resolve(destination);
+  const resolvedEntry = path.resolve(resolvedDestination, raw);
+  const relative = path.relative(resolvedDestination, resolvedEntry);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Archive entry escapes the extraction folder and was blocked: ${entry}`);
+  }
+}
+
+function assertSafeArchive(archivePath, destination) {
+  for (const entry of zipEntries(archivePath)) assertSafeArchiveEntry(entry, destination);
+}
+
 function extractArchive(archivePath, destination) {
   fs.rmSync(destination, { recursive: true, force: true });
   extractArchiveInto(archivePath, destination);
@@ -33,6 +56,8 @@ function extractArchiveInto(archivePath, destination, options = {}) {
     if (!isZipFile(archivePath)) {
       throw new Error('This file is not a complete valid ZIP. It may be an unfinished upload/download; re-upload it or use a fresh backup/archive.');
     }
+    // Zip Slip defense: every entry must stay inside the destination.
+    assertSafeArchive(archivePath, destination);
     const mode = ['replace', 'skip', 'fail'].includes(options.mode) ? options.mode : 'replace';
     const unzipArgs = mode === 'skip' ? ['-n', '-q', archivePath, '-d', destination] : mode === 'fail' ? ['-q', archivePath, '-d', destination] : ['-o', '-q', archivePath, '-d', destination];
     const result = process.platform === 'win32'
@@ -43,6 +68,14 @@ function extractArchiveInto(archivePath, destination, options = {}) {
     }
     if (result.status !== 0) throw new Error(result.stderr || result.stdout || 'Failed to extract zip.');
     return;
+  }
+  // tar archives: list entries first and reject traversal before extracting.
+  const listing = spawnSync('tar', ['-tzf', archivePath], { encoding: 'utf8', windowsHide: true });
+  if (listing.error && listing.error.code === 'ENOENT') throw new Error('tar is required to extract this archive.');
+  if (listing.status === 0) {
+    for (const entry of String(listing.stdout || '').split(/\r?\n/).filter(Boolean)) {
+      assertSafeArchiveEntry(entry, destination);
+    }
   }
   const result = spawnSync('tar', ['-xzf', archivePath, '-C', destination], { encoding: 'utf8', windowsHide: true });
   if (result.error && result.error.code === 'ENOENT') throw new Error('tar is required to extract this archive.');
@@ -97,4 +130,4 @@ function copyDirectoryContents(source, destination) {
   }
 }
 
-module.exports = { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions, zipEntries };
+module.exports = { assertSafeArchive, assertSafeArchiveEntry, copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions, zipEntries };

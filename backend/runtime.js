@@ -1,7 +1,7 @@
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnOptions, wrapCommand } = require('./nexus_mark');
+const { spawnOptions, wrapCommand } = require('./asf');
 const { hostCpuCount } = require('./system_info');
 const { ensureServerDirs, externalDataRoot } = require('./paths');
 const { processTreeMetrics } = require('./process_metrics');
@@ -99,8 +99,8 @@ function detectRecoverableStartupFailure(serverId, line) {
   if (!child || child.recoveryReason) return;
   child.recoveryReason = 'server-properties';
   appendLog(serverId, '[NexusPanel] Auto-heal detected an unreadable server.properties file. Stopping the failed launch for a clean rebuild.');
-  if (child.nexusUnit && process.platform === 'linux') {
-    spawnSync('systemctl', ['kill', child.nexusUnit], { stdio: 'ignore' });
+  if (child.asfUnit && process.platform === 'linux') {
+    spawnSync('systemctl', ['kill', child.asfUnit], { stdio: 'ignore', timeout: 5000 });
   } else {
     child.kill('SIGTERM');
   }
@@ -160,7 +160,7 @@ function runtimeDetails(serverId) {
   return {
     status: child ? 'online' : 'offline',
     pid: child ? child.pid : null,
-    unit: child?.nexusUnit || '',
+    unit: child?.asfUnit || '',
     startedAt: child?.startedAt || 0,
     players: [...(players.get(id) || new Set())],
   };
@@ -236,8 +236,8 @@ function verifyExecutablePath(binary, serverRoot) {
 function ensureRuntimeEnvironment(root) {
   const dirs = {
     home: root,
-    temp: path.join(root, '.nexusmark-tmp'),
-    natives: path.join(root, '.nexusmark-tmp', 'natives'),
+    temp: path.join(root, '.asf-tmp'),
+    natives: path.join(root, '.asf-tmp', 'natives'),
     cache: path.join(root, 'runtime', 'cache'),
     config: path.join(root, 'runtime', 'config'),
   };
@@ -257,13 +257,14 @@ function startServer(server, software, options = {}) {
   const root = ensureServerDirs(server);
   const runtimeEnv = ensureRuntimeEnvironment(root);
   appendLog(serverId, `[NexusPanel] Working directory: ${root}`);
-  if (options.disableNative) appendLog(serverId, '[NexusPanel] Native Nexus-Mark launch retry disabled; using compatibility isolation path.');
+  if (options.disableNative) appendLog(serverId, '[NexusPanel] ASF native launch retry disabled; using compatibility isolation path.');
   const executable = server.executable_path;
   const totalCpuCores = hostCpuCount();
   const dbMemoryMb = Math.max(256, Math.round(Number(server.max_memory_mb) || 1024));
   const dbCpuCores = Math.max(1, Math.min(totalCpuCores, Math.round(Number(server.cpu_cores) || 1)));
   let command;
   let args;
+  const launchExecutablePaths = [executable];
 
   if (software.key === 'java-vanilla' || software.key === 'paper' || software.key === 'purpur' || software.key === 'fabric') {
     const requiredMajor = requiredJavaMajorForMinecraftVersion(server.software_version || 'latest');
@@ -281,6 +282,7 @@ function startServer(server, software, options = {}) {
     }
     command = bundledJava || 'java';
     if (bundledJava) {
+      launchExecutablePaths.push(bundledJava);
       const executableCheck = verifyExecutablePath(bundledJava, root);
       if (!executableCheck.ok) {
         appendLog(serverId, `[NexusPanel] Java preflight failed: ${executableCheck.reason}.`);
@@ -313,6 +315,7 @@ function startServer(server, software, options = {}) {
     if (fs.existsSync(runtimeMetaPath)) {
       phpBinary = JSON.parse(fs.readFileSync(runtimeMetaPath, 'utf8')).phpBinary || phpBinary;
     }
+    if (path.isAbsolute(phpBinary)) launchExecutablePaths.push(phpBinary);
     const phpCheck = spawnSync(phpBinary, ['-v'], { windowsHide: true, encoding: 'utf8' });
     if (phpCheck.error || phpCheck.status !== 0) {
       throw new Error('PocketMine bundled PHP is missing or broken. Reinstall PocketMine from the Software tab.');
@@ -348,20 +351,35 @@ function startServer(server, software, options = {}) {
     envTemp: runtimeEnv.temp,
     envCache: runtimeEnv.cache,
     envConfig: runtimeEnv.config,
+    launchCommand: path.isAbsolute(command) ? command : '',
+    launchExecutable: executable,
+    extraExecutablePaths: launchExecutablePaths,
   };
-  appendLog(serverId, `[NexusPanel] Nexus-Mark allocation enforced from database: ${dbMemoryMb} MB RAM, ${dbCpuCores} CPU core(s).`);
+  appendLog(serverId, `[NexusPanel] ASF allocation enforced from database: ${dbMemoryMb} MB RAM, ${dbCpuCores} CPU core(s).`);
   const wrapped = wrapCommand(command, args, profile, options);
   if (wrapped.identity?.available) {
     appendLog(serverId, `[NexusPanel] Dedicated kernel identity active: ${wrapped.identity.name} (UID ${wrapped.identity.uid}), isolated from other server processes.`);
   } else if (process.platform === 'linux') {
-    appendLog(serverId, `[NexusPanel] Per-server UID layer unavailable (${wrapped.identity?.reason || 'host compatibility'}); remaining Nexus-Mark layers stay active.`);
+    const reason = wrapped.identity?.reason || 'host compatibility';
+    const hint = reason === 'panel-not-root'
+      ? ' Run the panel as root (systemd service) to enable per-server UID isolation.'
+      : reason === 'setfacl-missing'
+        ? ' Install ACL support: apt install -y acl'
+        : '';
+    appendLog(serverId, `[NexusPanel] Per-server UID layer unavailable (${reason}); remaining ASF layers stay active.${hint}`);
   }
-  if (wrapped.engine === 'native-kernel+cgroup-v2') {
-    appendLog(serverId, `[NexusPanel] Nexus-Mark ${wrapped.policyTier || 'compatible'} policy active: cgroup v2 + namespaces + Landlock + seccomp (${wrapped.nativeDetail}).`);
-  } else if (wrapped.engine === 'native-landlock-seccomp') {
-    appendLog(serverId, `[NexusPanel] Nexus-Mark native Landlock/seccomp active; systemd cgroup policy is unavailable (${wrapped.compatibilityDetail || 'host compatibility'}).`);
+  if (wrapped.engine === 'asf-kernel+cgroup-v2') {
+    appendLog(serverId, `[NexusPanel] ASF ${wrapped.policyTier || 'compatible'} policy active: cgroup v2 + Landlock + seccomp (${wrapped.nativeDetail}).`);
+  } else if (wrapped.engine === 'asf-native-landlock-seccomp') {
+    appendLog(serverId, `[NexusPanel] ASF native Landlock/seccomp active; systemd cgroup policy is unavailable (${wrapped.compatibilityDetail || 'host compatibility'}).`);
   } else if (process.platform === 'linux') {
-    appendLog(serverId, `[NexusPanel] Nexus-Mark native runtime unavailable (${wrapped.nativeDetail || 'unsupported host'}); using ${wrapped.engine}.`);
+    const detail = wrapped.nativeDetail || 'unsupported host';
+    const hint = detail === 'panel-not-root'
+      ? ' Run the panel as root (systemd service) to enable the native sandbox.'
+      : detail === 'compiler-missing'
+        ? ' Install a C compiler: apt install -y build-essential'
+        : '';
+    appendLog(serverId, `[NexusPanel] ASF native runtime unavailable (${detail}); using ${wrapped.engine}.${hint}`);
   }
   const child = spawn(wrapped.command, wrapped.args, spawnOptions({
     cwd: root,
@@ -373,6 +391,7 @@ function startServer(server, software, options = {}) {
   child.startedAt = Date.now();
   child.stopCommand = software.stopCommand || 'stop';
   child.nexusUnit = wrapped.unit;
+  child.asfUnit = wrapped.unit;
   child.nexusGuardTimer = startAllocationGuard(serverId, child, profile);
   if (wrapped.unit) {
     if (profile.startupCpuQuotaPercent > profile.cpuQuotaPercent) {
@@ -386,7 +405,7 @@ function startServer(server, software, options = {}) {
         if (result.status === 0) appendLog(serverId, `[NexusPanel] Startup CPU burst ended. Limit is now ${profile.cpuCores} core(s).`);
         else {
           const detail = String(result.stderr || '').trim() || 'systemctl error';
-          if (/unit .* not found/i.test(detail)) appendLog(serverId, '[NexusPanel] Startup CPU burst unit was already collected; steady database allocation remains enforced by Nexus-Mark.');
+          if (/unit .* not found/i.test(detail)) appendLog(serverId, '[NexusPanel] Startup CPU burst unit was already collected; steady database allocation remains enforced by ASF.');
           else appendLog(serverId, `[NexusPanel] CPU throttle update failed: ${detail}`);
         }
       }, 45 * 1000);
@@ -396,6 +415,13 @@ function startServer(server, software, options = {}) {
       appendLog(serverId, `[NexusPanel] Cgroup active: steady limit ${profile.cpuQuotaPercent}% CPU (${profile.cpuCores} cores); startup burst is disabled for allocations above 3 cores.`);
     }
   }
+  child.recoveryUnit = () => {
+    if (child.asfUnit && process.platform === 'linux') {
+      spawnSync('systemctl', ['kill', child.asfUnit], { stdio: 'ignore' });
+    } else {
+      child.kill('SIGTERM');
+    }
+  };
   child.stdout.on('data', (chunk) => splitLines(serverId, chunk));
   child.stderr.on('data', (chunk) => splitLines(serverId, chunk));
   child.on('error', (error) => {
@@ -419,26 +445,26 @@ function startServer(server, software, options = {}) {
           'show', wrapped.unit,
           '--no-pager',
           '--property=Result,ExecMainCode,ExecMainStatus,StatusText,SubState,ActiveState',
-        ], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+        ], { encoding: 'utf8', timeout: 5000 });
         const detail = String(show.stdout || '').trim();
         if (detail) appendLog(serverId, `[NexusPanel] Supervisor failure detail: ${detail.replace(/\\n/g, ' | ')}`);
         const journal = spawnSync('journalctl', ['-u', wrapped.unit, '-n', '80', '--no-pager', '-o', 'cat'], {
-          encoding: 'utf8', windowsHide: true, timeout: 5000,
+          encoding: 'utf8', timeout: 5000,
         });
         const journalText = String(journal.stdout || journal.stderr || '').trim();
-        if (journalText) appendLog(serverId, `[NexusPanel] Native/supervisor stderr:\n${journalText.slice(-12000)}`);
+        if (journalText) appendLog(serverId, `[NexusPanel] ASF/supervisor stderr:\n${journalText.slice(-12000)}`);
       } catch (error) {
         appendLog(serverId, `[NexusPanel] Could not collect supervisor diagnostics: ${error.message}`);
       }
     }
 
-    // If the native kernel wrapper dies almost immediately, retry exactly once
+    // If the ASF kernel wrapper dies almost immediately, retry exactly once
     // without the native wrapper. This preserves systemd resource isolation and
     // makes a host-incompatible Landlock/seccomp policy self-healing.
-    const nativeLaunch = String(wrapped.engine || '').startsWith('native-');
+    const nativeLaunch = String(wrapped.engine || '').startsWith('asf-');
     const fallbackEligible = nativeLaunch && !options.disableNative && !intentional && uptimeMs < 5000 && code !== 0;
     if (fallbackEligible) {
-      appendLog(serverId, `[NexusPanel] Native sandbox exited too early (code=${code ?? 'none'}). Retrying once with compatibility isolation so Paper can expose its real error.`);
+      appendLog(serverId, `[NexusPanel] ASF sandbox exited too early (code=${code ?? 'none'}). Retrying once with compatibility isolation so Paper can expose its real error.`);
       processes.delete(serverId);
       players.delete(serverId);
       partialLines.delete(serverId);
@@ -485,20 +511,20 @@ function startAllocationGuard(serverId, child, profile) {
     appendLog(serverId, '[NexusPanel] Memory guard disabled for PaperMC server (world generation requires more memory).');
     return null;
   }
-  
+
   // Skip guard if using systemd cgroup (it handles limits natively)
-  if (process.platform === 'linux' && child.nexusUnit) return null;
+  if (process.platform === 'linux' && child.asfUnit) return null;
 
   const baseMemoryMb = profile.memoryMaxMb;
   // INCREASED: More generous during startup
   const startupMultiplier = 3.0;  // Was 2.0
   const steadyMultiplier = 1.8;   // Was 1.35
-  
+
   // Start with startup mode (more lenient)
   let isStartupPhase = true;
   let startupPhaseEndedAt = null;
   const STARTUP_PHASE_DURATION = 300000; // 5 minutes (was 2 minutes)
-  
+
   // Dynamic hard limit based on phase
   const getHardLimit = () => {
     if (isStartupPhase) {
@@ -529,7 +555,7 @@ function startAllocationGuard(serverId, child, profile) {
         /\[Server thread\/INFO\]: Done/,
       ];
       const isReady = readyPatterns.some(pattern => logs.some(line => pattern.test(line)));
-      
+
       // Also check if startup duration exceeded
       const elapsed = Date.now() - child.startedAt;
       if (isReady || elapsed > STARTUP_PHASE_DURATION) {
@@ -543,13 +569,13 @@ function startAllocationGuard(serverId, child, profile) {
     // Get current memory usage
     const metrics = processTreeMetrics({
       pid: child.pid,
-      unit: child.nexusUnit,
+      unit: child.asfUnit,
       cacheKey: `runtime-guard:${serverId}`,
     });
 
     const currentRssMb = metrics.rssMb;
     const hardLimit = getHardLimit();
-    
+
     // Track memory history for trend analysis
     memoryHistory.push({ rss: currentRssMb, time: Date.now() });
     if (memoryHistory.length > HISTORY_SIZE) memoryHistory.shift();
@@ -582,12 +608,12 @@ function startAllocationGuard(serverId, child, profile) {
     // Memory exceeded limit - handle with intelligence
     strikes += 1;
     const phaseLabel = isStartupPhase ? 'startup (world generation)' : 'steady-state';
-    
+
     // Cooldown to prevent spam
     if (Date.now() < warningCooldown) return;
     warningCooldown = Date.now() + 3000;
 
-    appendLog(serverId, 
+    appendLog(serverId,
       `[NexusPanel] Memory guard warning (${phaseLabel}): ${currentRssMb} MB / ${hardLimit} MB ` +
       `(allocation: ${baseMemoryMb} MB, strikes: ${strikes}/${maxStrikes})` +
       (growthRate > 50 ? `, rapidly growing: +${Math.round(growthRate)} MB/s` : '')
@@ -603,16 +629,16 @@ function startAllocationGuard(serverId, child, profile) {
         }
         return;
       }
-      
+
       // If we've been in startup for too long with high memory, log warning
       const startupElapsed = Date.now() - child.startedAt;
       if (startupElapsed > STARTUP_PHASE_DURATION && strikes >= maxStrikes + 2) {
         appendLog(serverId, '[NexusPanel] Startup phase exceeded 5 minutes with high memory usage. Consider allocating more RAM or using a pre-generated world.');
       }
-      
+
       // Only kill if extremely high and sustained
       if (strikes < maxStrikes + 8) return;
-      
+
       // Check if memory is still growing
       if (growthRate > 20 && strikes < maxStrikes + 12) {
         appendLog(serverId, '[NexusPanel] Memory still growing rapidly during startup. Allowing more time before termination.');
@@ -626,10 +652,10 @@ function startAllocationGuard(serverId, child, profile) {
     // Final check - verify memory is still high before killing
     const finalMetrics = processTreeMetrics({
       pid: child.pid,
-      unit: child.nexusUnit,
+      unit: child.asfUnit,
       cacheKey: `runtime-guard-final:${serverId}`,
     });
-    
+
     if (finalMetrics.rssMb <= hardLimit * 1.1) {
       appendLog(serverId, '[NexusPanel] Memory dropped below threshold. Resetting guard state.');
       strikes = 0;
@@ -639,10 +665,10 @@ function startAllocationGuard(serverId, child, profile) {
     // If we're in startup and the server is still generating the world, try to be even more patient
     if (isStartupPhase) {
       const logs = consoleLogs(serverId);
-      const isGeneratingWorld = logs.some(line => 
+      const isGeneratingWorld = logs.some(line =>
         /Preparing spawn area|Preparing level|Loading world|Generating terrain/i.test(line)
       );
-      
+
       if (isGeneratingWorld && strikes < maxStrikes + 15) {
         appendLog(serverId, '[NexusPanel] Server is still generating world. Extended grace period granted.');
         return;
@@ -652,7 +678,7 @@ function startAllocationGuard(serverId, child, profile) {
     // Kill the server as last resort
     intentionalStops.add(serverId);
     child.recoveryReason = 'allocation-guard';
-    appendLog(serverId, 
+    appendLog(serverId,
       `[NexusPanel] Memory guard stopped the server (${phaseLabel}). ` +
       `Final usage: ${finalMetrics.rssMb} MB / ${hardLimit} MB (allocation: ${baseMemoryMb} MB). ` +
       `Consider increasing RAM allocation or disabling the guard for worlds with large generation requirements.`
@@ -660,7 +686,7 @@ function startAllocationGuard(serverId, child, profile) {
     terminateProcessTree(child);
 
   }, 3000); // Check every 3 seconds
-  
+
   timer.unref();
   return timer;
 }
@@ -719,8 +745,8 @@ function killServer(serverId) {
   const child = processes.get(id);
   if (!child) return { ok: true, message: 'Server is already offline.' };
   intentionalStops.add(id);
-  if (child.nexusUnit && process.platform === 'linux') {
-    spawnSync('systemctl', ['kill', child.nexusUnit], { stdio: 'ignore' });
+  if (child.asfUnit && process.platform === 'linux') {
+    spawnSync('systemctl', ['kill', child.asfUnit], { stdio: 'ignore', timeout: 5000 });
   } else if (process.platform === 'win32') {
     terminateProcessTree(child);
     appendLog(id, '[NexusPanel] Kill requested.');

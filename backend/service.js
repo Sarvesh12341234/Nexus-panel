@@ -5,12 +5,12 @@ const { spawnSync } = require('node:child_process');
 
 const serviceName = process.env.NEXUSPANEL_SERVICE_NAME || 'nexuspanel';
 const hostAgentServiceName = `${serviceName}-host-agent`;
-const nexusMarkServiceName = `${serviceName}-nexusmark`;
+const asfServiceName = `${serviceName}-asf`;
 const repoRoot = path.resolve(__dirname, '..');
 const nodePath = process.execPath;
 const servicePath = `/etc/systemd/system/${serviceName}.service`;
 const hostAgentServicePath = `/etc/systemd/system/${hostAgentServiceName}.service`;
-const nexusMarkServicePath = `/etc/systemd/system/${nexusMarkServiceName}.service`;
+const asfServicePath = `/etc/systemd/system/${asfServiceName}.service`;
 
 function hasSystemd() {
   return process.platform === 'linux'
@@ -54,7 +54,7 @@ function ensureRuntimePermissions() {
     '/var/lib/nexuspanel',
     '/var/lib/nexuspanel/backups',
     '/var/lib/nexuspanel/logs',
-    '/var/lib/nexuspanel/nexus-mark',
+    '/var/lib/nexuspanel/asf',
   ];
   for (const dir of dirs) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
@@ -84,8 +84,8 @@ function serviceContent() {
 Description=NexusPanel Minecraft Server Panel
 After=network-online.target
 Wants=network-online.target
-Wants=${hostAgentServiceName}.service ${nexusMarkServiceName}.service
-After=${hostAgentServiceName}.service ${nexusMarkServiceName}.service
+Wants=${hostAgentServiceName}.service ${asfServiceName}.service
+After=${hostAgentServiceName}.service ${asfServiceName}.service
 
 [Service]
 Type=simple
@@ -145,16 +145,16 @@ WantedBy=multi-user.target
 `;
 }
 
-function nexusMarkServiceContent() {
+function asfServiceContent() {
   return `[Unit]
-Description=NexusMark Native Isolation Preflight
+Description=NexusPanel ASF Native Isolation Preflight
 After=local-fs.target
 Before=${serviceName}.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=${repoRoot}
-ExecStart=${nodePath} ${path.join(repoRoot, 'backend', 'nexus_mark_native.js')}
+ExecStart=${nodePath} ${path.join(repoRoot, 'backend', 'asf_native.js')}
 RemainAfterExit=yes
 NoNewPrivileges=no
 
@@ -181,12 +181,12 @@ function install({ start = true } = {}) {
   buildHostAgent();
   fs.writeFileSync(servicePath, serviceContent(), 'utf8');
   fs.writeFileSync(hostAgentServicePath, hostAgentServiceContent(), 'utf8');
-  fs.writeFileSync(nexusMarkServicePath, nexusMarkServiceContent(), 'utf8');
+  fs.writeFileSync(asfServicePath, asfServiceContent(), 'utf8');
   installCliCommand();
   runSystemctl(['daemon-reload']);
-  runSystemctl(['enable', hostAgentServiceName, nexusMarkServiceName, serviceName]);
+  runSystemctl(['enable', hostAgentServiceName, asfServiceName, serviceName]);
   if (start) {
-    runSystemctl(['restart', nexusMarkServiceName]);
+    runSystemctl(['restart', asfServiceName]);
     runSystemctl(['restart', hostAgentServiceName]);
     runSystemctl(['restart', serviceName]);
   }
@@ -203,11 +203,11 @@ function installCliCommand() {
 function uninstall() {
   requireLinuxSystemd();
   requireRoot();
-  spawnSync('systemctl', ['stop', serviceName, hostAgentServiceName, nexusMarkServiceName], { stdio: 'inherit' });
-  spawnSync('systemctl', ['disable', serviceName, hostAgentServiceName, nexusMarkServiceName], { stdio: 'inherit' });
+  spawnSync('systemctl', ['stop', serviceName, hostAgentServiceName, asfServiceName], { stdio: 'inherit' });
+  spawnSync('systemctl', ['disable', serviceName, hostAgentServiceName, asfServiceName], { stdio: 'inherit' });
   if (fs.existsSync(servicePath)) fs.rmSync(servicePath, { force: true });
   if (fs.existsSync(hostAgentServicePath)) fs.rmSync(hostAgentServicePath, { force: true });
-  if (fs.existsSync(nexusMarkServicePath)) fs.rmSync(nexusMarkServicePath, { force: true });
+  if (fs.existsSync(asfServicePath)) fs.rmSync(asfServicePath, { force: true });
   fs.rmSync('/usr/local/bin/nexuspanel', { force: true });
   runSystemctl(['daemon-reload']);
   console.log(`${serviceName} service removed.`);
@@ -223,18 +223,18 @@ function status({ quiet = false } = {}) {
   const active = spawnSync('systemctl', ['is-active', '--quiet', serviceName], { stdio: 'ignore' }).status === 0;
   const enabled = spawnSync('systemctl', ['is-enabled', '--quiet', serviceName], { stdio: 'ignore' }).status === 0;
   const hostAgentActive = spawnSync('systemctl', ['is-active', '--quiet', hostAgentServiceName], { stdio: 'ignore' }).status === 0;
-  const nexusMarkActive = spawnSync('systemctl', ['is-active', '--quiet', nexusMarkServiceName], { stdio: 'ignore' }).status === 0;
+  const asfActive = spawnSync('systemctl', ['is-active', '--quiet', asfServiceName], { stdio: 'ignore' }).status === 0;
   if (!quiet) {
-    console.log(JSON.stringify({ available: true, installed, active, enabled, hostAgentActive, nexusMarkActive, serviceName, servicePath }, null, 2));
+    console.log(JSON.stringify({ available: true, installed, active, enabled, hostAgentActive, asfActive, serviceName, servicePath }, null, 2));
   }
-  return { available: true, installed, active, enabled, hostAgentActive, nexusMarkActive, serviceName, servicePath };
+  return { available: true, installed, active, enabled, hostAgentActive, asfActive, serviceName, servicePath };
 }
 
 function componentAction(component, action) {
   requireLinuxSystemd();
-  const units = { panel: serviceName, agent: hostAgentServiceName, nexusmark: nexusMarkServiceName };
+  const units = { panel: serviceName, agent: hostAgentServiceName, asf: asfServiceName };
   const unit = units[component];
-  if (!unit || !['start', 'stop', 'restart', 'status'].includes(action)) throw new Error('Use panel, agent, or nexusmark with start, stop, restart, or status.');
+  if (!unit || !['start', 'stop', 'restart', 'status'].includes(action)) throw new Error('Use panel, agent, or asf with start, stop, restart, or status.');
   if (action === 'status') return runSystemctl(['status', unit, '--no-pager']);
   runSystemctl([action, unit]);
 }
@@ -318,7 +318,7 @@ module.exports = {
   install,
   serviceName,
   hostAgentServiceName,
-  nexusMarkServiceName,
+  asfServiceName,
   startService,
   stopService,
   restartService,
@@ -326,7 +326,7 @@ module.exports = {
   changePort,
   serviceContent,
   hostAgentServiceContent,
-  nexusMarkServiceContent,
+  asfServiceContent,
   status,
   componentAction,
 };

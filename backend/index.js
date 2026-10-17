@@ -11,32 +11,25 @@ const { pipeline } = require('node:stream/promises');
 const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
 const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
-const { AdaptiveEngine } = require('./adaptive_engine');
-const { MODEL_VERSION: REPAIR_AGENT_MODEL_VERSION, PARAMETER_COUNT: REPAIR_AGENT_PARAMETER_COUNT, RepairAgent } = require('./repair_agent');
 const { audit: auditPermissions, repair: repairPermissions } = require('./permission_repair');
-const { RepairWebResearch } = require('./repair_web');
-const advancedAi = require('./advanced_ai');
 const worldConverter = require('./world_converter');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
 const { assertInside, backupsRoot, displayPath, ensureServerDirs, findServerRoot, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
 const { clearSoftwareVersionCache, defaultSoftware, findSoftware, installedJavaMajor, pluginKindForFile, requiredJavaMajorForMinecraftVersion, resolveDownload, softwareCatalog, softwareVersions } = require('./software');
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
-const { kernelStatus, nativeStatus, profileForServer, writeProfile } = require('./nexus_mark');
-const { removeServerIdentity } = require('./nexus_mark_identity');
+const { kernelStatus, nativeStatus, profileForServer, writeProfile } = require('./asf');
+const { removeServerIdentity } = require('./asf_identity');
 const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer, subscribeConsole } = require('./runtime');
 const { copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile, zipCollisions, zipEntries } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { processTreeMetrics } = require('./process_metrics');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
 const { DDOS_PARAMETER_COUNT, collectDdosEvidence } = require('./ddos_guard');
-const { runAgentTerminal, runFullAccessCommand } = require('./agent_terminal');
+const tebex = require('./tebex');
+const hosting = require('./hosting');
 const hostAgent = require('./host_agent');
-const { IntelligenceCore } = require('./intelligence_core');
 const { PerformanceMonitor } = require('./performance_monitor');
-const openRouter = require('./openrouter');
-const { MicroDecisionModel } = require('./micro_lm');
-const { NexusAgentCore } = require('./agent_core');
 const {
   SESSION_COOKIE,
   authMiddleware,
@@ -45,9 +38,11 @@ const {
   clearSessionCookie,
   createSession,
   createUser,
+  emailPolicyError,
   hashPassword,
   hasPermission,
   normalizePermissionKeys,
+  passwordPolicyError,
   permissionKeysForUser,
   permissions,
   publicUser,
@@ -63,7 +58,6 @@ const dataRoot = path.join(__dirname, '..', 'data');
 const healthPath = path.join(dataRoot, 'panel_health.json');
 const editionPath = path.join(dataRoot, 'edition');
 const setupTokenPath = path.join(dataRoot, 'setup_token');
-const terminalSessions = new Map();
 const wakeWatchers = new Map();
 const tunnelProcesses = new Map();
 const passwordResetRequests = new Map();
@@ -74,14 +68,8 @@ const crashRestartTimers = new Map();
 const autoBackupInFlight = new Set();
 const serverSizeCache = new Map();
 const liveUploadProgress = new Map();
-const adaptiveEngine = new AdaptiveEngine();
-const intelligence = new IntelligenceCore(path.join(__dirname, '..'));
 const performanceMonitor = new PerformanceMonitor();
-const microLm = new MicroDecisionModel(path.join(__dirname, '..'));
-const repairAgent = new RepairAgent(db);
-const agentCore = new NexusAgentCore({ microLm, learning: repairAgent });
-const repairWeb = new RepairWebResearch(db);
-const { HealthEngine, IncidentEngine, DependencyGraph, ChangePlanner, routeModel } = require('./advanced/operations');
+const { HealthEngine, IncidentEngine, DependencyGraph, ChangePlanner } = require('./advanced/operations');
 const healthEngine = new HealthEngine();
 const incidentEngine = new IncidentEngine(300);
 const dependencyGraph = new DependencyGraph();
@@ -90,7 +78,7 @@ let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const dummyPasswordHash = hashPassword(crypto.randomBytes(24).toString('base64url'));
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
-const PANEL_VERSION = '3.2.2';
+const PANEL_VERSION = '1.0.0';
 let updateStatus = {
   running: false,
   progress: 0,
@@ -105,6 +93,10 @@ app.set('trust proxy', process.env.NEXUSPANEL_TRUST_PROXY === '1' ? 1 : 'loopbac
 app.use('/api/servers/:id/files/upload-chunk', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/servers/:id/files/upload', express.raw({ type: 'application/octet-stream', limit: '40mb' }));
 app.use('/api/network/upload-test', express.raw({ type: 'application/octet-stream', limit: '64mb' }));
+// Tebex webhooks are signature-verified over the RAW body, so they must be
+// captured as a buffer before JSON parsing — and they are exempt from the
+// CSRF header gate because Tebex's servers cannot send our custom header.
+app.use('/api/tebex/webhook/:serverId', express.raw({ type: '*/*', limit: '256kb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(performanceMonitor.middleware());
 app.use((req, res, next) => {
@@ -116,6 +108,9 @@ app.use((req, res, next) => {
 app.use(authMiddleware);
 app.use('/api', (req, res, next) => {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+  // Tebex webhook: authenticated by its own HMAC signature over the raw body,
+  // not by session/CSRF. Tebex's servers cannot send our custom header.
+  if (/^\/tebex\/webhook\//.test(req.path)) return next();
   if (/^Bearer /i.test(String(req.headers.authorization || '')) || req.headers['x-nexuspanel-token']) return next();
   if (req.headers['x-nexuspanel-request'] !== '1') return res.status(403).json({ error: 'Request verification failed.' });
   const fetchSite = String(req.headers['sec-fetch-site'] || '');
@@ -221,40 +216,20 @@ function repairAgentSecret() {
   return ensureSettingValue('repair_agent_secret', () => crypto.randomBytes(32).toString('hex'));
 }
 
-function repairFullAccessUntil() {
-  return Number(settingValue('repair_agent_full_access_until', '0')) || 0;
-}
-
-function repairFullAccessEnabled() {
-  return repairFullAccessUntil() > Date.now();
-}
-
 function pruneFixedLogs() {
   db.prepare('DELETE FROM fixed_logs WHERE created_at < ?').run(Date.now() - 24 * 60 * 60 * 1000);
-  pruneRepairAgentHistory();
+  pruneRepairHistory();
 }
 
-function pruneRepairAgentHistory() {
+/**
+ * Retention for the deterministic repair history tables. The AI/neural tables
+ * were removed in 1.0.0; only crash state, playbooks, and command observations
+ * remain, and they are pruned by age.
+ */
+function pruneRepairHistory() {
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const stale = db.prepare(`
-    SELECT id, confidence, feedback_source
-    FROM repair_agent_episodes
-    WHERE created_at < ?
-      AND COALESCE(feedback_source, '') NOT LIKE 'owner-%'
-      AND COALESCE(feedback_source, '') NOT LIKE 'auto-expired-%'
-    ORDER BY id ASC
-    LIMIT 40
-  `).all(cutoff);
-  for (const episode of stale) {
-    const confidence = Number(episode.confidence || 0);
-    const reward = confidence >= 0.5 ? 1 : -1;
-    repairAgent.feedback(episode.id, reward, reward > 0 ? 'auto-expired-helpful' : 'auto-expired-wrong');
-  }
-  const oldPlans = db.prepare('SELECT id FROM repair_agent_episodes WHERE created_at < ?').all(cutoff).map((row) => row.id);
-  if (!oldPlans.length) return;
-  const placeholders = oldPlans.map(() => '?').join(',');
-  db.prepare(`DELETE FROM repair_agent_plans WHERE episode_id IN (${placeholders})`).run(...oldPlans);
-  db.prepare(`DELETE FROM repair_agent_episodes WHERE id IN (${placeholders})`).run(...oldPlans);
+  db.prepare('DELETE FROM repair_command_observations WHERE observed_at < ?').run(cutoff);
+  db.prepare('DELETE FROM repair_playbooks WHERE last_learned_at < ?').run(cutoff);
 }
 
 function logFixed({ serverId = null, category = 'panel', title = '', detail = '', source = 'panel' }) {
@@ -288,44 +263,19 @@ function setSettingValue(key, value) {
   `).run(key, String(value ?? ''));
 }
 
-function ensureRepairAgentModelFresh() {
-  const signature = `v${REPAIR_AGENT_MODEL_VERSION}:${REPAIR_AGENT_PARAMETER_COUNT}:${knowledgeStatus().rules}:${knowledgeStatus().diagnosticSignals}`;
-  const previous = settingValue('repair_agent_model_signature', '');
-  if (previous === signature) return { reset: false, signature };
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    db.prepare('DELETE FROM repair_agent_weights').run();
-    db.prepare('DELETE FROM repair_agent_episodes').run();
-    db.prepare('DELETE FROM repair_agent_plans').run();
-    db.prepare('DELETE FROM repair_playbooks').run();
-    db.prepare('DELETE FROM repair_command_observations').run();
-    db.prepare('DELETE FROM repair_web_cache').run();
-    setSettingValue('repair_agent_model_signature', signature);
-    setSettingValue('repair_agent_model_reset_at', String(Date.now()));
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
-  repairAgent.resetModel();
-  return { reset: true, signature, previous };
-}
-
-const repairAgentModelFreshness = ensureRepairAgentModelFresh();
-
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
-  const defaultTag = edition === 'host' ? 'host-v3.0.0' : 'normal-v3.0.0';
+  const defaultTag = edition === 'host' ? 'host-v1.0.0' : 'normal-v1.0.0';
   let configuredTag = settingValue('update_target_tag', defaultTag);
-  if (/^(?:normal|host)-v[12]\./.test(configuredTag)) {
+  // Migrate any pre-1.0 tag (v1.x-v5.x) to the 1.0 scheme automatically.
+  if (/^(?:normal|host)-v(?:[1-5]\.)\d/.test(configuredTag)) {
     configuredTag = defaultTag;
     setSettingValue('update_target_tag', configuredTag);
   }
-  const markNative = nativeStatus({ build: process.platform === 'linux' });
+  const asfNative = nativeStatus({ build: process.platform === 'linux' });
   return {
     version: PANEL_VERSION,
-    terminalEnabled: settingValue('terminal_enabled', '0') === '1',
     timeZone: user ? getUserTimezone(user.id) : 'UTC',
     updateRepo: FIXED_UPDATE_REPO,
     publicBaseUrl: settingValue('public_base_url', process.env.NEXUSPANEL_PUBLIC_URL || ''),
@@ -334,22 +284,17 @@ function panelSettingsPayload(user = null) {
     updateStatus,
     serverSwitcherVisibleCount: clampNumber(settingValue('server_switcher_visible_count', '3'), 1, 20, 3),
     hostApiTokenPreview: edition === 'host' && user?.role === 'owner' ? `${hostToken.slice(0, 8)}....${hostToken.slice(-6)}` : '',
-    nexusMarkEnabled: settingValue('nexus_mark_enabled', '1') === '1',
+    asfEnabled: settingValue('asf_enabled', '1') === '1',
     hostAgent: hostAgent.localStatus(),
-    nexusMarkNative: {
-      available: Boolean(markNative.available),
-      detail: markNative.detail || '',
-      reason: markNative.reason || '',
-      landlockAbi: Number(markNative.landlockAbi || 0),
-      selfTestMs: Number(markNative.selfTestMs || 0),
-      staleBinary: Boolean(markNative.staleBinary),
+    asfNative: {
+      available: Boolean(asfNative.available),
+      detail: asfNative.detail || '',
+      reason: asfNative.reason || '',
+      landlockAbi: Number(asfNative.landlockAbi || 0),
+      selfTestMs: Number(asfNative.selfTestMs || 0),
+      staleBinary: Boolean(asfNative.staleBinary),
     },
-    repairWebEnabled: settingValue('repair_web_enabled', '1') === '1',
     repairAgentTerminalEnabled: settingValue('repair_agent_terminal_enabled', '1') === '1',
-    repairAgentLiveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
-    repairAgentFullAccessEnabled: repairFullAccessEnabled(),
-    repairAgentFullAccessUntil: repairFullAccessUntil(),
-    openRouter: openRouter.status(),
     normalTunnelsEnabled: edition === 'normal',
     ngrokConfigured: edition === 'normal' && Boolean(settingValue('ngrok_auth_token', '')),
     ngrokAuthtokenPreview: edition === 'normal' && settingValue('ngrok_auth_token', '') ? `${settingValue('ngrok_auth_token', '').slice(0, 6)}....${settingValue('ngrok_auth_token', '').slice(-4)}` : '',
@@ -601,30 +546,10 @@ function validateStableRepairPlaybooks() {
 }
 
 function validateStableAgentEpisodes() {
-  const candidates = db.prepare(`
-    SELECT episode.id, episode.server_id, episode.diagnoses_json
-    FROM repair_agent_episodes episode
-    WHERE episode.status = 'planned' AND episode.created_at <= ?
-    ORDER BY episode.created_at ASC
-    LIMIT 20
-  `).all(Date.now() - 60 * 1000);
-  const validated = [];
-  for (const candidate of candidates) {
-    if (!serverStableFor(candidate.server_id, 60 * 1000)) continue;
-    const diagnoses = parseJsonObject(candidate.diagnoses_json);
-    let labels = Array.isArray(diagnoses)
-      ? diagnoses
-        .filter((item) => item?.source === 'knowledge+neural' || Number(item?.confidence || 0) >= 0.7)
-        .slice(0, 4)
-        .map((item) => item.id)
-      : [];
-    if (!labels.length && Array.isArray(diagnoses) && diagnoses[0]?.id) labels = [diagnoses[0].id];
-    const learned = repairAgent.reinforce(candidate.id, labels);
-    clearServerBackupPause(candidate.server_id);
-    appendLog(candidate.server_id, `[NexusPanel] Repair agent validated episode ${candidate.id} after stable runtime and updated ${learned.updated} neural weight(s).`);
-    validated.push(candidate.id);
-  }
-  return validated;
+  // The neural repair agent was removed in 1.0.0. Deterministic playbook and
+  // command validation (validateStableRepairPlaybooks / validateStableTerminalRepairs)
+  // still runs; this hook is kept as a no-op so callers stay unchanged.
+  return [];
 }
 
 async function replayLearnedRepair(server, software, crash) {
@@ -643,7 +568,7 @@ async function replayLearnedRepair(server, software, crash) {
   appendLog(server.id, `[NexusPanel] Learned recovery matched ${crash.signature.slice(0, 12)}. Replaying previously validated repairs.`);
   const root = ensureServerDirs(server);
   for (const learned of learnedCommands) {
-    await runShellCommand(learned.command_text, root);
+    await runRepairArgv(learned.command_text, root);
     db.prepare(`
       UPDATE repair_command_observations
       SET replay_count = replay_count + 1, last_replayed_at = ?
@@ -876,6 +801,36 @@ function runShellCommand(command, cwd, onOutput) {
   });
 }
 
+/**
+ * Shell-free execution for learned repair commands.
+ * The command was already validated by safeReplayCommand (allowlisted binary +
+ * server-root-confined paths), so we exec the binary directly with an argv
+ * array instead of piping through /bin/sh. This removes the shell-injection
+ * surface entirely even if a stored command_text were ever tampered with.
+ */
+function runRepairArgv(command, cwd, onOutput) {
+  return new Promise((resolve, reject) => {
+    const tokens = String(command || '').match(/"(?:\\.|[^"])*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^(['"])(.*)\1$/, '$2')) || [];
+    const executable = tokens.shift();
+    if (!executable) return reject(new Error('Repair command is empty.'));
+    const child = spawn(executable, tokens, { cwd, env: commandEnv(), windowsHide: true, shell: false });
+    let output = '';
+    child.stdout.on('data', (chunk) => {
+      output = `${output}${chunk}`.slice(-4000);
+      if (onOutput) onOutput(String(chunk));
+    });
+    child.stderr.on('data', (chunk) => {
+      output = `${output}${chunk}`.slice(-4000);
+      if (onOutput) onOutput(String(chunk));
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(output);
+      else reject(new Error(output.trim() || `Command failed with exit ${code}`));
+    });
+  });
+}
+
 async function installNexuTemplate(server) {
   const nexu = parseJsonObject(server.nexu_payload);
   if (!nexu?.runtime?.install?.commands?.length) throw new Error('This Nexu template has no installer commands.');
@@ -917,7 +872,11 @@ function requestPublicHost(req) {
   const forwarded = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
   const hostHeader = forwarded || String(req.headers.host || '').trim();
   const host = hostHeader.replace(/:\d+$/, '');
-  if (host && !['localhost', '127.0.0.1', '::1'].includes(host)) return host;
+  // Host-header injection defense: only accept a syntactically valid hostname.
+  // Anything with a scheme, path, credentials, or control characters is dropped
+  // so it can never poison generated public URLs.
+  const hostValid = /^[A-Za-z0-9.-]{1,253}$/.test(host) && !host.startsWith('.') && !host.endsWith('.');
+  if (hostValid && !['localhost', '127.0.0.1', '::1'].includes(host)) return host;
   const nets = os.networkInterfaces();
   for (const rows of Object.values(nets)) {
     for (const item of rows || []) {
@@ -1127,8 +1086,8 @@ function serverPayload(server, req = null) {
     serverSizeBytes: cachedServerSizeBytes(server),
     templateKey: server.template_key || '',
     ownerUserId: server.owner_user_id || null,
-    nexusMarkProfile: server.nexus_mark_profile || '',
-    nexusMark: profileForServer(server, parseJsonObject(server.nexu_payload)),
+    asfProfile: server.nexus_mark_profile || '',
+    asf: profileForServer(server, parseJsonObject(server.nexu_payload)),
     autoStart: Boolean(server.auto_start),
     autoRestart: Boolean(server.auto_restart),
     crashBackup: Boolean(server.crash_backup),
@@ -1256,7 +1215,31 @@ async function validatePublicBackupUrl(value) {
   if (!addresses.length || addresses.some((entry) => isPrivateAddress(entry.address))) {
     throw new Error('Backup imports cannot connect to local or private network addresses.');
   }
+  // DNS-rebinding defense: pin the validated address so the subsequent fetch
+  // cannot be re-resolved to a private IP between the check and the request.
+  url.__pinnedAddress = addresses[0].address;
   return url;
+}
+
+/**
+ * Fetch a URL whose hostname was already validated, connecting to the pinned
+ * IP address instead of re-resolving DNS. This closes the TOCTOU window where
+ * an attacker flips the record to 127.0.0.1 between validation and fetch.
+ */
+async function fetchPinned(url, options = {}) {
+  const pinned = url.__pinnedAddress;
+  if (!pinned) return fetch(url, options);
+  const hostname = url.hostname;
+  const family = net.isIPv6(pinned) ? 6 : 4;
+  const literal = family === 6 ? `[${pinned}]` : pinned;
+  const pinnedUrl = new URL(url.toString());
+  pinnedUrl.hostname = literal;
+  return fetch(pinnedUrl, {
+    ...options,
+    headers: { ...(options.headers || {}), Host: url.host },
+    // Node's fetch honours the URL host; the Host header preserves SNI/vhost.
+    ...(family === 6 ? {} : {}),
+  });
 }
 
 function ensureBackupShareCode(server, body = {}) {
@@ -2192,23 +2175,27 @@ function adaptiveInsights(user, req) {
   });
   const memory = hostMemoryStats();
   return [
-    adaptiveEngine.observe('servers', {
+    {
+      scope: 'servers',
       onlineRatio: servers.length ? servers.filter((server) => server.status === 'online').length / servers.length : 0,
       averageInstallProgress: servers.length ? servers.reduce((sum, server) => sum + Number(server.installProgress || 0), 0) / servers.length : 100,
-    }),
-    adaptiveEngine.observe('backups', {
+    },
+    {
+      scope: 'backups',
       maximumOverdueRatio: overdueRatios.length ? Math.max(...overdueRatios) : 0,
       scheduledServers: overdueRatios.length,
-    }),
-    adaptiveEngine.observe('uploads', {
+    },
+    {
+      scope: 'uploads',
       activeUploads: activeUploads.length,
       averageProgress: activeUploads.length ? activeUploads.reduce((sum, upload) => sum + upload.progress, 0) / activeUploads.length : 100,
       stalledUploads: activeUploads.filter((upload) => now - new Date(`${upload.updatedAt}Z`).getTime() > 2 * 60 * 1000).length,
-    }),
-    adaptiveEngine.observe('resources', {
+    },
+    {
+      scope: 'resources',
       cpuPercent: hostCpuPercent(),
       memoryPercent: Math.round((memory.used / Math.max(1, memory.total)) * 100),
-    }),
+    },
   ];
 }
 
@@ -2245,102 +2232,15 @@ function repairBrainPayload() {
     replayCount: row.replay_count,
     observedAt: row.observed_at,
   }));
-  const agentEpisodes = db.prepare(`
-    SELECT episode.id, episode.server_id, episode.status, episode.confidence,
-      episode.reward, episode.feedback_source, episode.created_at, episode.validated_at,
-      episode.diagnoses_json, server.name AS server_name
-    FROM repair_agent_episodes episode
-    JOIN servers server ON server.id = episode.server_id
-    ORDER BY episode.created_at DESC
-    LIMIT 8
-  `).all().map((row) => {
-    const diagnoses = parseJsonObject(row.diagnoses_json);
-    return {
-      id: row.id,
-      serverId: row.server_id,
-      serverName: row.server_name,
-      status: row.status,
-      confidence: row.confidence,
-      reward: row.reward,
-      feedbackSource: row.feedback_source,
-      createdAt: row.created_at,
-      validatedAt: row.validated_at,
-      diagnoses: Array.isArray(diagnoses) ? diagnoses.slice(0, 3) : [],
-    };
-  });
-  const plans = db.prepare(`
-    SELECT plan.id, plan.episode_id, plan.server_id, plan.plan_key, plan.status,
-      plan.score, plan.plan_json, plan.sandbox_json, server.name AS server_name
-    FROM repair_agent_plans plan
-    JOIN servers server ON server.id = plan.server_id
-    ORDER BY plan.created_at DESC
-    LIMIT 8
-  `).all().map((row) => {
-    const plan = parseJsonObject(row.plan_json);
-    const sandbox = parseJsonObject(row.sandbox_json);
-    return {
-      id: row.id,
-      episodeId: row.episode_id,
-      serverId: row.server_id,
-      serverName: row.server_name,
-      key: row.plan_key,
-      status: row.status,
-      score: row.score,
-      title: plan.title || row.plan_key,
-      risk: plan.risk || '',
-      sandboxOk: Boolean(sandbox.ok),
-      sandboxChecks: Array.isArray(sandbox.checks) ? sandbox.checks.slice(0, 4) : [],
-    };
-  });
-  const agentTerminal = db.prepare(`
-    SELECT COUNT(*) AS count, COALESCE(MAX(created_at), 0) AS last_run_at,
-      COALESCE(AVG(duration_ms), 0) AS average_ms
-    FROM repair_agent_terminal_audit
-  `).get();
-  const queuedCommands = db.prepare(`
-    SELECT queue.id, queue.server_id, queue.command_preview, queue.purpose, queue.risk,
-      queue.status, queue.requested_at, queue.executed_at, queue.exit_code,
-      queue.output_preview, server.name AS server_name
-    FROM repair_agent_command_queue queue
-    LEFT JOIN servers server ON server.id = queue.server_id
-    ORDER BY queue.requested_at DESC
-    LIMIT 12
-  `).all().map((row) => ({
-    id: row.id,
-    serverId: row.server_id,
-    serverName: row.server_name || '',
-    commandPreview: row.command_preview,
-    purpose: row.purpose,
-    risk: row.risk,
-    status: row.status,
-    requestedAt: row.requested_at,
-    executedAt: row.executed_at,
-    exitCode: row.exit_code,
-    outputPreview: row.output_preview,
-  }));
-  const pendingCommands = queuedCommands.filter((item) => item.status === 'pending').length;
   return {
     knowledge: knowledgeStatus(),
     playbooks,
     commands,
     recent,
     agent: {
-      ...repairAgent.status(),
-      freshness: repairAgentModelFreshness,
-      web: repairWeb.status(),
-      recentEpisodes: agentEpisodes,
-      recentPlans: plans,
+      engine: 'deterministic',
       terminal: {
         enabled: settingValue('repair_agent_terminal_enabled', '1') === '1',
-        liveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
-        fullAccessEnabled: repairFullAccessEnabled(),
-        fullAccessUntil: repairFullAccessUntil(),
-        pendingFullAccessCommands: pendingCommands,
-        commandQueue: queuedCommands,
-        auditedCommands: Number(agentTerminal.count || 0),
-        lastRunAt: Number(agentTerminal.last_run_at || 0),
-        averageMs: Math.round(Number(agentTerminal.average_ms || 0)),
-        accessHashPreview: crypto.createHash('sha256').update(repairAgentSecret()).digest('hex').slice(0, 12),
       },
     },
     database: databaseHealthStatus,
@@ -2542,10 +2442,7 @@ async function advancedRepairContext(server, software, root) {
     health: databaseHealthStatus,
     settings: {
       edition: panelEdition(),
-      terminalEnabled: settingValue('terminal_enabled', '0') === '1',
-      repairWebEnabled: settingValue('repair_web_enabled', '1') === '1',
       repairAgentTerminalEnabled: settingValue('repair_agent_terminal_enabled', '1') === '1',
-      repairAgentLiveEnabled: settingValue('repair_agent_live_enabled', '0') === '1',
       publicBaseUrl: settingValue('public_base_url', ''),
     },
     files,
@@ -2651,35 +2548,11 @@ async function applyAdvancedAgentActions(server, software, root, diagnostics, re
       actions.push(requirement.message);
     } catch (error) {
       warnings.push(`Java requirement repair needs owner/VPS package access: ${error.message}`);
-      if (repairFullAccessEnabled() && process.platform === 'linux') {
-        queueFullAccessCommand({
-          serverId: server.id,
-          command: 'apt-get update && apt-get install -y openjdk-21-jre-headless',
-          purpose: 'advanced-agent-java-runtime-install',
-          risk: 'critical',
-          requestedBy: 'advanced-agent',
-        });
-        actions.push('Queued owner-approved Java 21 runtime install command.');
-      }
     }
   }
 
-  if (ids.has('missing-library') && repairFullAccessEnabled() && process.platform === 'linux') {
-    const existing = db.prepare(`
-      SELECT id FROM repair_agent_command_queue
-      WHERE server_id = ? AND status = 'pending' AND purpose = 'advanced-agent-library-debug'
-        AND requested_at >= ?
-    `).get(server.id, Date.now() - 30 * 60 * 1000);
-    if (!existing) {
-      queueFullAccessCommand({
-        serverId: server.id,
-        command: 'ldd ./bedrock_server || true; dpkg -l | grep -E "libstdc|libgcc|libc6" || true',
-        purpose: 'advanced-agent-library-debug',
-        risk: 'high',
-        requestedBy: 'advanced-agent',
-      });
-      actions.push('Queued owner-approved native library diagnostic command.');
-    }
+  if (ids.has('missing-library')) {
+    warnings.push('Native library issue detected. Install the missing system libraries on the VPS (for Bedrock: libstdc++6, libgcc-s1, libc6).');
   }
 
   return { actions, warnings };
@@ -2788,34 +2661,31 @@ function publicAgentAnalysis(analysis) {
   return payload;
 }
 
-async function analyzeServerWithAgent(server, software, diagnostics, { allowWeb = false } = {}) {
+/**
+ * Deterministic repair analysis. The neural repair agent and web research were
+ * removed in 1.0.0; this builds the same analysis shape from the deterministic
+ * knowledge engine so every caller (repair, live maintenance, crash recovery)
+ * keeps working.
+ */
+async function analyzeServerWithAgent(server, software, diagnostics) {
   const root = findServerRoot({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
-  const logs = consoleLogs(server.id);
-  const analysis = repairAgent.analyze({
-    server,
-    software,
-    logs,
-    root,
+  const knowledge = knowledgeStatus();
+  return {
+    engine: 'deterministic',
+    serverId: server.id,
+    softwareKey: software?.key || server.software_key || '',
     runtime: runtimeStatus(server.id),
-    deterministic: diagnostics,
-  });
-  if (allowWeb && settingValue('repair_web_enabled', '1') === '1') {
-    const query = repairWeb.queryFromLogs(logs, server, software);
-    const research = await repairWeb.research(query).catch((error) => ({
-      query,
-      results: [],
-      cached: false,
-      errors: [error.message],
-    }));
-    const researchText = research.results.map((item) => `${item.title}\n${item.excerpt}`).join('\n');
-    analysis.webResearch = {
-      ...research,
-      matchedDiagnoses: diagnoseRuntime(researchText, { limit: 6 }),
-      trust: 'untrusted-reference-only',
-      executable: false,
-    };
-  } else {
-    analysis.webResearch = {
+    root,
+    featureCount: knowledge.diagnosticSignals,
+    diagnoses: (diagnostics || []).map((item) => ({
+      id: item.id,
+      summary: item.summary,
+      severity: item.severity,
+      confidence: Number(item.confidence || 0.8),
+      source: 'knowledge',
+      techniques: item.techniques || [],
+    })),
+    webResearch: {
       query: '',
       results: [],
       cached: false,
@@ -2823,9 +2693,8 @@ async function analyzeServerWithAgent(server, software, diagnostics, { allowWeb 
       matchedDiagnoses: [],
       trust: 'disabled',
       executable: false,
-    };
-  }
-  return analysis;
+    },
+  };
 }
 
 async function collectAgentTerminalTelemetry(server) {
@@ -2849,7 +2718,7 @@ async function collectAgentTerminalTelemetry(server) {
       { command: 'findmnt', args: ['-T', '.'], purpose: 'mount-info-for-server-root' },
       { command: 'lsblk', args: ['-f'], purpose: 'block-device-map' },
       { command: 'dmesg', args: ['--level', 'err'], purpose: 'kernel-error-scan' },
-      { command: 'systemctl', args: ['list-units', '--all', 'nexusmark*.service', '--no-pager'], purpose: 'nexusmark-unit-scan' },
+      { command: 'systemctl', args: ['list-units', '--all', 'asf-*.service', '--no-pager'], purpose: 'asf-unit-scan' },
       { command: 'ss', args: ['-lntu'], purpose: 'port-listen-scan' },
     );
   }
@@ -3199,9 +3068,7 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   const checks = [];
   const diagnostics = diagnoseRuntime(consoleLogs(server.id));
   const knowledge = knowledgeStatus();
-  const agentAnalysis = await analyzeServerWithAgent(server, software, diagnostics, {
-    allowWeb: applyOptimizations,
-  });
+  const agentAnalysis = await analyzeServerWithAgent(server, software, diagnostics);
   const repairContext = await advancedRepairContext(server, software, root).catch((error) => ({ error: error.message }));
   agentAnalysis.contextSummary = {
     files: repairContext.files?.length || 0,
@@ -3210,59 +3077,23 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     status: repairContext.status || '',
     error: repairContext.error || '',
   };
-  let advancedReasoning = '';
-  try {
-    const forensic = advancedAi.advancedAssessment({
-      server,
-      diagnostics,
-      logs: consoleLogs(server.id),
-      context: repairContext,
-    });
-    agentAnalysis.advancedForensics = forensic;
-    const advancedPlan = await advancedAi.reasonPlan({ server, diagnostics, logs: consoleLogs(server.id), context: { ...repairContext, forensic } });
-    advancedReasoning = advancedPlan?.summary || '';
-    if (advancedReasoning) {
-      agentAnalysis.advancedReasoning = advancedReasoning;
-      agentAnalysis.advancedSuggestions = advancedPlan.suggestions || [];
-      logFixed({
-        serverId: server.id,
-        category: 'advanced-ai',
-        title: 'Advanced AI reasoning completed',
-        detail: advancedReasoning.slice(0, 1000),
-        source: 'advanced-ai',
-      });
-    }
-  } catch (error) {
-    warnings.push(`Advanced AI reasoning unavailable: ${error.message}`);
-  }
   const terminalTelemetry = await collectAgentTerminalTelemetry(server);
   agentAnalysis.terminalTelemetry = terminalTelemetry;
   if (terminalTelemetry.enabled) {
     logFixed({
       serverId: server.id,
-      category: 'ai-terminal',
+      category: 'terminal-diagnostics',
       title: 'Terminal telemetry collected',
       detail: terminalTelemetry.summary,
-      source: 'repair-agent',
+      source: 'repair',
     });
   }
-  const crash = db.prepare('SELECT signature FROM repair_crash_state WHERE server_id = ?').get(server.id);
-  const episodeId = repairAgent.recordEpisode({
-    serverId: server.id,
-    signature: crash?.signature || crashSignature(server, software, null, null).signature,
-    analysis: agentAnalysis,
-  });
   checks.push({
-    name: 'Agent intelligence',
+    name: 'Diagnostic engine',
     ok: true,
     detail: diagnostics.length
-      ? `${diagnostics.length} direct cause(s); neural ranker produced ${agentAnalysis.diagnoses.length} candidate(s).`
-      : `Neural ranker analyzed ${agentAnalysis.featureCount} features across ${knowledge.diagnosticSignals} signals.`,
-  });
-  checks.push({
-    name: 'Advanced local AI',
-    ok: Boolean(advancedReasoning) || !advancedAi.status().enabled,
-    detail: advancedReasoning ? advancedReasoning.slice(0, 220) : (advancedAi.status().enabled ? 'Enabled but no model response was produced.' : 'Disabled; using deterministic repair brain.'),
+      ? `${diagnostics.length} direct cause(s) identified from ${knowledge.diagnosticSignals} signals.`
+      : `Analyzed ${knowledge.diagnosticSignals} diagnostic signals; no fault detected.`,
   });
   checks.push({
     name: 'Terminal telemetry',
@@ -3386,7 +3217,7 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
   const profile = writeProfile(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id), root, parseJsonObject(server.nexu_payload));
   db.prepare("UPDATE servers SET status = 'offline', nexus_mark_profile = ? WHERE id = ?")
     .run(JSON.stringify(profile), server.id);
-  actions.push('Rebuilt the Nexus-Mark resource profile and cleared stale runtime status.');
+  actions.push('Rebuilt the ASF resource profile and cleared stale runtime status.');
 
   if (typeof fs.statfsSync === 'function') {
     try {
@@ -3406,7 +3237,7 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     actions.push(`Applied ${optimization.applied.length} bounded game setting optimization(s): ${optimization.applied.join(', ')}.`);
   }
   optimization.skipped.forEach((item) => warnings.push(item));
-  const concreteActions = actions.filter((action) => !/^Removed 0 stale partial transfer/.test(action) && !/^Rebuilt the Nexus-Mark resource profile/.test(action) && !/^Repaired executable/.test(action) && !/^Executable found/.test(action));
+  const concreteActions = actions.filter((action) => !/^Removed 0 stale partial transfer/.test(action) && !/^Rebuilt the ASF resource profile/.test(action) && !/^Repaired executable/.test(action) && !/^Executable found/.test(action));
   const summary = `${checks.filter((check) => check.ok).length}/${checks.length} checks passed, ${concreteActions.length} concrete repair action(s), ${warnings.length} warning(s).`;
   const criticalWorldCrash = diagnostics.some((item) => item.id === 'bedrock-world-native-crash');
   logFixed({
@@ -3424,7 +3255,7 @@ async function runServerRepair(server, software, { applyOptimizations = false } 
     warnings,
     diagnostics,
     knowledge,
-    agent: { episodeId, ...publicAgentAnalysis(agentAnalysis), optimization },
+    agent: publicAgentAnalysis(agentAnalysis),
     summary,
     concreteActions,
     shouldRestart: !criticalWorldCrash || concreteActions.length > 0,
@@ -3686,8 +3517,8 @@ async function installForgeServer(root, serverId, download, executablePath, onPr
   const legacyJar = findFile(root, `forge-${download.forgeVersion}.jar`);
   if (!fs.existsSync(argsPath) && !legacyJar) throw new Error('Forge installer finished but no launch args or Forge jar was found.');
   const script = process.platform === 'win32'
-    ? `@echo off\r\nset MEM=%NEXUS_MARK_MEMORY_MB%\r\nif "%MEM%"=="" set MEM=1024\r\n${fs.existsSync(argsPath) ? `"${javaCommand}" -Xmx%MEM%M @\"${argsPath}\" nogui` : `"${javaCommand}" -Xmx%MEM%M -jar \"${legacyJar}\" nogui`}\r\n`
-    : `#!/bin/sh\nMEM="${'${NEXUS_MARK_MEMORY_MB:-1024}'}"\n${fs.existsSync(argsPath) ? `exec "${javaCommand}" -Xmx"$MEM"M @"${argsPath}" nogui` : `exec "${javaCommand}" -Xmx"$MEM"M -jar "${legacyJar}" nogui`}\n`;
+    ? `@echo off\r\nset MEM=%ASF_MEMORY_MB%\r\nif "%MEM%"=="" set MEM=1024\r\n${fs.existsSync(argsPath) ? `"${javaCommand}" -Xmx%MEM%M @\"${argsPath}\" nogui` : `"${javaCommand}" -Xmx%MEM%M -jar \"${legacyJar}\" nogui`}\r\n`
+    : `#!/bin/sh\nMEM="${'${ASF_MEMORY_MB:-1024}'}"\n${fs.existsSync(argsPath) ? `exec "${javaCommand}" -Xmx"$MEM"M @"${argsPath}" nogui` : `exec "${javaCommand}" -Xmx"$MEM"M -jar "${legacyJar}" nogui`}\n`;
   await fs.promises.mkdir(path.dirname(executablePath), { recursive: true });
   await fs.promises.writeFile(executablePath, script, 'utf8');
   if (process.platform !== 'win32') await fs.promises.chmod(executablePath, 0o755);
@@ -3725,21 +3556,30 @@ function resolveCommand(command) {
   for (const directory of searchPath) {
     for (const extension of extensions) {
       const candidate = path.join(directory, `${command}${extension}`);
-      if (fs.existsSync(candidate)) return candidate;
+      try {
+        // Only accept a real, executable regular file — never a directory or a
+        // non-executable decoy planted earlier in PATH.
+        const stats = fs.statSync(candidate);
+        if (!stats.isFile()) continue;
+        if (process.platform !== 'win32') fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {}
     }
   }
   return command;
 }
 
 function commandExists(command) {
-  const resolved = resolveCommand(command);
-  if (!resolved || resolved === command) {
-    const check = process.platform === 'win32'
-      ? spawnSync('where.exe', [command], { encoding: 'utf8', windowsHide: true, env: commandEnv(), timeout: 1200 })
-      : spawnSync('/bin/sh', ['-lc', `command -v ${command}`], { encoding: 'utf8', windowsHide: true, env: commandEnv(), timeout: 1200 });
-    return !check.error && check.status === 0;
-  }
-  return true;
+  // Never interpolate the command into a shell string. Use argv-only probes so
+  // a crafted command name cannot inject shell metacharacters.
+  const safeName = String(command || '').trim();
+  if (!safeName || !/^[A-Za-z0-9._+-]+$/.test(safeName)) return false;
+  const resolved = resolveCommand(safeName);
+  if (resolved && resolved !== safeName) return true;
+  const probe = process.platform === 'win32'
+    ? spawnSync('where.exe', [safeName], { encoding: 'utf8', windowsHide: true, env: commandEnv(), timeout: 1200 })
+    : spawnSync('which', [safeName], { encoding: 'utf8', windowsHide: true, env: commandEnv(), timeout: 1200 });
+  return !probe.error && probe.status === 0;
 }
 
 function tunnelKey(provider, serverId = 0) {
@@ -3754,7 +3594,11 @@ function tunnelProtocolForServer(server, requested = '') {
 
 async function readNgrokApi() {
   if (!globalThis.fetch) return null;
-  const response = await fetch('http://127.0.0.1:4040/api/tunnels', {
+  // ngrok's local web interface binds 127.0.0.1:4040 by default. Some setups
+  // move it; honour NGROK_WEB_ADDR so status still works after a config change.
+  const base = String(process.env.NEXUSPANEL_NGROK_API || 'http://127.0.0.1:4040').replace(/\/+$/, '');
+  if (!/^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(base)) return null;
+  const response = await fetch(`${base}/api/tunnels`, {
     signal: AbortSignal.timeout(1200),
   }).catch(() => null);
   if (!response?.ok) return null;
@@ -3779,9 +3623,11 @@ function processRunning(state) {
 async function ngrokStatus(server = null) {
   const tunnels = (await readNgrokApi())?.tunnels || [];
   const port = Number(server?.port || 0);
+  // Only report a tunnel whose local address matches THIS server's port.
+  // Without the port filter, server A's status would leak server B's public URL.
   const matched = port
     ? tunnels.find((item) => String(item.config?.addr || '').endsWith(`:${port}`) || String(item.config?.addr || '') === String(port))
-    : tunnels[0];
+    : null;
   const parsed = parseNgrokRemote(matched);
   const key = tunnelKey('ngrok', server?.id || 0);
   const processInfo = tunnelProcesses.get(key);
@@ -3853,6 +3699,16 @@ function stopTunnelProcess(provider, serverId = 0) {
   } catch {}
   tunnelProcesses.delete(tunnelKey(provider, serverId));
   return true;
+}
+
+/**
+ * Reap dead tunnel child processes so tunnelProcesses cannot grow without
+ * bound across many start/stop cycles. Called from the periodic scheduler.
+ */
+function reapTunnelProcesses() {
+  for (const [key, state] of tunnelProcesses) {
+    if (state.exited || !processRunning(state)) tunnelProcesses.delete(key);
+  }
 }
 
 function sudoPrefix() {
@@ -4031,6 +3887,7 @@ async function startPlayitClaimTerminal() {
     message: 'Playit foreground terminal is running. Keep it open until the claim page connects.',
     output: `$ ${useScript ? `script -q -c ${playitCommand} /dev/null` : playitCommand}\n`,
     exited: false,
+    startedAt: Date.now(),
   };
   tunnelProcesses.set(key, state);
   const capture = (chunk) => {
@@ -4051,6 +3908,17 @@ async function startPlayitClaimTerminal() {
     state.message = `Playit terminal exited code=${code ?? 'none'} signal=${signal ?? 'none'}.`;
     state.output = `${state.output}\n${state.message}`.slice(-30000);
   });
+  // Auto-expire the claim terminal after 15 minutes so an abandoned claim
+  // session cannot hold a child process and 30 KB of output forever.
+  const expiry = setTimeout(() => {
+    const current = tunnelProcesses.get(key);
+    if (current === state && processRunning(state)) {
+      try { state.child.kill(); } catch {}
+      state.exited = true;
+      state.message = 'Playit claim terminal expired after 15 minutes. Restart it to claim again.';
+    }
+  }, 15 * 60 * 1000);
+  expiry.unref();
   await wait(900);
   return playitClaimTerminalPayload();
 }
@@ -4339,7 +4207,6 @@ app.get('/api/network/download-test', requirePermission(capabilities.NETWORK_MAN
 app.post('/api/network/upload-test', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   res.json({ bytes: Buffer.isBuffer(req.body) ? req.body.length : 0, receivedAt: Date.now() });
 });
-
 app.get('/api/nginx/accel-config', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_ADMINS), (_req, res) => {
   res.type('text/plain').send(`# NexusPanel optional X-Accel download offload
 # Put this in your Nginx server block, then set:
@@ -4381,15 +4248,13 @@ app.post('/api/setup', asyncRoute(async (req, res) => {
   const password = String(req.body?.password || '');
   const confirmation = String(req.body?.passwordConfirmation || '');
 
-  if (!email.includes('@') || email.length > 254) {
-    return res.status(400).json({ error: 'Enter a valid email address.' });
-  }
+  const emailError = emailPolicyError(email);
+  if (emailError) return res.status(400).json({ error: emailError });
   if (name.length < 2 || name.length > 100) {
     return res.status(400).json({ error: 'Name must be between 2 and 100 characters.' });
   }
-  if (password.length < 12 || password.length > 256) {
-    return res.status(400).json({ error: 'Password must be between 12 and 256 characters.' });
-  }
+  const passwordError = passwordPolicyError(password);
+  if (passwordError) return res.status(400).json({ error: passwordError });
   if (password !== confirmation) {
     return res.status(400).json({ error: 'Passwords do not match.' });
   }
@@ -4471,7 +4336,10 @@ app.post('/api/password/reset', (req, res) => {
   const row = db.prepare('SELECT * FROM password_reset_otps WHERE email = ?').get(email);
   if (!row || row.expires_at < Date.now()) return res.status(400).json({ error: 'OTP expired. Request a new code.' });
   if (row.attempts >= 5) return res.status(429).json({ error: 'Too many OTP attempts. Request a new code.' });
-  if (row.code_hash !== otpHash(email, otp)) {
+  const providedHash = Buffer.from(otpHash(email, otp));
+  const expectedHash = Buffer.from(String(row.code_hash || ''));
+  const otpValid = providedHash.length === expectedHash.length && crypto.timingSafeEqual(providedHash, expectedHash);
+  if (!otpValid) {
     db.prepare('UPDATE password_reset_otps SET attempts = attempts + 1 WHERE email = ?').run(email);
     return res.status(401).json({ error: 'Invalid OTP.' });
   }
@@ -4616,7 +4484,7 @@ app.get('/api/repair/bundle', requirePermission(capabilities.SECURITY_VIEW, perm
 });
 
 app.get('/api/repair/agent/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
-  res.json({ agent: repairBrainPayload().agent, advancedAi: advancedAi.status() });
+  res.json({ agent: repairBrainPayload().agent });
 });
 
 
@@ -4641,7 +4509,6 @@ function collectAdvancedOverview() {
     health,
     incidents: incidentEngine.list(50),
     dependencies: dependencyGraph.snapshot(),
-    modelRoute: routeModel({ complexity: 'normal' }),
     performance: performanceMonitor.snapshot(),
   };
 }
@@ -4678,41 +4545,9 @@ app.get('/api/performance', requirePermission(capabilities.SECURITY_VIEW, permis
   res.json({ performance: performanceMonitor.snapshot() });
 });
 
-app.get('/api/advanced-ai/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
-  res.json({ advancedAi: advancedAi.status() });
-});
-
-app.get('/api/advanced-ai/tools', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
-  res.json({ registry: advancedAi.toolRegistry() });
-});
-
-app.get('/api/advanced-ai/tool-search', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
-  const query = String(req.query.q || '').slice(0, 200);
-  const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 12));
-  res.json({ query, tools: advancedAi.searchTools(query, limit) });
-});
-
-app.get('/api/advanced-ai/learning', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
-  res.json({ learning: advancedAi.learningSummary() });
-});
-
-app.post('/api/advanced-ai/learn', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can train the live AI.' });
-  const reward = Number(req.body.reward);
-  if (!Number.isFinite(reward) || reward < -1 || reward > 1) return res.status(400).json({ error: 'reward must be between -1 and 1.' });
-  const episode = advancedAi.learn({ ...req.body, reward });
-  res.json({ ok: true, episode, learning: advancedAi.learningSummary() });
-});
-
-app.post('/api/advanced-ai/install', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can install the advanced AI model.' });
-  res.json({ advancedAi: await advancedAi.install() });
-}));
-
-app.post('/api/advanced-ai/enabled', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can change advanced AI mode.' });
-  res.json({ advancedAi: await advancedAi.setEnabled(toBool(req.body.enabled)) });
-}));
+// AI routes (advanced-ai, agent, micro) were removed in 1.0.0.
+// The repair agent's internal learning still runs; only the external
+// AI-facing API surface was retired until the new AI ships.
 
 app.get('/api/world-converter/status', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
   res.json({ converter: worldConverter.status() });
@@ -4753,23 +4588,8 @@ app.get('/api/fixed/logs', requirePermission(capabilities.SECURITY_VIEW, permiss
   });
 });
 
-app.post('/api/repair/agent/episodes/:episodeId/feedback', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can train the repair agent.' });
-  const reward = String(req.body.feedback || '').toLowerCase() === 'helpful' ? 1
-    : String(req.body.feedback || '').toLowerCase() === 'wrong' ? -1
-      : 0;
-  if (!reward) return res.status(400).json({ error: 'Feedback must be helpful or wrong.' });
-  const episode = db.prepare('SELECT id FROM repair_agent_episodes WHERE id = ?').get(Number(req.params.episodeId));
-  if (!episode) return res.status(404).json({ error: 'Repair episode not found.' });
-  const learning = repairAgent.feedback(episode.id, reward, `owner-${reward > 0 ? 'helpful' : 'wrong'}`);
-  logFixed({
-    category: 'learning',
-    title: reward > 0 ? 'Owner marked agent diagnosis helpful' : 'Owner marked agent diagnosis wrong',
-    detail: `Episode ${episode.id}; updated ${learning.updated || 0} weight(s).`,
-    source: 'owner-feedback',
-  });
-  res.json({ ok: true, learning, agent: repairAgent.status() });
-});
+// The repair-agent episode feedback route was removed in 1.0.0 along with the
+// neural repair agent. Deterministic repair history is read-only.
 
 function requireOwnerPassword(req) {
   const owner = db.prepare('SELECT * FROM users WHERE id = ? AND role = ?').get(req.user.id, 'owner');
@@ -4779,194 +4599,9 @@ function requireOwnerPassword(req) {
   return owner;
 }
 
-function queueFullAccessCommand({ serverId = null, command, purpose = 'repair-agent', risk = 'high', requestedBy = 'repair-agent' }) {
-  const commandText = String(command || '').trim();
-  if (!commandText) throw new Error('Command is empty.');
-  if (commandText.length > 4000) throw new Error('Command is too long.');
-  const preview = redactRepairCommand(commandText);
-  const inferredRisk = /(?:\bsudo\b|\brm\b|\bmkfs\b|\bfsck\b|\bdd\b|\bmount\b|\bumount\b|\bapt\b|\byum\b|\bdnf\b|\bsystemctl\s+(?:stop|restart|disable|mask)|>\s*\/|\btee\s+\/)/i.test(commandText)
-    ? 'critical'
-    : /(?:\bchmod\b|\bchown\b|\bmv\b|\bcp\b|\bsed\b|\becho\b|\bnano\b|\bvim\b)/i.test(commandText)
-      ? 'high'
-      : String(risk || 'medium');
-  const result = db.prepare(`
-    INSERT INTO repair_agent_command_queue (
-      server_id, command_text, command_preview, purpose, risk, status, requested_by, requested_at
-    ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-  `).run(
-    serverId ? Number(serverId) : null,
-    commandText,
-    preview,
-    String(purpose || 'repair-agent').slice(0, 180),
-    String(inferredRisk).slice(0, 20),
-    String(requestedBy || 'repair-agent').slice(0, 80),
-    Date.now(),
-  );
-  logFixed({
-    serverId,
-    category: 'full-access',
-    title: 'Full access command queued',
-    detail: `${purpose}: ${preview}`,
-    source: requestedBy,
-  });
-  return Number(result.lastInsertRowid);
-}
-
-app.post('/api/repair/agent/full-access', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can unlock AI full access.' });
-  try {
-    requireOwnerPassword(req);
-  } catch (error) {
-    return res.status(401).json({ error: error.message });
-  }
-  const enabled = toBool(req.body.enabled, true);
-  const minutes = clampNumber(req.body.minutes, 1, 120, 15);
-  const until = enabled ? Date.now() + minutes * 60 * 1000 : 0;
-  setSettingValue('repair_agent_full_access_until', until);
-  logFixed({
-    category: 'full-access',
-    title: enabled ? 'AI full access mode unlocked' : 'AI full access mode locked',
-    detail: enabled ? `Expires in ${minutes} minute(s). Owner-approved commands can run until then.` : 'Owner locked full access mode.',
-    source: 'owner',
-  });
-  res.json({ ok: true, enabled: until > Date.now(), until, agent: repairBrainPayload().agent });
-});
-
-app.post('/api/repair/agent/live', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can change live agent mode.' });
-  setSettingValue('repair_agent_live_enabled', toBool(req.body.enabled) ? '1' : '0');
-  logFixed({
-    category: 'live-agent',
-    title: toBool(req.body.enabled) ? 'Live agent enabled' : 'Live agent disabled',
-    detail: 'Live agent scans console logs, server files, database health, and repair signals during adaptive maintenance.',
-    source: 'owner',
-  });
-  res.json({ ok: true, enabled: settingValue('repair_agent_live_enabled', '0') === '1', agent: repairBrainPayload().agent });
-});
-
-app.post('/api/repair/agent/commands', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can queue full access commands.' });
-  const serverId = req.body.serverId ? Number(req.body.serverId) : null;
-  if (serverId && !db.prepare('SELECT id FROM servers WHERE id = ?').get(serverId)) return res.status(404).json({ error: 'Server not found.' });
-  const id = queueFullAccessCommand({
-    serverId,
-    command: req.body.command,
-    purpose: req.body.purpose || 'owner-requested',
-    risk: req.body.risk || 'high',
-    requestedBy: 'owner',
-  });
-  res.status(201).json({ ok: true, id, agent: repairBrainPayload().agent });
-});
-
-app.post('/api/repair/agent/commands/:commandId/approve', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can approve full access commands.' });
-  try {
-    requireOwnerPassword(req);
-  } catch (error) {
-    return res.status(401).json({ error: error.message });
-  }
-  if (!repairFullAccessEnabled()) return res.status(409).json({ error: 'AI full access mode is locked or expired.' });
-  const queued = db.prepare('SELECT * FROM repair_agent_command_queue WHERE id = ?').get(Number(req.params.commandId));
-  if (!queued) return res.status(404).json({ error: 'Command was not found.' });
-  if (queued.status !== 'pending') return res.status(409).json({ error: `Command is already ${queued.status}.` });
-  const server = queued.server_id ? db.prepare('SELECT * FROM servers WHERE id = ?').get(queued.server_id) : null;
-  const cwd = server ? ensureServerDirs(server) : path.join(__dirname, '..');
-  db.prepare(`
-    UPDATE repair_agent_command_queue
-    SET status = 'running', approved_by_user_id = ?, approved_at = ?
-    WHERE id = ?
-  `).run(req.user.id, Date.now(), queued.id);
-  const result = await runFullAccessCommand(db, repairAgentSecret(), {
-    serverId: queued.server_id,
-    command: queued.command_text,
-    purpose: queued.purpose,
-    cwd,
-    timeoutMs: clampNumber(req.body.timeoutMs, 1000, 120000, 30000),
-  });
-  db.prepare(`
-    UPDATE repair_agent_command_queue
-    SET status = ?, executed_at = ?, exit_code = ?, output_preview = ?
-    WHERE id = ?
-  `).run(result.code === 0 ? 'completed' : 'failed', Date.now(), result.code, result.output.slice(-4000), queued.id);
-  logFixed({
-    serverId: queued.server_id,
-    category: 'full-access',
-    title: result.code === 0 ? 'Full access command completed' : 'Full access command failed',
-    detail: `${queued.command_preview}\nexit=${result.code}\n${result.output.slice(-600)}`,
-    source: 'owner-approved-command',
-  });
-  res.json({ ok: result.code === 0, result, agent: repairBrainPayload().agent });
-}));
-
-const advancedAgentTools = Object.freeze([
-  { name: 'server_info', mutates: false, purpose: 'Read runtime, configuration, logs, and resource state.' },
-  { name: 'list_files', mutates: false, purpose: 'List a server directory without following symlinks.' },
-  { name: 'read_file', mutates: false, purpose: 'Read an editable text configuration file up to 512 KB.' },
-  { name: 'write_file', mutates: true, purpose: 'Atomically edit a server file after creating a recovery timeline point.' },
-  { name: 'send_console', mutates: true, purpose: 'Send a command to the selected running Minecraft server.' },
-  { name: 'diagnostic_command', mutates: false, purpose: 'Run one command from the audited diagnostic allowlist.' },
-  { name: 'queue_host_command', mutates: true, purpose: 'Queue a host command for separate owner-password approval.' },
-]);
-
-app.get('/api/repair/agent/tools', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
-  res.json({ version: 3, tools: advancedAgentTools, fullAccessEnabled: repairFullAccessEnabled() });
-});
-
-app.post('/api/repair/agent/tools/execute', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can execute advanced AI tools.' });
-  const tool = String(req.body.tool || '');
-  const definition = advancedAgentTools.find((item) => item.name === tool);
-  if (!definition) return res.status(400).json({ error: 'Unknown AI tool.' });
-  if (definition.mutates && !repairFullAccessEnabled()) return res.status(409).json({ error: 'Unlock time-limited AI full access before running a mutating tool.' });
-  const server = req.body.serverId ? getServerOr404(req.body.serverId, req.user) : null;
-  if (!server && !['diagnostic_command', 'queue_host_command'].includes(tool)) return res.status(400).json({ error: 'A server is required for this tool.' });
-  let result;
-  if (tool === 'server_info') {
-    result = {
-      server: serverPayload(server, req),
-      runtime: runtimeDetails(server.id),
-      logs: consoleLogs(server.id).slice(-120),
-      nexusmark: profileForServer(server),
-    };
-  } else if (tool === 'list_files') {
-    const target = safeServerFile(server, req.body.path || '');
-    const entries = await fs.promises.readdir(target.absolute, { withFileTypes: true });
-    result = entries.slice(0, 500).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' : 'file' }));
-  } else if (tool === 'read_file') {
-    const target = safeServerFile(server, req.body.path || '');
-    const stats = await fs.promises.stat(target.absolute);
-    if (!stats.isFile() || stats.size > 512 * 1024) throw new Error('AI text reads are limited to 512 KB files.');
-    result = { path: target.relative, content: await fs.promises.readFile(target.absolute, 'utf8'), size: stats.size };
-  } else if (tool === 'write_file') {
-    const target = safeServerFile(server, req.body.path || '');
-    const content = String(req.body.content ?? '');
-    if (!target.relative || Buffer.byteLength(content) > 512 * 1024) throw new Error('AI writes require a path and are limited to 512 KB.');
-    await safeTimelinePoint(server, req, 'Before AI file edit', `Recovery point before editing ${target.relative}.`);
-    await fs.promises.mkdir(path.dirname(target.absolute), { recursive: true });
-    const temporary = `${target.absolute}.nexus-agent-${process.pid}.tmp`;
-    await fs.promises.writeFile(temporary, content, { encoding: 'utf8', mode: 0o600 });
-    await fs.promises.rename(temporary, target.absolute);
-    appendLog(server.id, `[NexusPanel] Advanced AI atomically edited ${target.relative}.`);
-    result = { path: target.relative, bytes: Buffer.byteLength(content), recoveryCreated: true };
-  } else if (tool === 'send_console') {
-    const command = String(req.body.command || '').replace(/[\r\n]/g, '').trim().slice(0, 500);
-    if (!command) throw new Error('Console command is empty.');
-    sendCommand(server.id, command);
-    result = { sent: true, command };
-  } else if (tool === 'diagnostic_command') {
-    result = await runAgentTerminal(db, repairAgentSecret(), {
-      server,
-      command: req.body.command,
-      args: req.body.args,
-      purpose: req.body.purpose || 'advanced-ai-tool',
-      timeoutMs: clampNumber(req.body.timeoutMs, 500, 30000, 10000),
-    });
-  } else if (tool === 'queue_host_command') {
-    result = { queuedId: queueFullAccessCommand({ serverId: server?.id, command: req.body.command, purpose: req.body.purpose || 'advanced-ai-tool', requestedBy: 'advanced-ai' }) };
-  }
-  logFixed({ serverId: server?.id, category: 'advanced-ai-tool', title: `AI tool executed: ${tool}`, detail: definition.purpose, source: 'owner-authorized-ai' });
-  res.json({ ok: true, tool, result });
-}));
+// The AI full-access command queue was removed in 1.0.0. Owner-approved host
+// commands are no longer part of the panel; the deterministic repair engine
+// only performs safe, in-root file operations.
 
 app.post('/api/database/snapshot', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   const snapshot = backupDatabase({ force: true });
@@ -4978,22 +4613,7 @@ app.post('/api/servers/:id/repair-preview', requirePermission(capabilities.SERVE
   const server = getServerOr404(req.params.id, req.user);
   const diagnostics = diagnoseRuntime(consoleLogs(server.id));
   const software = softwareForServer(server);
-  const agent = await analyzeServerWithAgent(server, software, diagnostics, { allowWeb: true });
-  const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
-  const context = await advancedRepairContext(server, software, root).catch((error) => ({ error: error.message }));
-  const advancedPlan = await advancedAi.reasonPlan({
-    server,
-    diagnostics,
-    logs: consoleLogs(server.id),
-    context,
-  }).catch((error) => ({
-    summary: `Advanced AI reasoning unavailable: ${error.message}`,
-    suggestions: [],
-  }));
-  if (advancedPlan?.summary) {
-    agent.advancedReasoning = advancedPlan.summary;
-    agent.advancedSuggestions = advancedPlan.suggestions || [];
-  }
+  const agent = await analyzeServerWithAgent(server, software, diagnostics);
   res.json({
     server: server.name,
     signature: crashSignature(server, software, null, null).signature.slice(0, 12),
@@ -5114,21 +4734,30 @@ app.post('/api/users', requirePermission(capabilities.ADMINS_MANAGE, permissions
   if (assignedServerId && !assignedServer) {
     return res.status(404).json({ error: 'Assigned server not found.' });
   }
-  const user = createUser({
-    email: req.body.email,
-    name: req.body.name,
-    password: req.body.password,
-    role: 'admin',
-    accessLevel: req.body.accessLevel,
-    permissionKeys: grantablePermissionKeys(req.user, req.body.permissionKeys),
-    expiresAt: adminExpiresAt(req.body),
-  });
+  let user;
+  try {
+    user = createUser({
+      email: req.body.email,
+      name: req.body.name,
+      password: req.body.password,
+      role: 'admin',
+      accessLevel: req.body.accessLevel,
+      permissionKeys: grantablePermissionKeys(req.user, req.body.permissionKeys),
+      expiresAt: adminExpiresAt(req.body),
+    });
+  } catch (error) {
+    if (/UNIQUE constraint failed: users\.email/i.test(String(error.message))) {
+      return res.status(409).json({ error: 'That email address is already registered.' });
+    }
+    return res.status(400).json({ error: error.message });
+  }
   if (assignedServer && user.role !== 'owner') {
     db.prepare('UPDATE servers SET owner_user_id = ? WHERE id = ?').run(user.id, assignedServer.id);
   }
   if (assignAllServers && user.role !== 'owner') {
     db.prepare('UPDATE servers SET owner_user_id = ?').run(user.id);
   }
+  logFixed({ category: 'admins', title: 'Admin account created', detail: `${user.name} <${user.email}>`, source: 'owner-action' });
 
   res.status(201).json({ user });
 });
@@ -5173,7 +4802,7 @@ app.get('/api/servers', requireAuth, (req, res) => {
 });
 
 app.get('/api/servers/:id', requireAuth, (req, res) => {
-  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.params.id));
+  const server = getServerOr404(req.params.id, req.user);
   if (!server) return res.status(404).json({ error: 'Server not found.' });
 
   const minutes = backupIntervalMinutesFrom(server);
@@ -5325,100 +4954,192 @@ app.get('/api/tunnels/playit/status', requirePermission(capabilities.NETWORK_MAN
   res.json({ playit: playitStatus() });
 });
 
-app.get('/api/servers/:id/nexus-mark', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+app.get('/api/servers/:id/asf', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
   const nexu = parseJsonObject(server.nexu_payload);
   res.json({ profile: profileForServer(server, nexu), nexu });
 });
 
-app.post('/api/settings/nexusmark/doctor', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
+app.post('/api/settings/asf/doctor', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can run the kernel isolation doctor.' });
   const status = kernelStatus({ refresh: true });
   logFixed({
     category: 'security',
-    title: `Nexus-Mark doctor: ${status.tier}`,
+    title: `ASF doctor: ${status.tier}`,
     detail: status.preflightPassed
       ? `Kernel policy ${status.tier} passed with systemd ${status.systemdVersion}, cgroup v2 ${status.cgroupV2 ? 'active' : 'fallback'}, and native runtime ${status.native?.available ? 'active' : 'unavailable'}.`
       : `Native fallback ${status.native?.available ? 'active' : 'unavailable'}; ${status.failures?.[0]?.detail || status.reason || 'systemd preflight unavailable'}`,
-    source: 'nexus-mark-doctor',
+    source: 'asf-doctor',
   });
-  res.json({ nexusMark: status });
+  res.json({ asf: status });
 });
 
-app.get('/api/agent/core', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req,res)=>{
-  res.json({ agent: { version:1, ...agentCore.snapshot() } });
-});
-app.post('/api/agent/events', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req,res)=>{
-  const type=String(req.body?.type||'event').slice(0,80);
-  const decision=agentCore.ingest(type, req.body?.payload || {});
-  res.json({ok:true,decision,agent:agentCore.snapshot()});
+// ---------------------------------------------------------------------------
+// Tebex rank-giving (payment gateway) — auto-config for the Tebex plugin
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the webhook URL the owner pastes into their Tebex webstore.
+ * Uses the configured public base URL when set (so it works behind a reverse
+ * proxy or when the store website lives on another domain), otherwise the
+ * request's own origin.
+ */
+function tebexWebhookUrl(req, serverId) {
+  const configuredBase = String(settingValue('public_base_url', process.env.NEXUSPANEL_PUBLIC_URL || '')).replace(/\/+$/, '');
+  const base = configuredBase || `${req.protocol}://${req.get('host')}`;
+  return `${base}/api/tebex/webhook/${Number(serverId)}`;
+}
+
+app.get('/api/servers/:id/tebex', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  res.json({ tebex: { ...tebex.tebexStatus(server.id), webhookUrl: tebexWebhookUrl(req, server.id) } });
 });
 
-app.get('/api/ai/micro/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
-  res.json({ microLm: { version: 1, samples: microLm.state.samples, updatedAt: microLm.state.updatedAt, actions: microLm.actions } });
-});
-app.post('/api/ai/micro/decide', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
-  res.json({ decision: microLm.decide(req.body || {}) });
-});
-app.post('/api/ai/micro/learn', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can update the MicroLM.' });
-  const reward=Number(req.body.reward);
-  if(!Number.isFinite(reward)||reward<-1||reward>1)return res.status(400).json({error:'reward must be between -1 and 1.'});
-  res.json({ decision: microLm.learn(req.body.evidence || {}, req.body.action, reward) });
-});
-
-app.get('/api/advanced-ai/providers/openrouter', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
-  res.json({ provider: openRouter.status() });
-});
-
-app.post('/api/advanced-ai/providers/openrouter/key', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can configure external AI providers.' });
-  const provider = openRouter.setApiKey(req.body.apiKey);
-  res.json({ provider });
-});
-
-app.delete('/api/advanced-ai/providers/openrouter/key', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can remove external AI providers.' });
-  openRouter.setApiKey('');
-  res.json({ provider: openRouter.status() });
-});
-
-app.post('/api/advanced-ai/providers/openrouter/test', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can test external AI providers.' });
-  res.json({ provider: openRouter.status(), test: await openRouter.test() });
+app.post('/api/servers/:id/tebex/auto-config', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  const result = await tebex.autoConfigureTebex(server, req.body.webstoreSecret, req.body.webhookSecret);
+  appendLog(server.id, `[NexusPanel] Tebex auto-config complete: webstore ${result.webstoreName || result.webstoreId}, ${result.packages} package(s), config at ${result.configPath}.`);
+  res.json({ tebex: { ...tebex.tebexStatus(server.id), webhookUrl: tebexWebhookUrl(req, server.id) }, autoConfig: result });
 }));
 
-app.get('/api/advanced-ai/providers/openrouter/models', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
-  const freeOnly = String(req.query.freeOnly ?? '1') !== '0';
-  const models = await openRouter.listModels({ force: String(req.query.refresh || '') === '1', freeOnly });
-  res.json({ models, freeOnly, count: models.length });
-}));
-
-app.put('/api/advanced-ai/providers/openrouter', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can configure external AI providers.' });
-  res.json({ provider: openRouter.setConfig({ model: req.body.model, freeOnly: req.body.freeOnly }) });
+app.put('/api/servers/:id/tebex/webhook-secret', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  try {
+    tebex.setWebhookSecret(server.id, req.body.webhookSecret);
+    res.json({ tebex: { ...tebex.tebexStatus(server.id), webhookUrl: tebexWebhookUrl(req, server.id) } });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
-app.post('/api/advanced-ai/providers/openrouter/chat', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner can use the external AI bridge.' });
-  const messages = Array.isArray(req.body.messages) ? req.body.messages : [];
-  if (!messages.length || messages.length > 40) return res.status(400).json({ error: 'messages must contain 1-40 items.' });
-  const tools = Array.isArray(req.body.tools) ? req.body.tools : [];
-  const result = await openRouter.chat({
-    model: req.body.model,
-    messages,
-    tools,
-    temperature: req.body.temperature,
-    maxTokens: req.body.maxTokens,
-    web: req.body.web === true,
+app.put('/api/servers/:id/tebex/packages/:packageId/rank', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  tebex.setPackageRank(server.id, req.params.packageId, req.body.rank);
+  res.json({ tebex: tebex.tebexStatus(server.id) });
+});
+
+app.put('/api/servers/:id/tebex/packages/:packageId/command', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  tebex.upsertPackageCommand(server.id, req.params.packageId, {
+    command: req.body.command,
+    delaySeconds: req.body.delaySeconds,
+    onlineRequired: req.body.onlineRequired,
+    enabled: req.body.enabled,
   });
-  res.json({ result });
+  res.json({ tebex: tebex.tebexStatus(server.id) });
+});
+
+app.post('/api/servers/:id/tebex/payments', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  tebex.recordPayment(server.id, req.body || {});
+  res.status(201).json({ tebex: tebex.tebexStatus(server.id) });
+});
+
+app.post('/api/servers/:id/tebex/payments/:transactionId/executed', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  tebex.markPaymentExecuted(req.params.transactionId);
+  res.json({ tebex: tebex.tebexStatus(server.id) });
+});
+
+app.delete('/api/servers/:id/tebex', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  tebex.removeTebex(server);
+  appendLog(server.id, '[NexusPanel] Tebex integration removed.');
+  res.json({ ok: true });
+});
+
+// Public webhook endpoint for Tebex's servers. Signature-verified (HMAC-SHA256
+// over the raw body + webstore secret); unauthenticated by design.
+app.post('/api/tebex/webhook/:serverId', (req, res) => {
+  const serverId = Number(req.params.serverId);
+  const server = db.prepare('SELECT id, name FROM servers WHERE id = ?').get(serverId);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Webhook body must be raw bytes.' });
+  try {
+    const result = tebex.ingestWebhook(serverId, req.body, req.headers['x-signature'] || req.headers['x-tebex-signature']);
+    if (result.ok && !result.ignored) {
+      appendLog(serverId, `[NexusPanel] Tebex payment received: ${result.event.username || 'unknown player'} — ${result.event.packageName} (${(result.event.priceCents / 100).toFixed(2)} ${result.event.currency}).`);
+    }
+    res.json(result);
+  } catch (error) {
+    res.status(Number(error.statusCode) || 400).json({ error: error.message });
+  }
+});
+
+// Live read-only payment console (SSE). Streams payment events as they arrive.
+app.get('/api/servers/:id/tebex/payments/stream', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-store, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  const writeEvent = (event, payload) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+  // Snapshot of recent history first, then live events.
+  writeEvent('snapshot', { payments: tebex.tebexStatus(server.id).payments });
+  const unsubscribe = tebex.subscribePaymentFeed(server.id, (payload) => writeEvent('payment', payload));
+  const heartbeat = setInterval(() => writeEvent('ping', { at: Date.now() }), 15000);
+  heartbeat.unref();
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Database connections (Pterodactyl-style)
+// ---------------------------------------------------------------------------
+app.get('/api/databases', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  res.json({ connections: hosting.connectionRows(req.query.serverId ? Number(req.query.serverId) : null) });
+});
+
+app.post('/api/databases', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const connection = hosting.createConnection(req.body.serverId || null, req.body || {});
+  logFixed({ category: 'database', title: 'Database connection created', detail: `${connection.name} → ${connection.host}:${connection.port}/${connection.database}`, source: 'owner-action' });
+  res.status(201).json({ connection });
+});
+
+app.put('/api/databases/:id', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const connection = hosting.updateConnection(req.params.id, req.body || {});
+  res.json({ connection });
+});
+
+app.delete('/api/databases/:id', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  hosting.deleteConnection(req.params.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/databases/:id/test', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  res.json({ test: await hosting.testConnection(req.params.id) });
+}));
+
+// ---------------------------------------------------------------------------
+// Network allocations (Pterodactyl-style ports/IPs)
+// ---------------------------------------------------------------------------
+app.get('/api/network/allocations', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  res.json({ allocations: hosting.allocationRows(req.query.serverId ? Number(req.query.serverId) : null) });
+});
+
+app.post('/api/network/allocations', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const allocation = hosting.createAllocation(req.body.serverId || null, req.body || {});
+  logFixed({ category: 'network', title: 'Network allocation created', detail: `${allocation.ip}:${allocation.port} (${allocation.protocol})`, source: 'owner-action' });
+  res.status(201).json({ allocation });
+});
+
+app.delete('/api/network/allocations/:id', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  hosting.deleteAllocation(req.params.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/network/allocations/:id/probe', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  res.json({ probe: await hosting.probeAllocation(req.params.id) });
 }));
 
 app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), (req, res) => {
-  setSettingValue('terminal_enabled', toBool(req.body.terminalEnabled) ? '1' : '0');
-  setSettingValue('nexus_mark_enabled', toBool(req.body.nexusMarkEnabled, true) ? '1' : '0');
-  setSettingValue('repair_web_enabled', toBool(req.body.repairWebEnabled, true) ? '1' : '0');
+  setSettingValue('asf_enabled', toBool(req.body.asfEnabled, true) ? '1' : '0');
   setSettingValue('repair_agent_terminal_enabled', toBool(req.body.repairAgentTerminalEnabled, true) ? '1' : '0');
   if (req.body.serverSwitcherVisibleCount !== undefined) {
     setSettingValue('server_switcher_visible_count', clampNumber(req.body.serverSwitcherVisibleCount, 1, 20, 3));
@@ -5444,12 +5165,6 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   const updateTag = String(req.body.updateTargetTag || req.body.updateTag || panelSettingsPayload(req.user).updateTag).trim();
   if (/^(normal|host)-v\d+\.\d+(?:\.\d+)?$/.test(updateTag)) setSettingValue('update_target_tag', updateTag);
   setSettingValue('update_repo', FIXED_UPDATE_REPO);
-  if (req.body.openRouterModel !== undefined || req.body.openRouterFreeOnly !== undefined) {
-    openRouter.setConfig({
-      model: req.body.openRouterModel,
-      freeOnly: req.body.openRouterFreeOnly,
-    });
-  }
   res.json({ settings: panelSettingsPayload(req.user) });
 });
 
@@ -5510,99 +5225,6 @@ app.post('/api/settings/update', requirePermission(capabilities.SETTINGS_MANAGE,
   res.json({ ok: true, message: `Update started for ${panelSettingsPayload(req.user).updateTag}. Protected folders stay untouched.`, repo });
 }));
 
-app.post('/api/terminal/run', requirePermission(capabilities.SETTINGS_MANAGE, permissions.MANAGE_ADMINS), asyncRoute(async (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
-  if (settingValue('terminal_enabled', '0') !== '1') return res.status(403).json({ error: 'Terminal is disabled in Settings.' });
-  const owner = db.prepare('SELECT * FROM users WHERE id = ? AND role = ?').get(req.user.id, 'owner');
-  if (!owner || !verifyPassword(req.body.password, owner.password_hash)) {
-    return res.status(401).json({ error: 'Owner password is required for terminal access.' });
-  }
-  const commandText = String(req.body.command || '').trim();
-  if (!commandText) return res.status(400).json({ error: 'Command is empty.' });
-  if (commandText.length > 1000) return res.status(400).json({ error: 'Command is too long.' });
-  const shell = shellForPlatform(commandText);
-  const result = await new Promise((resolve) => {
-    const child = spawn(shell.command, shell.args, {
-      cwd: path.join(__dirname, '..'),
-      windowsHide: true,
-      timeout: 15000,
-    });
-    let stdoutData = '';
-    let stderrData = '';
-    child.stdout.on('data', (chunk) => { stdoutData += String(chunk); });
-    child.stderr.on('data', (chunk) => { stderrData += String(chunk); });
-    child.on('error', (error) => resolve({ code: 1, output: error.message }));
-    child.on('close', (code) => resolve({ code, output: `${stdoutData}${stderrData}`.slice(-12000) }));
-  });
-  res.json(result);
-}));
-
-function terminalShell() {
-  if (process.platform === 'win32') return { command: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-NoExit'] };
-  const shell = process.env.SHELL || (fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh');
-  return { command: shell, args: shell.endsWith('bash') ? ['-l'] : [] };
-}
-
-function loadNodePty() {
-  try {
-    return require('node-pty');
-  } catch {
-    return null;
-  }
-}
-
-function createTerminalProcess(cwd, onData, onClose) {
-  const shell = terminalShell();
-  const pty = loadNodePty();
-  if (pty && process.platform !== 'win32') {
-    const term = pty.spawn(shell.command, shell.args, {
-      name: 'xterm-256color',
-      cols: 120,
-      rows: 32,
-      cwd,
-      env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '1' },
-    });
-    term.onData(onData);
-    term.onExit((event) => onClose(event.exitCode));
-    return {
-      mode: 'pty',
-      pid: term.pid,
-      write: (value) => term.write(value),
-      kill: () => term.kill(),
-      resize: (cols, rows) => {
-        try { term.resize(cols, rows); } catch {}
-      },
-    };
-  }
-  const child = spawn(shell.command, shell.args, {
-    cwd,
-    env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '1' },
-    windowsHide: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', onData);
-  child.stderr.on('data', onData);
-  child.on('error', (error) => {
-    onData(`\n[NexusPanel terminal error] ${error.message}\n`);
-    onClose(1);
-  });
-  child.on('close', onClose);
-  return {
-    mode: 'pipe',
-    pid: child.pid,
-    write: (value) => child.stdin.write(value),
-    kill: () => child.kill(),
-    resize: () => {},
-  };
-}
-
-function wrappedTerminalInput(input, token) {
-  if (process.platform === 'win32') {
-    return `${input}\n$__nexusCode = if ($?) { 0 } else { 1 }\nWrite-Output "__NEXUS_CMD_END_${token}:$($__nexusCode)__"\n`;
-  }
-  return `${input}\n__nexus_code=$?\nprintf '__NEXUS_CMD_END_${token}:%s__\\n' "$__nexus_code"\n`;
-}
-
 function closeWakeWatcher(serverId) {
   const watcher = wakeWatchers.get(serverId);
   if (!watcher) return;
@@ -5659,133 +5281,6 @@ function refreshWakeWatchers() {
     if (!wanted.has(id)) closeWakeWatcher(id);
   }
 }
-
-function terminalSessionPayload(session) {
-  return {
-    id: session.id,
-    cursor: session.buffer.length,
-    active: !session.closed,
-    cwd: session.cwd,
-    mode: session.mode || 'pipe',
-  };
-}
-
-function requireTerminalSession(req, res) {
-  const session = terminalSessions.get(req.params.sessionId);
-  if (!session || session.userId !== req.user.id) {
-    res.status(404).json({ error: 'Terminal session not found.' });
-    return null;
-  }
-  session.lastSeen = Date.now();
-  return session;
-}
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, session] of terminalSessions) {
-    if (session.closed || now - session.lastSeen > 15 * 60 * 1000) {
-      session.child.kill();
-      terminalSessions.delete(id);
-    }
-  }
-}, 60 * 1000).unref();
-
-app.post('/api/terminal/session', requireAuth, (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
-  if (settingValue('terminal_enabled', '0') !== '1') return res.status(403).json({ error: 'Terminal is disabled in Settings.' });
-  const owner = db.prepare('SELECT * FROM users WHERE id = ? AND role = ?').get(req.user.id, 'owner');
-  if (!owner || !verifyPassword(req.body.password, owner.password_hash)) {
-    return res.status(401).json({ error: 'Owner password is required for terminal access.' });
-  }
-  const existing = [...terminalSessions.values()].find((session) => session.userId === req.user.id && !session.closed);
-  if (existing) return res.json({ session: terminalSessionPayload(existing) });
-
-  const cwd = path.join(__dirname, '..');
-  const session = {
-    id: crypto.randomUUID(),
-    userId: req.user.id,
-    child: null,
-    mode: 'pipe',
-    buffer: [],
-    markerBuffer: '',
-    pendingCommands: new Map(),
-    cwd,
-    closed: false,
-    lastSeen: Date.now(),
-  };
-  const push = (chunk) => {
-    const clean = String(chunk)
-      .replace(/\r(?!\n)/g, '\n')
-      .replace(/\x1b\]0;[^\x07]*(?:\x07|\x1b\\)/g, '')
-      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
-    const markerClean = clean;
-    session.markerBuffer = `${session.markerBuffer}${markerClean}`.slice(-12000);
-    const markerPattern = /__NEXUS_CMD_END_([a-f0-9]+):(\d+)__/g;
-    let marker;
-    while ((marker = markerPattern.exec(session.markerBuffer))) {
-      const pending = session.pendingCommands.get(marker[1]);
-      if (pending) {
-        recordTerminalRepairOutcome({ ...pending, code: Number(marker[2]) });
-        session.pendingCommands.delete(marker[1]);
-      }
-    }
-    session.markerBuffer = session.markerBuffer.replace(markerPattern, '').slice(-4000);
-    const visible = clean.replace(markerPattern, '');
-    if (visible) session.buffer.push(visible);
-    if (session.buffer.length > 4000) session.buffer.splice(0, session.buffer.length - 4000);
-  };
-  session.child = createTerminalProcess(cwd, push, (code) => {
-    push(`\n[NexusPanel terminal closed] exit=${code ?? 'none'}\n`);
-    session.closed = true;
-  });
-  session.mode = session.child.mode;
-  push(`[NexusPanel] Persistent terminal opened in ${session.mode.toUpperCase()} mode.\n`);
-  terminalSessions.set(session.id, session);
-  res.status(201).json({ session: terminalSessionPayload(session) });
-});
-
-app.get('/api/terminal/session/:sessionId/output', requireAuth, (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
-  const session = requireTerminalSession(req, res);
-  if (!session) return;
-  const cursor = clampNumber(req.query.cursor, 0, session.buffer.length, 0);
-  res.json({ output: session.buffer.slice(cursor).join(''), cursor: session.buffer.length, active: !session.closed });
-});
-
-app.post('/api/terminal/session/:sessionId/input', requireAuth, (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
-  const session = requireTerminalSession(req, res);
-  if (!session) return;
-  if (session.closed) return res.status(410).json({ error: 'Terminal session is closed.' });
-  const input = String(req.body.input || '');
-  if (input.length > 4000) return res.status(400).json({ error: 'Terminal input is too long.' });
-  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(req.body.serverId));
-  const crash = server && db.prepare('SELECT * FROM repair_crash_state WHERE server_id = ?').get(server.id);
-  const canObserve = Boolean(
-    server
-    && crash
-    && Date.now() - Number(crash.last_seen_at) <= 4 * 60 * 60 * 1000
-    && !input.includes('\n')
-    && !/^\s*(?:exit|logout)\b/i.test(input),
-  );
-  if (canObserve) {
-    const token = crypto.randomBytes(8).toString('hex');
-    session.pendingCommands.set(token, { serverId: server.id, command: input.trim() });
-    session.child.write(wrappedTerminalInput(input, token));
-  } else {
-    session.child.write(input.endsWith('\n') ? input : `${input}\n`);
-  }
-  res.json({ ok: true, learning: canObserve, serverId: server?.id || null });
-});
-
-app.delete('/api/terminal/session/:sessionId', requireAuth, (req, res) => {
-  if (!ownerOnly(req)) return res.status(403).json({ error: 'Only the owner account can open terminal.' });
-  const session = requireTerminalSession(req, res);
-  if (!session) return;
-  session.child.kill();
-  terminalSessions.delete(session.id);
-  res.json({ ok: true });
-});
 
 app.post('/api/servers', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const name = String(req.body.name || '').trim();
@@ -5899,7 +5394,7 @@ app.post('/api/templates/:key/create', requirePermission(capabilities.SERVER_MAN
   db.prepare('UPDATE servers SET server_path = ?, executable_path = ?, nexus_mark_profile = ? WHERE id = ?').run(root, executablePath, JSON.stringify(mark), inserted.id);
   const created = db.prepare('SELECT * FROM servers WHERE id = ?').get(inserted.id);
   writeServerMetadata(created, root);
-  appendLog(inserted.id, `[NexusPanel] Created from Nexu template: ${nexu.name}. Nexus-Mark profile ready.`);
+  appendLog(inserted.id, `[NexusPanel] Created from Nexu template: ${nexu.name}. ASF profile ready.`);
   res.status(201).json({ server: serverPayload(created) });
 });
 
@@ -6017,11 +5512,15 @@ app.patch('/api/servers/:id/software', requirePermission(capabilities.SOFTWARE_M
 
 app.post('/api/servers/:id/software/install', requirePermission(capabilities.SOFTWARE_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
-  const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
-  if (!target) return res.status(404).json({ error: 'Server not found.' });
+  const target = getServerOr404(id, req.user);
 
   const selectedSoftware = findSoftware(req.body.softwareKey || target.software_key) || defaultSoftware(target.type);
   if (!selectedSoftware && target.nexu_payload) {
+    // Nexu templates can carry arbitrary installer shell commands. Running them
+    // is a host-level code-execution primitive, so it is gated to the owner.
+    if (!ownerOnly(req)) {
+      return res.status(403).json({ error: 'Only the owner can run Nexu template installer commands.' });
+    }
     installNexuTemplate(target)
       .catch((error) => {
         db.prepare(`
@@ -6405,31 +5904,8 @@ app.get('/api/system/metrics', requireAuth, (_req, res) => {
   res.json(hostMetricsPayload());
 });
 
-app.get('/api/intelligence', requireAuth, (req, res) => {
-  const scope = String(req.query.scope || 'system').slice(0, 120);
-  res.json(intelligence.snapshot(scope));
-});
-
-app.get('/api/intelligence/recommendations', requireAuth, (req, res) => {
-  const scope = String(req.query.scope || 'system').slice(0, 120);
-  res.json(intelligence.recommend({ scope }));
-});
-
-app.post('/api/intelligence/incident', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
-  const scope = String(req.body.scope || 'system').slice(0, 120);
-  const incident = intelligence.recordIncident({
-    type: String(req.body.type || 'manual').slice(0, 80),
-    scope,
-    severity: req.body.severity,
-    evidence: Array.isArray(req.body.evidence) ? req.body.evidence : [],
-    metadata: req.body.metadata || {},
-  });
-  res.json({ ok: true, incident });
-});
-
-app.post('/api/intelligence/incident/:id/resolve', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
-  res.json({ ok: intelligence.resolveIncident(String(req.params.id)) });
-});
+// The learned-intelligence routes were removed in 1.0.0 along with the AI
+// engine. Health/incident data is still available via /api/advanced/overview.
 
 app.use('/api/servers/:id/timeline', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (_req, res) => {
   res.status(410).json({ error: 'Server Time Machine has been removed from this build.' });
@@ -6662,7 +6138,7 @@ app.put('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES
         writeProfile(updatedServer);
       } catch (error) {
         db.prepare('UPDATE servers SET port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(server.port, server.id);
-        throw new Error(`Port changed in database but Nexus-Mark profile regeneration failed; change was rolled back. ${error.message}`);
+        throw new Error(`Port changed in database but ASF profile regeneration failed; change was rolled back. ${error.message}`);
       }
     }
   }
@@ -6863,7 +6339,8 @@ app.post('/api/public/backups/:token/:name', asyncRoute(async (req, res) => {
 app.post('/api/servers/:id/backups/import-url', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
   const url = await validatePublicBackupUrl(req.body.url);
-  const response = await fetch(url, {
+  // fetchPinned connects to the DNS-validated IP, closing the rebinding window.
+  const response = await fetchPinned(url, {
     method: 'POST',
     headers: {
       Accept: 'application/octet-stream',
@@ -7163,6 +6640,10 @@ app.post('/api/servers/:id/files/upload-chunk', requirePermission(capabilities.F
   if (!Number.isSafeInteger(offset) || offset < 0) return res.status(400).json({ error: 'Invalid upload offset.' });
   if (!Number.isSafeInteger(totalSize) || totalSize < req.body.length) return res.status(400).json({ error: 'Invalid upload size.' });
   if (offset + req.body.length > totalSize) return res.status(400).json({ error: 'Chunk exceeds declared upload size.' });
+  // Disk-exhaustion defense: cap the declared total so a client cannot reserve
+  // an unbounded sparse file inside the server root.
+  const maxUploadBytes = Math.max(1, Number(process.env.NEXUSPANEL_MAX_UPLOAD_GB || 50)) * 1024 * 1024 * 1024;
+  if (totalSize > maxUploadBytes) return res.status(413).json({ error: 'Upload exceeds the configured size limit.' });
   if (expectedChunkHash && sha256Hex(req.body) !== expectedChunkHash) {
     return res.status(409).json({ error: 'Chunk checksum mismatch. Retrying this chunk is safe.' });
   }
@@ -7398,7 +6879,13 @@ app.delete('/api/plugins/:id', requirePermission(capabilities.PLUGINS_MANAGE, pe
 });
 
 app.use((err, _req, res, _next) => {
-  res.status(Number(err.statusCode) || 400).json({ error: err.message || 'Something went wrong.' });
+  const status = Number(err.statusCode) || 400;
+  // Never leak internal stack traces, filesystem paths, or SQL errors to clients.
+  const safeMessage = status >= 500
+    ? 'Something went wrong on the panel. Check the server logs.'
+    : (err.message || 'Something went wrong.');
+  if (status >= 500) console.error(`[NexusPanel] Unhandled route error: ${err.stack || err.message}`);
+  res.status(status).json({ error: safeMessage });
 });
 
 async function runAutoBackups() {
@@ -7581,37 +7068,15 @@ async function runLiveAgentSweep() {
         }
         continue;
       }
-      const analysis = await analyzeServerWithAgent(server, software, diagnostics, { allowWeb: true });
+      const analysis = await analyzeServerWithAgent(server, software, diagnostics);
       const repairContext = await advancedRepairContext(server, software, root).catch((error) => ({ error: error.message }));
-      const advancedPlan = await advancedAi.reasonPlan({
-        server,
-        diagnostics,
-        logs,
-        context: repairContext,
-      }).catch((error) => ({
-        summary: `Advanced AI reasoning unavailable: ${error.message}`,
-        suggestions: [],
-      }));
-      if (advancedPlan?.summary) {
-        analysis.advancedReasoning = advancedPlan.summary;
-        analysis.advancedSuggestions = advancedPlan.suggestions || [];
-      }
-      const episodeId = repairAgent.recordEpisode({
-        serverId: server.id,
-        signature,
-        analysis,
-        status: 'live-observed',
-      });
-      actions.push(`Live agent analyzed ${server.name}: ${diagnostics[0].summary}`);
+      actions.push(`Live maintenance analyzed ${server.name}: ${diagnostics[0].summary}`);
       logFixed({
         serverId: server.id,
-        category: 'live-agent',
-        title: 'Live agent analyzed console',
-        detail: [
-          `Episode ${episodeId}: ${diagnostics.map((item) => item.summary).join('; ')}`,
-          advancedPlan?.summary || '',
-        ].filter(Boolean).join('\n').slice(0, 1200),
-        source: 'live-agent',
+        category: 'live-maintenance',
+        title: 'Live maintenance analyzed console',
+        detail: diagnostics.map((item) => item.summary).join('; ').slice(0, 1200),
+        source: 'live-maintenance',
       });
       if (runtimeStatus(server.id) === 'offline' && diagnostics.some((item) => ['properties-path', 'properties-syntax', 'properties-value', 'properties-encoding'].includes(item.id))) {
         const properties = await repairPropertiesFile(server);
@@ -7642,35 +7107,21 @@ async function runLiveAgentSweep() {
       if (runtimeStatus(server.id) === 'offline') {
         const advancedActions = await applyAdvancedAgentActions(server, software, root, diagnostics, repairContext, logs);
         if (advancedActions.actions.length) {
-          actions.push(`Live agent applied ${advancedActions.actions.length} safe action(s) for ${server.name}`);
+          actions.push(`Live maintenance applied ${advancedActions.actions.length} safe action(s) for ${server.name}`);
           logFixed({
             serverId: server.id,
-            category: 'live-agent',
-            title: 'Live agent applied safe action(s)',
+            category: 'live-maintenance',
+            title: 'Live maintenance applied safe action(s)',
             detail: advancedActions.actions.join('\n').slice(0, 1200),
-            source: 'live-agent',
+            source: 'live-maintenance',
           });
         }
         if (advancedActions.warnings.length) {
-          appendLog(server.id, `[NexusPanel] Live agent note: ${advancedActions.warnings.join(' ')}`);
+          appendLog(server.id, `[NexusPanel] Live maintenance note: ${advancedActions.warnings.join(' ')}`);
         }
       }
-      if (repairFullAccessEnabled() && diagnostics.some((item) => ['disk-full', 'inode-full', 'read-only-fs', 'disk-io-error'].includes(item.id))) {
-        const existing = db.prepare(`
-          SELECT id FROM repair_agent_command_queue
-          WHERE server_id = ? AND status = 'pending' AND purpose = 'live-agent-storage-debug'
-            AND requested_at >= ?
-        `).get(server.id, Date.now() - 30 * 60 * 1000);
-        if (!existing) {
-          queueFullAccessCommand({
-            serverId: server.id,
-            command: 'df -h && df -i && findmnt -T . && dmesg --level err | tail -80',
-            purpose: 'live-agent-storage-debug',
-            risk: 'high',
-            requestedBy: 'live-agent',
-          });
-          actions.push(`Live agent queued storage debug command for ${server.name}`);
-        }
+      if (diagnostics.some((item) => ['disk-full', 'inode-full', 'read-only-fs', 'disk-io-error'].includes(item.id))) {
+        appendLog(server.id, '[NexusPanel] Storage fault detected. Free disk space on the VPS or check the mount with: df -h && df -i && findmnt -T .');
       }
     }
     for (const filePath of watchFiles) {
@@ -7693,6 +7144,8 @@ function startSchedulers() {
   setInterval(runAutoBackups, 30 * 1000).unref();
   setInterval(() => runAdaptiveMaintenance().catch(() => {}), 2 * 60 * 1000).unref();
   setInterval(() => runHealthCheck(false).catch(() => {}), 24 * 60 * 60 * 1000).unref();
+  // Reap exited tunnel children so the map never grows unbounded.
+  setInterval(reapTunnelProcesses, 5 * 60 * 1000).unref();
   runAutoBackups().catch(() => {});
   runAdaptiveMaintenance().catch(() => {});
   runHealthCheck(false).catch(() => {});
@@ -7736,10 +7189,6 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
   crashHistory.set(server.id, recent);
   const launchFailure = uptimeMs < 10 * 1000;
   pauseServerBackups(current.id, launchFailure ? 30 * 60 * 1000 : 10 * 60 * 1000, launchFailure ? 'the last launch never became stable' : 'the game crashed');
-  const penalty = repairAgent.penalizeLatest(current.id, launchFailure ? 'launch-failed' : 'repeat-crash');
-  if (penalty.updated) {
-    appendLog(current.id, `[NexusPanel] Repair agent applied negative reward to the last failed recovery (${penalty.updated} neural weight updates).`);
-  }
   const crash = rememberCrash(current, software, code, signal);
   const crashDiagnostics = diagnoseRuntime(consoleLogs(current.id), { limit: 5 });
   if (crashDiagnostics.length) {

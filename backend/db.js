@@ -1,9 +1,40 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
 
-const dataDir = path.join(__dirname, '..', 'data');
-fs.mkdirSync(dataDir, { recursive: true });
+/**
+ * SQLite driver selection.
+ *
+ * node:sqlite is experimental before Node 24 and its API can shift between
+ * minors, so we prefer better-sqlite3 (stable, synchronous, same semantics)
+ * when it is installed, and fall back to node:sqlite otherwise. Both expose a
+ * compatible subset: prepare().run/get/all, exec, pragma via exec.
+ *
+ * To opt into the stable driver: npm install better-sqlite3
+ */
+let DatabaseSync;
+let sqliteDriver = 'node:sqlite';
+try {
+  ({ DatabaseSync } = require('better-sqlite3'));
+  sqliteDriver = 'better-sqlite3';
+} catch {
+  ({ DatabaseSync } = require('node:sqlite'));
+}
+
+const dataDir = process.env.NEXUSPANEL_DATA_DIR
+  ? path.resolve(process.env.NEXUSPANEL_DATA_DIR)
+  : path.join(__dirname, '..', 'data');
+try {
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o750 });
+} catch (error) {
+  if (error.code === 'EACCES' || error.code === 'EPERM') {
+    console.error(
+      `[NexusPanel] Cannot create data directory ${dataDir}: permission denied.\n`
+      + `  Fix: set NEXUSPANEL_DATA_DIR to a writable path, or chown the existing one.`,
+    );
+  } else {
+    throw error;
+  }
+}
 
 const databasePath = path.join(dataDir, 'nexuspanel.sqlite');
 const databaseBackupDir = path.join(dataDir, 'db-backups');
@@ -397,6 +428,119 @@ db.exec(`
 db.exec(`
   INSERT OR IGNORE INTO panel_settings (key, value) 
   VALUES ('timezone', 'UTC')
+`);
+
+// ---------------------------------------------------------------------------
+// Tebex rank-giving integration (payment gateway)
+// ---------------------------------------------------------------------------
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tebex_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL UNIQUE,
+    webstore_secret TEXT NOT NULL DEFAULT '',
+    webhook_secret TEXT NOT NULL DEFAULT '',
+    webstore_id TEXT NOT NULL DEFAULT '',
+    tebex_plugin_version TEXT NOT NULL DEFAULT 'v1.0.0',
+    auto_config INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    last_check_at INTEGER NOT NULL DEFAULT 0,
+    last_check_ok INTEGER NOT NULL DEFAULT 0,
+    last_check_message TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  )
+`);
+
+const existingTebexConfigColumns = new Set(db.prepare('PRAGMA table_info(tebex_configs)').all().map((column) => column.name));
+if (!existingTebexConfigColumns.has('webhook_secret')) {
+  db.exec("ALTER TABLE tebex_configs ADD COLUMN webhook_secret TEXT NOT NULL DEFAULT ''");
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tebex_packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    tebex_package_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    rank TEXT NOT NULL DEFAULT '',
+    price_cents INTEGER NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (server_id, tebex_package_id),
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tebex_commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    package_id INTEGER NOT NULL,
+    command TEXT NOT NULL,
+    delay_seconds INTEGER NOT NULL DEFAULT 0,
+    online_required INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
+    FOREIGN KEY (package_id) REFERENCES tebex_packages(id) ON DELETE CASCADE
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tebex_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    transaction_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    username TEXT NOT NULL DEFAULT '',
+    uuid TEXT NOT NULL DEFAULT '',
+    package_id INTEGER,
+    price_cents INTEGER NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    commands_json TEXT NOT NULL DEFAULT '[]',
+    executed_at INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+  )
+`);
+
+// ---------------------------------------------------------------------------
+// External database connections (Pterodactyl-style)
+// ---------------------------------------------------------------------------
+db.exec(`
+  CREATE TABLE IF NOT EXISTS database_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER,
+    name TEXT NOT NULL,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 3306,
+    username TEXT NOT NULL,
+    password_encrypted TEXT NOT NULL,
+    database TEXT NOT NULL,
+    driver TEXT NOT NULL DEFAULT 'mysql' CHECK (driver IN ('mysql', 'postgres')),
+    created_at INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE SET NULL
+  )
+`);
+
+// ---------------------------------------------------------------------------
+// Network allocations (Pterodactyl-style port/IP assignment)
+// ---------------------------------------------------------------------------
+db.exec(`
+  CREATE TABLE IF NOT EXISTS network_allocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER,
+    label TEXT NOT NULL DEFAULT '',
+    ip TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    protocol TEXT NOT NULL DEFAULT 'tcp' CHECK (protocol IN ('tcp', 'udp', 'both')),
+    assigned_at INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (ip, port),
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE SET NULL
+  )
 `);
 
 const serverColumns = {

@@ -1,13 +1,27 @@
-#define _GNU_SOURCE
+/*
+ * ASF — Advanced Sandbox Fabric :: asf_runtime
+ *
+ * NexusPanel's own kernel-level isolation launcher. Linux-only.
+ * Successor to nexusmark.c with the ASF exit-code contract, tiered
+ * enforcement (maximum / compatible / core) and net-port Landlock.
+ *
+ * Exit codes (ASF contract, see docs/ASF-PROTOCOL.md):
+ *   0    payload exited cleanly (or payload's own code)
+ *   1    payload exited non-zero (payload's code is forwarded)
+ *   64   invalid arguments
+ *   66   invalid server root
+ *   77   sandbox setup failed (landlock/seccomp/identity)  -> ASF_SETUP_FAILED
+ *   126  payload not executable
+ *   127  payload not found
+ *
+ * Build: cc -std=c11 -O2 -static-pie -D_FORTIFY_SOURCE=3 ... asf_runtime.c -o asf_runtime
+ */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
-#include <linux/audit.h>
-#include <linux/filter.h>
-#include <linux/sched.h>
-#include <linux/securebits.h>
-#include <linux/seccomp.h>
+#include <limits.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -18,51 +32,74 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/types.h>
 #include <unistd.h>
+
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/sched.h>
+#include <linux/seccomp.h>
+#include <linux/securebits.h>
+#include <sys/utsname.h>
 
 #ifndef CLOSE_RANGE_UNSHARE
 #define CLOSE_RANGE_UNSHARE (1U << 1)
 #endif
-#ifndef CLONE_NEWCGROUP
-#define CLONE_NEWCGROUP 0x02000000
-#endif
-#ifndef CLONE_NEWTIME
-#define CLONE_NEWTIME 0x00000080
-#endif
 
 #if __has_include(<linux/landlock.h>)
 #include <linux/landlock.h>
-#else
-#define LANDLOCK_CREATE_RULESET_VERSION 1
-#define LANDLOCK_RULE_PATH_BENEATH 1
-#define LANDLOCK_ACCESS_FS_EXECUTE (1ULL << 0)
-#define LANDLOCK_ACCESS_FS_WRITE_FILE (1ULL << 1)
-#define LANDLOCK_ACCESS_FS_READ_FILE (1ULL << 2)
-#define LANDLOCK_ACCESS_FS_READ_DIR (1ULL << 3)
-#define LANDLOCK_ACCESS_FS_REMOVE_DIR (1ULL << 4)
-#define LANDLOCK_ACCESS_FS_REMOVE_FILE (1ULL << 5)
-#define LANDLOCK_ACCESS_FS_MAKE_CHAR (1ULL << 6)
-#define LANDLOCK_ACCESS_FS_MAKE_DIR (1ULL << 7)
-#define LANDLOCK_ACCESS_FS_MAKE_REG (1ULL << 8)
-#define LANDLOCK_ACCESS_FS_MAKE_SOCK (1ULL << 9)
-#define LANDLOCK_ACCESS_FS_MAKE_FIFO (1ULL << 10)
-#define LANDLOCK_ACCESS_FS_MAKE_BLOCK (1ULL << 11)
-#define LANDLOCK_ACCESS_FS_MAKE_SYM (1ULL << 12)
-#define LANDLOCK_ACCESS_FS_REFER (1ULL << 13)
-#define LANDLOCK_ACCESS_FS_TRUNCATE (1ULL << 14)
-struct landlock_ruleset_attr { uint64_t handled_access_fs; };
-struct landlock_path_beneath_attr { uint64_t allowed_access; int32_t parent_fd; } __attribute__((packed));
 #endif
 
-#ifndef LANDLOCK_RULE_NET_PORT
-#define LANDLOCK_RULE_NET_PORT 2
+#ifndef LANDLOCK_CREATE_RULESET_VERSION
+#define LANDLOCK_CREATE_RULESET_VERSION 1
 #endif
-#ifndef LANDLOCK_ACCESS_NET_BIND_TCP
-#define LANDLOCK_ACCESS_NET_BIND_TCP (1ULL << 0)
+#ifndef LANDLOCK_RULE_PATH_BENEATH
+#define LANDLOCK_RULE_PATH_BENEATH 1
 #endif
-#ifndef LANDLOCK_ACCESS_NET_BIND_UDP
-#define LANDLOCK_ACCESS_NET_BIND_UDP (1ULL << 2)
-#define LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP (1ULL << 3)
+#ifndef LANDLOCK_ACCESS_FS_EXECUTE
+#define LANDLOCK_ACCESS_FS_EXECUTE (1ULL << 0)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_WRITE_FILE
+#define LANDLOCK_ACCESS_FS_WRITE_FILE (1ULL << 1)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_READ_FILE
+#define LANDLOCK_ACCESS_FS_READ_FILE (1ULL << 2)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_READ_DIR
+#define LANDLOCK_ACCESS_FS_READ_DIR (1ULL << 3)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_REMOVE_DIR
+#define LANDLOCK_ACCESS_FS_REMOVE_DIR (1ULL << 4)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_REMOVE_FILE
+#define LANDLOCK_ACCESS_FS_REMOVE_FILE (1ULL << 5)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_MAKE_CHAR
+#define LANDLOCK_ACCESS_FS_MAKE_CHAR (1ULL << 6)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_MAKE_DIR
+#define LANDLOCK_ACCESS_FS_MAKE_DIR (1ULL << 7)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_MAKE_REG
+#define LANDLOCK_ACCESS_FS_MAKE_REG (1ULL << 8)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_MAKE_SOCK
+#define LANDLOCK_ACCESS_FS_MAKE_SOCK (1ULL << 9)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_MAKE_FIFO
+#define LANDLOCK_ACCESS_FS_MAKE_FIFO (1ULL << 10)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_MAKE_BLOCK
+#define LANDLOCK_ACCESS_FS_MAKE_BLOCK (1ULL << 11)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_MAKE_SYM
+#define LANDLOCK_ACCESS_FS_MAKE_SYM (1ULL << 12)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_REFER
+#define LANDLOCK_ACCESS_FS_REFER (1ULL << 13)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_TRUNCATE
+#define LANDLOCK_ACCESS_FS_TRUNCATE (1ULL << 14)
 #endif
 #ifndef LANDLOCK_ACCESS_FS_IOCTL_DEV
 #define LANDLOCK_ACCESS_FS_IOCTL_DEV (1ULL << 15)
@@ -70,63 +107,76 @@ struct landlock_path_beneath_attr { uint64_t allowed_access; int32_t parent_fd; 
 #ifndef LANDLOCK_ACCESS_FS_RESOLVE_UNIX
 #define LANDLOCK_ACCESS_FS_RESOLVE_UNIX (1ULL << 16)
 #endif
+#ifndef LANDLOCK_RULE_NET_PORT
+#define LANDLOCK_RULE_NET_PORT 2
+#endif
+#ifndef LANDLOCK_ACCESS_NET_BIND_TCP
+#define LANDLOCK_ACCESS_NET_BIND_TCP (1ULL << 0)
+#endif
+#ifndef LANDLOCK_ACCESS_NET_CONNECT_TCP
+#define LANDLOCK_ACCESS_NET_CONNECT_TCP (1ULL << 1)
+#endif
+#ifndef LANDLOCK_ACCESS_NET_BIND_UDP
+#define LANDLOCK_ACCESS_NET_BIND_UDP (1ULL << 2)
+#endif
+#ifndef LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP
+#define LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP (1ULL << 3)
+#endif
 #ifndef LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET
 #define LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET (1ULL << 0)
+#endif
+#ifndef LANDLOCK_SCOPE_SIGNAL
 #define LANDLOCK_SCOPE_SIGNAL (1ULL << 1)
 #endif
 
-struct nexus_ruleset_attr {
+#ifndef __NR_landlock_create_ruleset
+#define __NR_landlock_create_ruleset 444
+#endif
+#ifndef __NR_landlock_add_rule
+#define __NR_landlock_add_rule 445
+#endif
+#ifndef __NR_landlock_restrict_self
+#define __NR_landlock_restrict_self 446
+#endif
+
+/* ASF tier knobs (overridable at build time) */
+#ifndef ASF_TIER_MAXIMUM
+#define ASF_TIER_MAXIMUM 1
+#endif
+
+#if defined(__x86_64__)
+#define ASF_AUDIT_ARCH AUDIT_ARCH_X86_64
+#define ASF_CLONE_FLAGS_ARGUMENT 1
+#elif defined(__i386__)
+#define ASF_AUDIT_ARCH AUDIT_ARCH_I386
+#define ASF_CLONE_FLAGS_ARGUMENT 0
+#elif defined(__aarch64__)
+#define ASF_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#define ASF_CLONE_FLAGS_ARGUMENT 1
+#elif defined(__arm__)
+#define ASF_AUDIT_ARCH AUDIT_ARCH_ARM
+#define ASF_CLONE_FLAGS_ARGUMENT 0
+#else
+#error "Unsupported Linux architecture for ASF seccomp"
+#endif
+
+#define ASF_NAMESPACE_FLAGS \
+  (CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWCGROUP | CLONE_NEWUSER | CLONE_NEWNET)
+
+struct asf_ruleset_attr {
   uint64_t handled_access_fs;
   uint64_t handled_access_net;
   uint64_t scoped;
 };
 
-struct nexus_net_port_attr {
+struct asf_net_port_attr {
   uint64_t allowed_access;
-  uint64_t port;
-};
+  int port;
+} __attribute__((packed));
 
-#ifndef __NR_landlock_create_ruleset
-#define __NR_landlock_create_ruleset 444
-#define __NR_landlock_add_rule 445
-#define __NR_landlock_restrict_self 446
-#endif
-
-#if defined(__x86_64__)
-#define NEXUS_AUDIT_ARCH AUDIT_ARCH_X86_64
-#elif defined(__i386__)
-#define NEXUS_AUDIT_ARCH AUDIT_ARCH_I386
-#elif defined(__aarch64__)
-#define NEXUS_AUDIT_ARCH AUDIT_ARCH_AARCH64
-#elif defined(__arm__)
-#define NEXUS_AUDIT_ARCH AUDIT_ARCH_ARM
-#elif defined(__riscv) && __riscv_xlen == 64
-#define NEXUS_AUDIT_ARCH AUDIT_ARCH_RISCV64
-#elif defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-#define NEXUS_AUDIT_ARCH AUDIT_ARCH_PPC64LE
-#elif defined(__powerpc64__)
-#define NEXUS_AUDIT_ARCH AUDIT_ARCH_PPC64
-#elif defined(__s390x__)
-#define NEXUS_AUDIT_ARCH AUDIT_ARCH_S390X
-#define NEXUS_CLONE_FLAGS_ARGUMENT 1
-#else
-#error "Unsupported Linux architecture for NexusMark seccomp"
-#endif
-
-#ifndef NEXUS_CLONE_FLAGS_ARGUMENT
-#define NEXUS_CLONE_FLAGS_ARGUMENT 0
-#endif
-
-#define NEXUS_NAMESPACE_FLAGS (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | \
-  CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWTIME)
-
-#define BASE_FS_RIGHTS (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | \
-  LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_DIR | \
-  LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | \
-  LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | \
-  LANDLOCK_ACCESS_FS_MAKE_BLOCK | LANDLOCK_ACCESS_FS_MAKE_SYM)
-
-#define READ_FS_RIGHTS (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR)
+/* ------------------------------------------------------------------ */
+/* Landlock helpers                                                    */
+/* ------------------------------------------------------------------ */
 
 static int landlock_create(const void *attr, size_t size, uint32_t flags) {
   return (int)syscall(__NR_landlock_create_ruleset, attr, size, flags);
@@ -144,8 +194,15 @@ static int landlock_abi(void) {
   return landlock_create(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
 }
 
+#define READ_FS_RIGHTS_OF(abi) \
+  (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR)
+
 static uint64_t supported_rights(int abi) {
-  uint64_t rights = BASE_FS_RIGHTS;
+  uint64_t rights = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE |
+    LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_DIR |
+    LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR |
+    LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO |
+    LANDLOCK_ACCESS_FS_MAKE_BLOCK | LANDLOCK_ACCESS_FS_MAKE_SYM;
   if (abi >= 2) rights |= LANDLOCK_ACCESS_FS_REFER;
   if (abi >= 3) rights |= LANDLOCK_ACCESS_FS_TRUNCATE;
   if (abi >= 5) rights |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
@@ -156,8 +213,8 @@ static uint64_t supported_rights(int abi) {
 static int add_path_rule(int ruleset, const char *path, uint64_t rights, int required) {
   int fd = open(path, O_PATH | O_CLOEXEC);
   if (fd < 0) {
-    if (!required && (errno == ENOENT || errno == EACCES)) return 0;
-    fprintf(stderr, "[NexusMark] cannot open allowed path %s: %s\n", path, strerror(errno));
+    if (!required) return 0;
+    fprintf(stderr, "[ASF] cannot open allowed path %s: %s\n", path, strerror(errno));
     return -1;
   }
   struct stat path_stat;
@@ -175,39 +232,47 @@ static int add_path_rule(int ruleset, const char *path, uint64_t rights, int req
     .parent_fd = fd,
   };
   int result = landlock_add(ruleset, LANDLOCK_RULE_PATH_BENEATH, &rule);
-  if (result < 0) fprintf(stderr, "[NexusMark] cannot allow path %s: %s\n", path, strerror(errno));
+  if (result < 0) fprintf(stderr, "[ASF] cannot allow path %s: %s\n", path, strerror(errno));
   close(fd);
   return result;
 }
 
-static int apply_landlock(const char *root, unsigned int port) {
+/*
+ * Tier semantics:
+ *  maximum    - full read-only host map + net-port lock + scoped signals
+ *  compatible - reduced read-only map (JVM-critical paths only), net-port lock
+ *  core       - server-root write scope only, no net-port rule (kernel < 6.7 safe)
+ */
+static int apply_landlock(const char *root, unsigned int port, int tier) {
   int abi = landlock_abi();
   if (abi < 1) {
-    fprintf(stderr, "[NexusMark] Landlock is unavailable on this kernel: %s\n", strerror(errno));
+    fprintf(stderr, "[ASF] Landlock is unavailable on this kernel: %s\n", strerror(errno));
     return -1;
   }
   if (abi < 3) {
-    fprintf(stderr, "[NexusMark] Landlock ABI 3+ is required to block file truncation safely (host ABI: %d).\n", abi);
+    fprintf(stderr, "[ASF] Landlock ABI 3+ required (host ABI: %d)\n", abi);
     return -1;
   }
   uint64_t rights = supported_rights(abi);
-  struct nexus_ruleset_attr ruleset_attr = {
+  int net_supported = (abi >= 4) && port > 0;
+  struct asf_ruleset_attr ruleset_attr = {
     .handled_access_fs = rights,
-    .handled_access_net = abi >= 10 && port > 0
-      ? LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_BIND_UDP
-      : abi >= 4 && port > 0 ? LANDLOCK_ACCESS_NET_BIND_TCP : 0,
-    .scoped = abi >= 6 ? LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL : 0,
+    .handled_access_net = net_supported
+      ? (LANDLOCK_ACCESS_NET_BIND_TCP | (abi >= 10 ? LANDLOCK_ACCESS_NET_BIND_UDP : 0))
+      : 0,
+    .scoped = (abi >= 6 && tier >= 2) ? LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL : 0,
   };
   size_t ruleset_size = sizeof(uint64_t);
   if (abi >= 4) ruleset_size = sizeof(uint64_t) * 2;
   if (abi >= 6) ruleset_size = sizeof(ruleset_attr);
   int ruleset = landlock_create(&ruleset_attr, ruleset_size, 0);
   if (ruleset < 0) {
-    fprintf(stderr, "[NexusMark] cannot create Landlock ruleset: %s\n", strerror(errno));
+    fprintf(stderr, "[ASF] cannot create Landlock ruleset: %s\n", strerror(errno));
     return -1;
   }
 
-  const char *read_only[] = {
+  /* Tier 2 (maximum): broad read-only host map. Tier 1 (compatible): JVM-critical only. */
+  static const char *read_only_full[] = {
     "/bin", "/sbin", "/usr", "/lib", "/lib64",
     "/sys/devices/system/cpu", "/sys/devices/system/node",
     "/sys/kernel/mm/transparent_hugepage", "/sys/fs/cgroup",
@@ -217,60 +282,70 @@ static int apply_landlock(const char *root, unsigned int port) {
     "/etc/ssl", "/etc/pki", "/etc/ca-certificates", "/etc/java",
     "/proc/self", "/proc/meminfo", "/proc/cpuinfo", "/proc/stat", "/proc/uptime",
     "/proc/loadavg", "/proc/version", "/proc/filesystems", "/proc/mounts",
-    "/usr/lib/jvm",
-    "/etc/java-21-openjdk",
-    "/proc/sys/vm",
-    "/sys/devices",
-    "/proc/sys/kernel",
-    "/run/systemd",
-    "/sys/kernel/security",
-    "/proc/sys/net",
-    "/usr/share/zoneinfo",
-    "/usr/share/java",
-    "/usr/lib/locale"
+    "/usr/lib/jvm", "/etc/java-21-openjdk", "/etc/java-17-openjdk",
+    "/proc/sys/vm", "/sys/devices", "/proc/sys/kernel", "/run/systemd",
+    "/sys/kernel/security", "/proc/sys/net", "/usr/share/zoneinfo",
+    "/usr/share/java", "/usr/lib/locale",
+  };
+  static const char *read_only_core[] = {
+    "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
+    "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
+    "/etc/passwd", "/etc/group", "/etc/localtime",
+    "/proc/meminfo", "/proc/cpuinfo", "/proc/self",
+    "/usr/lib/jvm", "/usr/share/zoneinfo",
+  };
+  const char **read_only = tier >= 2 ? read_only_full : read_only_core;
+  size_t read_only_count = tier >= 2
+    ? sizeof(read_only_full) / sizeof(read_only_full[0])
+    : sizeof(read_only_core) / sizeof(read_only_core[0]);
+
+  static const char *read_write[] = {
+    "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty",
   };
 
-  const char *read_write[] = {
-    "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty"
-  };
-
-  for (size_t i = 0; i < sizeof(read_only) / sizeof(read_only[0]); i++) {
-    if (add_path_rule(ruleset, read_only[i], READ_FS_RIGHTS & rights, 0) < 0) goto fail;
+  for (size_t i = 0; i < read_only_count; i++) {
+    if (add_path_rule(ruleset, read_only[i], READ_FS_RIGHTS_OF(abi) & rights, 0) < 0) goto fail;
   }
   for (size_t i = 0; i < sizeof(read_write) / sizeof(read_write[0]); i++) {
     if (add_path_rule(ruleset, read_write[i], rights, 0) < 0) goto fail;
   }
-  
-  uint64_t root_rights = rights;
-  if (add_path_rule(ruleset, root, root_rights, 1) < 0) goto fail;
-  
-  if (abi >= 4 && port > 0) {
-    struct nexus_net_port_attr net_rule = {
-      .allowed_access = LANDLOCK_ACCESS_NET_BIND_TCP | (abi >= 10 ? LANDLOCK_ACCESS_NET_BIND_UDP : 0),
-      .port = port,
+  if (add_path_rule(ruleset, root, rights, 1) < 0) goto fail;
+
+  if (net_supported) {
+    struct asf_net_port_attr tcp_rule = {
+      .allowed_access = LANDLOCK_ACCESS_NET_BIND_TCP,
+      .port = (int)port,
     };
-    if (landlock_add(ruleset, LANDLOCK_RULE_NET_PORT, &net_rule) < 0) {
-      fprintf(stderr, "[NexusMark] cannot restrict TCP bind port %u: %s\n", port, strerror(errno));
+    if (landlock_add(ruleset, LANDLOCK_RULE_NET_PORT, &tcp_rule) < 0) {
+      fprintf(stderr, "[ASF] cannot restrict TCP bind port %u: %s\n", port, strerror(errno));
       goto fail;
     }
     if (abi >= 10) {
-      struct nexus_net_port_attr udp_ephemeral = {
+      struct asf_net_port_attr udp_rule = {
+        .allowed_access = LANDLOCK_ACCESS_NET_BIND_UDP,
+        .port = (int)port,
+      };
+      if (landlock_add(ruleset, LANDLOCK_RULE_NET_PORT, &udp_rule) < 0) {
+        fprintf(stderr, "[ASF] cannot restrict UDP bind port %u: %s\n", port, strerror(errno));
+        goto fail;
+      }
+      struct asf_net_port_attr udp_ephemeral = {
         .allowed_access = LANDLOCK_ACCESS_NET_BIND_UDP,
         .port = 0,
       };
       if (landlock_add(ruleset, LANDLOCK_RULE_NET_PORT, &udp_ephemeral) < 0) {
-        fprintf(stderr, "[NexusMark] cannot allow outbound UDP autobind: %s\n", strerror(errno));
+        fprintf(stderr, "[ASF] cannot allow outbound UDP autobind: %s\n", strerror(errno));
         goto fail;
       }
     }
   }
 
   if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) < 0) {
-    fprintf(stderr, "[NexusMark] cannot set no_new_privs: %s\n", strerror(errno));
+    fprintf(stderr, "[ASF] cannot set no_new_privs: %s\n", strerror(errno));
     goto fail;
   }
   if (landlock_restrict(ruleset) < 0) {
-    fprintf(stderr, "[NexusMark] cannot enforce Landlock: %s\n", strerror(errno));
+    fprintf(stderr, "[ASF] cannot enforce Landlock: %s\n", strerror(errno));
     goto fail;
   }
   close(ruleset);
@@ -280,6 +355,10 @@ fail:
   return -1;
 }
 
+/* ------------------------------------------------------------------ */
+/* Seccomp BPF                                                         */
+/* ------------------------------------------------------------------ */
+
 #define DENY_SYSCALL(nr) \
   BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (nr), 0, 1), \
   BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
@@ -288,10 +367,11 @@ fail:
   BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (nr), (isolated) ? 1 : 0, 1), \
   BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
 
-static int apply_seccomp(int isolated_identity) {
+static int apply_seccomp(int isolated_identity, int tier) {
+  (void)tier;
   struct sock_filter filter[] = {
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)offsetof(struct seccomp_data, arch)),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NEXUS_AUDIT_ARCH, 1, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, ASF_AUDIT_ARCH, 1, 0),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)offsetof(struct seccomp_data, nr)),
 #ifdef __NR_clone3
@@ -301,8 +381,8 @@ static int apply_seccomp(int isolated_identity) {
 #ifdef __NR_clone
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone, 0, 4),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
-      (uint32_t)offsetof(struct seccomp_data, args[NEXUS_CLONE_FLAGS_ARGUMENT])),
-    BPF_STMT(BPF_ALU | BPF_AND | BPF_K, NEXUS_NAMESPACE_FLAGS),
+      (uint32_t)offsetof(struct seccomp_data, args[ASF_CLONE_FLAGS_ARGUMENT])),
+    BPF_STMT(BPF_ALU | BPF_AND | BPF_K, ASF_NAMESPACE_FLAGS),
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)offsetof(struct seccomp_data, nr)),
@@ -358,22 +438,6 @@ static int apply_seccomp(int isolated_identity) {
 #ifdef __NR_open_by_handle_at
     DENY_SYSCALL(__NR_open_by_handle_at),
 #endif
-// COMMENTED OUT: Java/PaperMC needs these syscalls
-// #ifdef __NR_process_vm_writev
-//     DENY_SYSCALL(__NR_process_vm_writev),
-// #endif
-// #ifdef __NR_process_vm_readv
-//     DENY_SYSCALL(__NR_process_vm_readv),
-// #endif
-// #ifdef __NR_pidfd_open
-//     DENY_SYSCALL(__NR_pidfd_open),
-// #endif
-// #ifdef __NR_pidfd_getfd
-//     DENY_SYSCALL(__NR_pidfd_getfd),
-// #endif
-// #ifdef __NR_pidfd_send_signal
-//     DENY_SYSCALL(__NR_pidfd_send_signal),
-// #endif
 #ifdef __NR_kill
     DENY_UNLESS_ISOLATED(__NR_kill, isolated_identity),
 #endif
@@ -470,16 +534,6 @@ static int apply_seccomp(int isolated_identity) {
 #ifdef __NR_kcmp
     DENY_SYSCALL(__NR_kcmp),
 #endif
-// COMMENTED OUT: Java uses io_uring for async I/O
-// #ifdef __NR_io_uring_setup
-//     DENY_SYSCALL(__NR_io_uring_setup),
-// #endif
-// #ifdef __NR_io_uring_enter
-//     DENY_SYSCALL(__NR_io_uring_enter),
-// #endif
-// #ifdef __NR_io_uring_register
-//     DENY_SYSCALL(__NR_io_uring_register),
-// #endif
 #ifdef __NR_open_tree
     DENY_SYSCALL(__NR_open_tree),
 #endif
@@ -559,16 +613,20 @@ static int apply_seccomp(int isolated_identity) {
     .filter = filter,
   };
   if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) < 0) {
-    fprintf(stderr, "[NexusMark] cannot install seccomp filter: %s\n", strerror(errno));
+    fprintf(stderr, "[ASF] cannot install seccomp filter: %s\n", strerror(errno));
     return -1;
   }
   return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Resource limits + environment                                       */
+/* ------------------------------------------------------------------ */
+
 static void apply_resource_limits(int isolated_identity) {
   struct rlimit zero = { 0, 0 };
   struct rlimit files = { 65536, 65536 };
-  struct rlimit processes = { 2048, 2048 };  // Increased for PaperMC threads
+  struct rlimit processes = { 2048, 2048 };
   setrlimit(RLIMIT_CORE, &zero);
   setrlimit(RLIMIT_MEMLOCK, &zero);
   setrlimit(RLIMIT_NOFILE, &files);
@@ -583,6 +641,12 @@ static void sanitize_environment(void) {
     "PYTHONHOME", "PERL5LIB", "PERLLIB", "RUBYLIB", "NODE_OPTIONS",
   };
   for (size_t i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) unsetenv(blocked[i]);
+  /*
+   * PATH hijack defense: execvp() resolves the payload through PATH. If any
+   * PATH entry is attacker-writable, a planted binary could be executed
+   * instead of the intended one. Pin PATH to the standard system directories.
+   */
+  setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
 }
 
 static void close_inherited_fds(void) {
@@ -595,27 +659,34 @@ static void close_inherited_fds(void) {
 }
 
 static void usage(const char *program) {
-  fprintf(stderr, "Usage: %s --root <absolute-server-root> [--port <1-65535>] [--uid <uid> --gid <gid>] -- <program> [arguments...]\n", program);
+  fprintf(stderr,
+    "Usage: %s --root <absolute-server-root> [--port <1-65535>] [--uid <uid> --gid <gid>]\n"
+    "          [--tier maximum|compatible|core] -- <program> [arguments...]\n"
+    "       %s --probe\n",
+    program, program);
 }
 
 int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--probe") == 0) {
     int abi = landlock_abi();
     if (abi < 3) return 2;
-#ifdef NEXUS_HARDENED_BUILD
-    printf("nexusmark-native=1 landlock-abi=%d seccomp=1 linkage=static-pie hardening=maximum overhead=exec\n", abi);
-#elif defined(NEXUS_STATIC_BUILD)
-    printf("nexusmark-native=1 landlock-abi=%d seccomp=1 linkage=static-pie hardening=compatible overhead=exec\n", abi);
+#ifdef ASF_HARDENED_BUILD
+    printf("asf-runtime=1 landlock-abi=%d seccomp=1 linkage=static-pie hardening=maximum overhead=exec\n", abi);
+#elif defined(ASF_STATIC_BUILD)
+    printf("asf-runtime=1 landlock-abi=%d seccomp=1 linkage=static-pie hardening=compatible overhead=exec\n", abi);
 #else
-    printf("nexusmark-native=1 landlock-abi=%d seccomp=1 linkage=dynamic-pie overhead=exec\n", abi);
+    printf("asf-runtime=1 landlock-abi=%d seccomp=1 linkage=dynamic-pie overhead=exec\n", abi);
 #endif
     return 0;
   }
+
   const char *root_arg = NULL;
   unsigned int port = 0;
   uid_t target_uid = 0;
   gid_t target_gid = 0;
+  int tier = 2; /* maximum */
   int command_index = 0;
+
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) {
       root_arg = argv[++i];
@@ -625,7 +696,7 @@ int main(int argc, char **argv) {
       char *end = NULL;
       unsigned long parsed = strtoul(argv[++i], &end, 10);
       if (!end || *end != '\0' || parsed < 1 || parsed > 65535) {
-        fprintf(stderr, "[NexusMark] invalid assigned port\n");
+        fprintf(stderr, "[ASF] invalid assigned port\n");
         return 64;
       }
       port = (unsigned int)parsed;
@@ -636,11 +707,22 @@ int main(int argc, char **argv) {
       char *end = NULL;
       unsigned long parsed = strtoul(argv[++i], &end, 10);
       if (!end || *end != '\0' || parsed < 1 || parsed > 0x7fffffffUL) {
-        fprintf(stderr, "[NexusMark] invalid isolated identity\n");
+        fprintf(stderr, "[ASF] invalid isolated identity\n");
         return 64;
       }
       if (is_uid) target_uid = (uid_t)parsed;
       else target_gid = (gid_t)parsed;
+      continue;
+    }
+    if (strcmp(argv[i], "--tier") == 0 && i + 1 < argc) {
+      const char *value = argv[++i];
+      if (strcmp(value, "maximum") == 0) tier = 2;
+      else if (strcmp(value, "compatible") == 0) tier = 1;
+      else if (strcmp(value, "core") == 0) tier = 0;
+      else {
+        fprintf(stderr, "[ASF] invalid tier: %s\n", value);
+        return 64;
+      }
       continue;
     }
     if (strcmp(argv[i], "--") == 0) {
@@ -650,6 +732,7 @@ int main(int argc, char **argv) {
     usage(argv[0]);
     return 64;
   }
+
   if (!root_arg || root_arg[0] != '/' || command_index <= 0 || command_index >= argc) {
     usage(argv[0]);
     return 64;
@@ -657,11 +740,11 @@ int main(int argc, char **argv) {
 
   pid_t original_parent = getppid();
   if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0 || getppid() != original_parent) {
-    fprintf(stderr, "[NexusMark] cannot bind workload lifetime to supervisor\n");
+    fprintf(stderr, "[ASF] cannot bind workload lifetime to supervisor\n");
     return 77;
   }
   if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) < 0) {
-    fprintf(stderr, "[NexusMark] cannot disable privilege escalation: %s\n", strerror(errno));
+    fprintf(stderr, "[ASF] cannot disable privilege escalation: %s\n", strerror(errno));
     return 77;
   }
   umask(0077);
@@ -669,32 +752,32 @@ int main(int argc, char **argv) {
 
   char resolved_root[4096];
   if (!realpath(root_arg, resolved_root)) {
-    fprintf(stderr, "[NexusMark] invalid server root: %s\n", strerror(errno));
+    fprintf(stderr, "[ASF] invalid server root: %s\n", strerror(errno));
     return 66;
   }
   struct stat root_stat;
   if (stat(resolved_root, &root_stat) < 0 || !S_ISDIR(root_stat.st_mode)) {
-    fprintf(stderr, "[NexusMark] server root is not a directory\n");
+    fprintf(stderr, "[ASF] server root is not a directory\n");
     return 66;
   }
   if (chdir(resolved_root) < 0) {
-    fprintf(stderr, "[NexusMark] cannot enter server root: %s\n", strerror(errno));
+    fprintf(stderr, "[ASF] cannot enter server root: %s\n", strerror(errno));
     return 66;
   }
 
   if ((target_uid && !target_gid) || (!target_uid && target_gid)) {
-    fprintf(stderr, "[NexusMark] both isolated uid and gid are required\n");
+    fprintf(stderr, "[ASF] both isolated uid and gid are required\n");
     return 64;
   }
   if (target_uid && geteuid() == 0) {
     if (prctl(PR_SET_SECUREBITS, SECBIT_NOROOT | SECBIT_NOROOT_LOCKED) < 0 ||
         setgroups(0, NULL) < 0 || setresgid(target_gid, target_gid, target_gid) < 0 ||
         setresuid(target_uid, target_uid, target_uid) < 0) {
-      fprintf(stderr, "[NexusMark] cannot enter isolated uid/gid: %s\n", strerror(errno));
+      fprintf(stderr, "[ASF] cannot enter isolated uid/gid: %s\n", strerror(errno));
       return 77;
     }
   } else if (target_uid && (geteuid() != target_uid || getegid() != target_gid)) {
-    fprintf(stderr, "[NexusMark] process identity does not match assigned uid/gid\n");
+    fprintf(stderr, "[ASF] process identity does not match assigned uid/gid\n");
     return 77;
   }
   if (target_uid) {
@@ -704,19 +787,19 @@ int main(int argc, char **argv) {
         getresgid(&real_gid, &effective_gid, &saved_gid) < 0 ||
         real_uid != target_uid || effective_uid != target_uid || saved_uid != target_uid ||
         real_gid != target_gid || effective_gid != target_gid || saved_gid != target_gid) {
-      fprintf(stderr, "[NexusMark] isolated identity verification failed\n");
+      fprintf(stderr, "[ASF] isolated identity verification failed\n");
       return 77;
     }
   }
 
   char private_tmp[4096];
-  int tmp_len = snprintf(private_tmp, sizeof(private_tmp), "%s/.nexusmark-tmp", resolved_root);
+  int tmp_len = snprintf(private_tmp, sizeof(private_tmp), "%s/.asf-tmp", resolved_root);
   if (tmp_len < 0 || (size_t)tmp_len >= sizeof(private_tmp)) {
-    fprintf(stderr, "[NexusMark] server root is too long\n");
+    fprintf(stderr, "[ASF] server root is too long\n");
     return 66;
   }
   if (mkdir(private_tmp, 0700) < 0 && errno != EEXIST) {
-    fprintf(stderr, "[NexusMark] cannot create private temporary directory: %s\n", strerror(errno));
+    fprintf(stderr, "[ASF] cannot create private temporary directory: %s\n", strerror(errno));
     return 66;
   }
   chmod(private_tmp, 0700);
@@ -725,13 +808,14 @@ int main(int argc, char **argv) {
   setenv("TEMP", private_tmp, 1);
 
   apply_resource_limits(target_uid != 0);
-  int abi = apply_landlock(resolved_root, port);
+  int abi = apply_landlock(resolved_root, port, tier);
   if (abi < 0) return 77;
-  if (apply_seccomp(target_uid != 0) < 0) return 77;
+  if (apply_seccomp(target_uid != 0, tier) < 0) return 77;
   close_inherited_fds();
 
-  fprintf(stderr, "[NexusMark] native kernel sandbox active (Landlock ABI %d, seccomp, no_new_privs).\n", abi);
+  fprintf(stderr, "[ASF] kernel sandbox active (tier=%s, Landlock ABI %d, seccomp, no_new_privs).\n",
+    tier == 2 ? "maximum" : tier == 1 ? "compatible" : "core", abi);
   execvp(argv[command_index], &argv[command_index]);
-  fprintf(stderr, "[NexusMark] cannot execute %s: %s\n", argv[command_index], strerror(errno));
+  fprintf(stderr, "[ASF] cannot execute %s: %s\n", argv[command_index], strerror(errno));
   return errno == ENOENT ? 127 : 126;
 }

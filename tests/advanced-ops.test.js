@@ -20,6 +20,6 @@ assert.deepEqual(plan.stages, ['validate','snapshot','apply','verify']);
 assert.equal(plan.rollback.required, true);
 
 assert.equal(routeModel({complexity:'tiny'}), 'microllm');
-assert.equal(routeModel({code:true}), 'openrouter-selected');
+assert.equal(routeModel({code:true}), 'deferred');
 
 console.log('Advanced operations tests passed');

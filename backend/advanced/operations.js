@@ -99,10 +99,14 @@ class ChangePlanner {
   }
 }
 
+/**
+ * Model routing placeholder. The external AI (OpenRouter) was removed in
+ * 1.0.0; when the new AI engine ships, this returns the selected model.
+ * Until then every task routes to 'deferred' so callers can skip AI work.
+ */
 function routeModel(task={}) {
   if(task.localOnly || task.complexity==='tiny') return 'microllm';
-  if(task.code || task.debug || task.tools) return 'openrouter-selected';
-  return 'openrouter-selected';
+  return 'deferred';
 }
 
 module.exports={RingBuffer,HealthEngine,IncidentEngine,DependencyGraph,ChangePlanner,routeModel};

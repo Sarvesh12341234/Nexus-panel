@@ -30,7 +30,7 @@ async function main() {
 
   try {
     const userIndexStr = await rl.question('\nSelect user number to reset password (or press Enter to cancel): ');
-    
+
     if (!userIndexStr.trim()) {
       console.log('Cancelled.');
       process.exit(0);

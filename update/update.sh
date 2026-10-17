@@ -13,8 +13,8 @@ if [ -z "$EDITION" ] && [ -f "$APP_DIR/data/edition" ]; then
 fi
 EDITION="${EDITION:-normal}"
 case "$EDITION" in
-  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-host-v3.0.0}" ;;
-  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-normal-v3.0.0}" ;;
+  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-host-v1.0.0}" ;;
+  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-normal-v1.0.0}" ;;
 esac
 
 cd "$APP_DIR"
@@ -93,7 +93,13 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
     exit 1
   fi
   EXPECTED_VERSION="${UPDATE_TAG##*-v}"
-  INSTALLED_VERSION="$(node -p "require('./package.json').version")"
+  if [ ! -f package.json ]; then
+    echo "[NexusPanel] Version verification failed: package.json is missing after the update." >&2
+    git reset --hard "$PREVIOUS_COMMIT"
+    UPDATE_SWITCHED=0
+    exit 1
+  fi
+  INSTALLED_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || true)"
   if [ "$INSTALLED_VERSION" != "$EXPECTED_VERSION" ]; then
     echo "[NexusPanel] Version verification failed: tag expects $EXPECTED_VERSION, code reports $INSTALLED_VERSION." >&2
     git reset --hard "$PREVIOUS_COMMIT"
@@ -107,7 +113,7 @@ fi
 
 if [ -f package.json ]; then
   npm install --no-audit --no-fund
-  npm run build:nexusmark || echo "[NexusPanel] Native NexusMark build unavailable; keeping systemd isolation fallback."
+  npm run build:asf || echo "[NexusPanel] Native ASF build unavailable; keeping systemd isolation fallback."
   npm run build:host-agent || echo "[NexusPanel] Native host agent build unavailable; restart the service installer after installing a C compiler."
 fi
 echo "[NexusPanel][85%] Dependencies verified."
