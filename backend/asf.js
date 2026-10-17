@@ -192,6 +192,18 @@ function propertyArgs(properties) {
   return properties.flatMap((property) => ['--property', property]);
 }
 
+function requireLaunchIsolation(platform, status, identity) {
+  if (platform !== 'linux') {
+    throw new Error('Server launch is disabled: NexusPanel has no per-server OS isolation on this platform.');
+  }
+  if (!status?.preflightPassed) {
+    throw new Error('Server launch is disabled: ASF isolation preflight did not pass. Check systemd, cgroup v2, and host isolation logs.');
+  }
+  if (!identity?.available) {
+    throw new Error(`Server launch is disabled: per-server OS identity is unavailable${identity?.reason ? ` (${identity.reason})` : ''}.`);
+  }
+}
+
 function kernelStatus({ refresh = false } = {}) {
   const platformInfo = capabilities();
   if (process.platform !== 'linux') {
@@ -304,11 +316,12 @@ function kernelStatus({ refresh = false } = {}) {
 
 function wrapCommand(command, args, profile, options = {}) {
   const disableNative = options.disableNative === true;
-  if (process.platform !== 'linux') return { command, args, unit: '', engine: 'process-guard', policyTier: 'process-guard' };
+  if (process.platform !== 'linux') requireLaunchIsolation(process.platform, null, null);
 
   const status = kernelStatus();
   const native = status.native;
   const identity = ensureServerIdentity(profile, native.available ? native.binary : '');
+  requireLaunchIsolation(process.platform, status, identity);
   const launchProfile = { ...profile, asfIdentity: identity };
   const nativeUsable = !disableNative && native.available && identity.available && status.preflightPassed;
   const nativeCommand = nativeUsable ? native.binary : command;
@@ -321,19 +334,6 @@ function wrapCommand(command, args, profile, options = {}) {
       '--', command, ...args,
     ]
     : args;
-  if (!status.preflightPassed) {
-    return {
-      command: nativeCommand,
-      args: nativeArgs,
-      unit: '',
-      engine: nativeUsable ? 'asf-native-landlock-seccomp' : 'process-guard',
-      policyTier: status.tier,
-      nativeDetail: nativeUsable ? (native.detail || '') : (identity.reason || native.reason || ''),
-      compatibilityDetail: status.failures?.[0]?.detail || status.reason || '',
-      identity,
-    };
-  }
-
   clearStaleUnits(profile.serverId, spawnSync);
   launchSequence = (launchSequence + 1) % 1000000;
   const unit = [
@@ -398,6 +398,7 @@ function spawnOptions(baseOptions, profile) {
 }
 
 module.exports = {
+  requireLaunchIsolation,
   profileForServer,
   spawnOptions,
   wrapCommand,

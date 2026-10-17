@@ -2477,14 +2477,14 @@ function renderSettings() {
         <strong>ASF — Advanced Sandbox Fabric (native kernel runtime)</strong>
         <p class="muted" id="asfDoctorStatus">${settings.asfNative?.available
           ? `Active: ${escapeHtml(settings.asfNative.detail || 'native Landlock and seccomp runtime ready')}. Each server also receives cgroup CPU, RAM, swap, task, device, and namespace limits.`
-          : `Native runtime unavailable: ${escapeHtml(settings.asfNative?.reason || 'unsupported host')}. Linux keeps the systemd kernel-isolation fallback.`}</p>
+          : `Native runtime unavailable: ${escapeHtml(settings.asfNative?.reason || 'unsupported host')}. Server starts require verified Linux per-server identity and ASF preflight; unisolated fallback is disabled.`}</p>
         <div class="row-actions"><button class="secondary" type="button" data-action="asf-doctor">Run Kernel Doctor</button></div>
       </div>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
-      <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.0.2')}"></label>
+      <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.0.0')}"></label>
       <label>Visible servers before scrolling <input name="serverSwitcherVisibleCount" type="number" min="1" max="20" value="${Number(settings.serverSwitcherVisibleCount || 3)}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
-      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="v1.0.2"></label>
+      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="v1.0.0"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
       <div class="settings-group">
         <strong>World converter</strong>

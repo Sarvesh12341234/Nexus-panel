@@ -27,10 +27,10 @@ function capabilities() {
     linux, windows,
     systemd,
     nativeNexusMark: linux,
-    processGuard: linux || windows,
-    pathSandbox: true,
-    resourceGuard: linux || windows,
-    serviceMode: systemd ? 'systemd' : windows ? 'windows-service-or-foreground' : 'foreground',
+    processGuard: linux,
+    pathSandbox: linux,
+    resourceGuard: linux,
+    serviceMode: systemd ? 'systemd' : windows ? 'management-only' : 'foreground',
     supported: ['linux', 'win32'].includes(process.platform),
   };
 }
@@ -46,7 +46,7 @@ function doctor() {
       systemd: c.systemd,
       nativeSandbox: c.nativeNexusMark,
     },
-    isolationTier: c.nativeNexusMark ? 'native-linux' : c.windows ? 'windows-process-guard' : 'portable-path-guard',
+    isolationTier: c.nativeNexusMark ? 'linux-isolation-checked-at-launch' : 'server-execution-disabled',
   };
 }
 module.exports = { capabilities, doctor, commandExists, distro };

@@ -15,6 +15,8 @@ const logSubscribers = new Map();
 const intentionalStops = new Set();
 const pendingLogWrites = new Map();
 const logWriteChains = new Map();
+const fileOperations = new Map();
+const startingServers = new Set();
 let exitHandler = null;
 const MAX_LOG_LINES = 600;
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
@@ -247,7 +249,38 @@ function ensureRuntimeEnvironment(root) {
   return dirs;
 }
 
+function beginServerFileOperation(serverId) {
+  const id = Number(serverId);
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error('Invalid server ID.');
+  if (processes.has(id) || startingServers.has(id)) {
+    throw new Error('Stop the server before using the file manager.');
+  }
+  fileOperations.set(id, (fileOperations.get(id) || 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const remaining = (fileOperations.get(id) || 1) - 1;
+    if (remaining > 0) fileOperations.set(id, remaining);
+    else fileOperations.delete(id);
+  };
+}
+
 function startServer(server, software, options = {}) {
+  const serverId = Number(server.id);
+  if (processes.has(serverId)) return { ok: true, message: 'Server already running.' };
+  if (fileOperations.has(serverId) || startingServers.has(serverId)) {
+    throw new Error('Server cannot start while a file-manager operation is active.');
+  }
+  startingServers.add(serverId);
+  try {
+    return launchServer(server, software, options);
+  } finally {
+    startingServers.delete(serverId);
+  }
+}
+
+function launchServer(server, software, options = {}) {
   const serverId = Number(server.id);
   if (processes.has(serverId)) return { ok: true, message: 'Server already running.' };
   if (!server.executable_path || !fs.existsSync(server.executable_path)) {
@@ -257,7 +290,7 @@ function startServer(server, software, options = {}) {
   const root = ensureServerDirs(server);
   const runtimeEnv = ensureRuntimeEnvironment(root);
   appendLog(serverId, `[NexusPanel] Working directory: ${root}`);
-  if (options.disableNative) appendLog(serverId, '[NexusPanel] ASF native launch retry disabled; using compatibility isolation path.');
+  if (options.disableNative) appendLog(serverId, '[NexusPanel] ASF native wrapper disabled; retaining verified systemd isolation and per-server identity.');
   const executable = server.executable_path;
   const totalCpuCores = hostCpuCount();
   const dbMemoryMb = Math.max(256, Math.round(Number(server.max_memory_mb) || 1024));
@@ -763,6 +796,7 @@ function setExitHandler(handler) {
 
 module.exports = {
   appendLog,
+  beginServerFileOperation,
   consoleLogs,
   killServer,
   runtimeDetails,

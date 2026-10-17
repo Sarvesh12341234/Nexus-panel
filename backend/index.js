@@ -20,7 +20,7 @@ const { clearSoftwareVersionCache, defaultSoftware, findSoftware, installedJavaM
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { kernelStatus, nativeStatus, profileForServer, writeProfile } = require('./asf');
 const { removeServerIdentity } = require('./asf_identity');
-const { appendLog, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer, subscribeConsole } = require('./runtime');
+const { appendLog, beginServerFileOperation, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer, subscribeConsole } = require('./runtime');
 const { archiveCollisions, archiveEntries, archiveFormat, copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { processTreeMetrics } = require('./process_metrics');
@@ -29,6 +29,7 @@ const { DDOS_PARAMETER_COUNT, collectDdosEvidence } = require('./ddos_guard');
 const tebex = require('./tebex');
 const hosting = require('./hosting');
 const hostAgent = require('./host_agent');
+const { requestSecurityError } = require('./request_security');
 const { PerformanceMonitor } = require('./performance_monitor');
 const {
   SESSION_COOKIE,
@@ -78,7 +79,7 @@ let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const dummyPasswordHash = hashPassword(crypto.randomBytes(24).toString('base64url'));
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
-const PANEL_VERSION = '1.0.2';
+const PANEL_VERSION = '1.0.0';
 let updateStatus = {
   running: false,
   progress: 0,
@@ -108,6 +109,8 @@ app.use((req, res, next) => {
 app.use(authMiddleware);
 app.use('/api', (req, res, next) => {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+  const securityError = requestSecurityError(req);
+  if (securityError) return res.status(403).json({ error: securityError });
   // Tebex webhook: authenticated by its own HMAC signature over the raw body,
   // not by session/CSRF. Tebex's servers cannot send our custom header.
   if (/^\/tebex\/webhook\//.test(req.path)) return next();
@@ -266,7 +269,7 @@ function setSettingValue(key, value) {
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
-  const defaultTag = 'v1.0.2';
+  const defaultTag = 'v1.0.0';
   let configuredTag = settingValue('update_target_tag', defaultTag);
   // Migrate any pre-1.0 tag (v1.x-v5.x) to the 1.0 scheme automatically.
   if (/^(?:normal|host)-v(?:[1-5]\.)\d/.test(configuredTag)) {
@@ -6519,6 +6522,25 @@ app.get('/api/servers/:id/tunnels', requireAuth, (req, res) => {
 app.put('/api/servers/:id/tunnels', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   getServerOr404(req.params.id, req.user);
   res.status(410).json({ error: 'Tunnels were removed. Use Templates or your VPS reverse proxy setup instead.' });
+});
+
+app.use('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), (req, res, next) => {
+  let release;
+  try {
+    const server = getServerOr404(req.params.id, req.user);
+    release = beginServerFileOperation(server.id);
+  } catch (error) {
+    return next(error);
+  }
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    release();
+  };
+  res.once('finish', finish);
+  res.once('close', finish);
+  next();
 });
 
 app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {

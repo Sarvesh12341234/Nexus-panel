@@ -31,10 +31,16 @@ GID_TARGET="$(id -g "$IDENTITY")"
 
 mkdir -p "$TEST_DIR/root"
 echo "top-secret" > "$OUTSIDE_DIR/secret"
-chmod 600 "$OUTSIDE_DIR/secret"
+chmod 755 "$OUTSIDE_DIR"
+chmod 644 "$OUTSIDE_DIR/secret"
 
 setfacl -m "u:$IDENTITY:r-x" "$TEST_DIR" "$TEST_DIR/asf-runtime" 2>/dev/null || true
 setfacl -R -m "u:$IDENTITY:rwx" "$TEST_DIR/root" 2>/dev/null || true
+
+if ! runuser -u "$IDENTITY" -- test -r "$OUTSIDE_DIR/secret"; then
+  echo 'Audit setup invalid: the target identity cannot read the outside secret without ASF.' >&2
+  exit 1
+fi
 
 echo "[ASF] adversarial run as $IDENTITY (uid $UID_TARGET)..."
 "$TEST_DIR/asf-runtime" --root "$TEST_DIR/root" --port 65535 \

@@ -1,4 +1,4 @@
-# NexusPanel 1.0.2
+# NexusPanel 1.0.0
 
 Linux-native Minecraft server panel with the **ASF (Advanced Sandbox Fabric)**
 kernel isolation protocol — our own Landlock + seccomp + cgroup v2 sandbox that
@@ -30,11 +30,22 @@ sudo nexuspanel setup-url
 
 The Linux release installers are in [`installers/`](installers/):
 
-- `nexuspanel-normal-v1.0.2-linux-installer.sh` installs the normal edition.
-- `nexuspanel-host-v1.0.2-linux-installer.sh` installs the host edition.
+- `nexuspanel-normal-v1.0.0-linux-installer.sh` installs the normal edition.
+- `nexuspanel-host-v1.0.0-linux-installer.sh` installs the host edition.
 
-Both installers use the `v1.0.2` source tag by default. Windows users can run
+Both installers use the `v1.0.0` source tag by default. Windows users can run
 [`install.bat`](install.bat) from the extracted release source.
+
+Game-server execution is supported only on Linux hosts where the per-server
+locked identity and ASF systemd isolation preflight succeed. Launch fails closed
+if either isolation prerequisite is unavailable; it never falls back to running
+tenant code as the panel service account. The legacy Windows SYSTEM startup task
+is removed by the Windows service installer; server starts are disabled on
+Windows until an equivalent per-server isolation boundary is available.
+
+The file manager is available only while a server is stopped. This prevents
+server-controlled processes from racing symlink/path validation against panel
+file operations.
 
 ## Per-server database provisioning
 
@@ -112,6 +123,7 @@ nexuspanel help               # everything else
 - SSRF: private-address blocking + DNS pinning (rebinding-proof)
 - Uploads: SHA-256 chunk verification, size caps
 - Archives: ZIP, TAR, GZ, BZ2, XZ, ZST, 7Z, and RAR extraction; 7Z/RAR need libarchive (`bsdtar`)
+- CSRF: mutating cookie-authenticated requests require the custom header and reject cross-site/same-site origins
 - Auth: scrypt password hashing, login throttling, constant-time OTP compare
 - Errors: no stack traces or internal paths leak to clients
 
