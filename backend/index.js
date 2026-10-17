@@ -79,7 +79,7 @@ let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const dummyPasswordHash = hashPassword(crypto.randomBytes(24).toString('base64url'));
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
-const PANEL_VERSION = '1.0.0';
+const PANEL_VERSION = require('../package.json').version;
 let updateStatus = {
   running: false,
   progress: 0,
@@ -269,7 +269,7 @@ function setSettingValue(key, value) {
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
-  const defaultTag = 'v1.0.0';
+  const defaultTag = `v${PANEL_VERSION}`;
   let configuredTag = settingValue('update_target_tag', defaultTag);
   // Migrate any pre-1.0 tag (v1.x-v5.x) to the 1.0 scheme automatically.
   if (/^(?:normal|host)-v(?:[1-5]\.)\d/.test(configuredTag)) {
@@ -5195,7 +5195,7 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
     setSettingValue('host_server_quota', clampNumber(req.body.hostServerQuota, 1, 500, 10));
   }
   const updateTag = String(req.body.updateTargetTag || req.body.updateTag || panelSettingsPayload(req.user).updateTag).trim();
-  if (/^(normal|host)-v\d+\.\d+(?:\.\d+)?$/.test(updateTag)) setSettingValue('update_target_tag', updateTag);
+  if (/^(?:(?:normal|host)-)?v\d+\.\d+(?:\.\d+)?$/.test(updateTag)) setSettingValue('update_target_tag', updateTag);
   setSettingValue('update_repo', FIXED_UPDATE_REPO);
   res.json({ settings: panelSettingsPayload(req.user) });
 });
@@ -5218,11 +5218,18 @@ app.post('/api/settings/update', requirePermission(capabilities.SETTINGS_MANAGE,
     exitCode: null,
   };
   const requestedTag = String(req.body.updateTargetTag || req.body.updateTag || settingValue('update_target_tag', panelSettingsPayload(req.user).updateTag)).trim();
-  const updateTag = /^(normal|host)-v\d+\.\d+(?:\.\d+)?$/.test(requestedTag) ? requestedTag : panelSettingsPayload(req.user).updateTag;
+  const updateTag = /^(?:(?:normal|host)-)?v\d+\.\d+(?:\.\d+)?$/.test(requestedTag) ? requestedTag : panelSettingsPayload(req.user).updateTag;
   setSettingValue('update_target_tag', updateTag);
+  const runtimeBin = path.dirname(process.execPath);
+  const runtimePath = [runtimeBin, process.env.PATH].filter(Boolean).join(path.delimiter);
   const child = spawn('bash', [script, repo], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, NEXUSPANEL_WEB_UPDATE: '1', NEXUSPANEL_UPDATE_TAG: updateTag },
+    env: {
+      ...process.env,
+      PATH: runtimePath,
+      NEXUSPANEL_WEB_UPDATE: '1',
+      NEXUSPANEL_UPDATE_TAG: updateTag,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -5242,18 +5249,33 @@ app.post('/api/settings/update', requirePermission(capabilities.SETTINGS_MANAGE,
   };
   child.stdout.on('data', capture);
   child.stderr.on('data', capture);
-  child.on('exit', (code) => {
-    fs.promises.writeFile(path.join(dataRoot, 'last_update.log'), output.slice(-12000), 'utf8').catch(() => {});
+  let finalized = false;
+  const finishUpdate = async (code, spawnError = null) => {
+    if (finalized) return;
+    finalized = true;
+    const logOutput = spawnError
+      ? `${output}\n[NexusPanel] Could not start updater: ${spawnError.message}\n`
+      : output;
+    try {
+      await fs.promises.mkdir(dataRoot, { recursive: true });
+      await fs.promises.writeFile(path.join(dataRoot, 'last_update.log'), logOutput.slice(-12000), 'utf8');
+    } catch (error) {
+      console.error('Could not persist NexusPanel update log:', error);
+    }
     updateStatus = {
       running: false,
       progress: code === 0 ? 100 : updateStatus.progress,
-      message: code === 0 ? 'Update complete. Restarting service if configured.' : `Update failed with exit ${code}. Check data/last_update.log.`,
+      message: code === 0
+        ? 'Update complete. Restarting service if configured.'
+        : `Update failed with exit ${code ?? 1}. Check data/last_update.log.`,
       startedAt: updateStatus.startedAt,
       finishedAt: Date.now(),
-      exitCode: code,
+      exitCode: code ?? 1,
     };
-    if (code !== 0) console.error(`NexusPanel update failed with code ${code}`);
-  });
+    if (code !== 0) console.error(`NexusPanel update failed with code ${code ?? 1}`);
+  };
+  child.once('error', (error) => { void finishUpdate(1, error); });
+  child.once('close', (code) => { void finishUpdate(code); });
   res.json({ ok: true, message: `Update started for ${panelSettingsPayload(req.user).updateTag}. Protected folders stay untouched.`, repo });
 }));
 

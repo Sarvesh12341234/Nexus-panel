@@ -16,6 +16,11 @@ case "$EDITION" in
   host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.3}" ;;
   normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.3}" ;;
 esac
+case "$UPDATE_TAG" in
+  *-v*) EXPECTED_VERSION="${UPDATE_TAG##*-v}" ;;
+  v*) EXPECTED_VERSION="${UPDATE_TAG#v}" ;;
+  *) EXPECTED_VERSION="$UPDATE_TAG" ;;
+esac
 
 cd "$APP_DIR"
 mkdir -p "$BACKUP_DIR"
@@ -78,8 +83,6 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
   echo "[NexusPanel][45%] Release tags refreshed."
   if git rev-parse "$UPDATE_TAG^{}" >/dev/null 2>&1; then
     TARGET_COMMIT="$(git rev-parse "$UPDATE_TAG^{}")"
-    EXPECTED_VERSION="${UPDATE_TAG##*-v}"
-    EXPECTED_VERSION="${EXPECTED_VERSION#v}"
     BRANCH="${BRANCH:-main}"
     if git rev-parse "$REMOTE/$BRANCH" >/dev/null 2>&1; then
       BRANCH_COMMIT="$(git rev-parse "$REMOTE/$BRANCH")"
@@ -102,7 +105,6 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
     UPDATE_SWITCHED=0
     exit 1
   fi
-  EXPECTED_VERSION="${UPDATE_TAG##*-v}"
   if [ ! -f package.json ]; then
     echo "[NexusPanel] Version verification failed: package.json is missing after the update." >&2
     git reset --hard "$PREVIOUS_COMMIT"
@@ -119,8 +121,6 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
   echo "[NexusPanel][65%] Panel code verified at ${INSTALLED_COMMIT:0:12} ($INSTALLED_VERSION)."
 else
   SOURCE_REPO="${REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
-  EXPECTED_VERSION="${UPDATE_TAG##*-v}"
-  EXPECTED_VERSION="${EXPECTED_VERSION#v}"
   TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nexuspanel-update.XXXXXX")"
   mkdir "$TEMP_DIR/source"
   echo "[NexusPanel] No Git metadata found; downloading $UPDATE_TAG and preserving existing user files."

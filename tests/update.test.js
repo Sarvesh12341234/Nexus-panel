@@ -10,6 +10,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-update-test-'));
 const source = path.join(root, 'source');
 const remote = path.join(root, 'remote.git');
 const install = path.join(root, 'install');
+const gitInstall = path.join(root, 'git-install');
 const updater = path.resolve(__dirname, '../update/update.sh');
 
 function run(command, args, options = {}) {
@@ -53,6 +54,7 @@ try {
     cwd: install,
     env: {
       ...process.env,
+      PATH: [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
       NEXUSPANEL_DIR: install,
       NEXUSPANEL_UPDATE_TAG: 'v1.0.3',
       NEXUSPANEL_UPDATE_BACKUP_DIR: path.join(install, 'update', 'backups'),
@@ -73,7 +75,34 @@ try {
   assert.match(snapshotEntries, /backend\/marker\.js/);
   assert.doesNotMatch(snapshotEntries, /(^|\/)(data|servers|\.env)(\/|$)/);
 
-  console.log('Update test passed: release code updated while existing data and configuration were preserved.');
+  fs.mkdirSync(path.join(gitInstall, 'backend'), { recursive: true });
+  fs.mkdirSync(path.join(gitInstall, 'update'), { recursive: true });
+  fs.writeFileSync(path.join(gitInstall, 'package.json'), JSON.stringify({ name: 'nexuspanel-old', version: '1.0.0' }));
+  fs.writeFileSync(path.join(gitInstall, 'backend', 'marker.js'), 'module.exports = "old";\n');
+  fs.writeFileSync(path.join(gitInstall, 'update', 'update.sh'), fs.readFileSync(updater));
+  run('git', ['init', '-q', gitInstall]);
+  run('git', ['-C', gitInstall, 'config', 'user.email', 'test@example.invalid']);
+  run('git', ['-C', gitInstall, 'config', 'user.name', 'NexusPanel update test']);
+  run('git', ['-C', gitInstall, 'add', '.']);
+  run('git', ['-C', gitInstall, 'commit', '-qm', 'old installation']);
+  run('git', ['-C', gitInstall, 'remote', 'add', 'origin', remote]);
+
+  const gitOutput = run('bash', [updater, remote], {
+    cwd: gitInstall,
+    env: {
+      ...process.env,
+      PATH: [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
+      NEXUSPANEL_DIR: gitInstall,
+      NEXUSPANEL_UPDATE_TAG: 'v1.0.3',
+      NEXUSPANEL_UPDATE_BACKUP_DIR: path.join(gitInstall, 'update', 'backups'),
+    },
+  }).toString();
+
+  assert.match(gitOutput, /Panel code verified .* \(1\.0\.3\)/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(gitInstall, 'package.json'), 'utf8')).version, '1.0.3');
+  assert.equal(fs.readFileSync(path.join(gitInstall, 'backend', 'marker.js'), 'utf8'), 'module.exports = "new";\n');
+
+  console.log('Update test passed: bare GitHub version tags and non-Git updates work while user data is preserved.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
