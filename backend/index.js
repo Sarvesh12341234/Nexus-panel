@@ -6856,7 +6856,15 @@ app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_
     }
     const stats = await fs.promises.stat(source.absolute).catch(() => null);
     if (!stats || !stats.isFile()) return res.status(404).json({ error: `${source.relative} is not a file.` });
-    const entries = archiveEntries(source.absolute);
+    let entries;
+    try {
+      entries = archiveEntries(source.absolute);
+    } catch (error) {
+      if (error.message.startsWith('Archive contains a link or special file')) {
+        return res.status(400).json({ error: `${source.relative}: ${error.message}` });
+      }
+      throw error;
+    }
     const blockedEntry = entries.find((entry) => !isUserVisibleServerEntry(path.posix.join(destinationDir.relative.replaceAll('\\', '/'), entry)));
     if (blockedEntry) {
       return res.status(403).json({ error: `Archive contains protected NexusPanel metadata/runtime path: ${blockedEntry}` });

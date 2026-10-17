@@ -78,8 +78,10 @@ function assertNoArchiveLinks(archivePath, command, args) {
   const result = runArchiveTool(command, args);
   if (!result || result.status !== 0) return;
   const lines = result.stdout.split(/\r?\n/).filter(Boolean);
-  if (lines.some((line) => /^[lhbcp][rwxStTs-]{9}\s/.test(line))) {
-    throw new Error('Archive contains a link or special file; only regular files and folders can be extracted.');
+  const blockedEntry = lines.find((line) => /^[lhbcp][rwxStTs-]{9}\s/.test(line));
+  if (blockedEntry) {
+    const details = blockedEntry.trim().replace(/\s+/g, ' ').slice(0, 180);
+    throw new Error(`Archive contains a link or special file (${details}); only regular files and folders can be extracted. Remove links or special files from the archive and try again.`);
   }
 }
 

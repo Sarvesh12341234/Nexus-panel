@@ -1,6 +1,6 @@
 {
   "name": "nexuspanel",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Lightweight cross-platform Minecraft server panel with the ASF (Advanced Sandbox Fabric) isolation protocol, secure server management, and safe change planning.",
   "main": "backend/index.js",
   "bin": {
@@ -16,7 +16,7 @@
     "service:logs": "journalctl -u nexuspanel -f",
     "cli": "node backend/cli.js",
     "update": "bash update/update.sh",
-    "test": "npm run test:auth && npm run test:v3 && npm run test:security && npm run test:advanced && npm run test:exploit && npm run test:database && npm run test:asf",
+    "test": "npm run test:auth && npm run test:v3 && npm run test:security && npm run test:advanced && npm run test:exploit && npm run test:database && npm run test:asf && npm run test:update",
     "test:auth": "node tests/auth.test.js",
     "test:v3": "node tests/v3.test.js && node tests/setup.test.js",
     "test-auth": "npm run test:auth",
@@ -30,7 +30,8 @@
     "test:security": "node tests/security-regression.test.js && node tests/request-security.test.js && node tests/isolation-security.test.js && node tests/node-version.test.js",
     "test:exploit": "node tests/security-exploit.test.js",
     "test:database": "node tests/database-provisioning.test.js",
-    "test:advanced": "node tests/advanced-ops.test.js"
+    "test:advanced": "node tests/advanced-ops.test.js",
+    "test:update": "node tests/update.test.js"
   },
   "keywords": [],
   "author": "",

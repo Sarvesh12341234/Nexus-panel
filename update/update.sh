@@ -13,8 +13,8 @@ if [ -z "$EDITION" ] && [ -f "$APP_DIR/data/edition" ]; then
 fi
 EDITION="${EDITION:-normal}"
 case "$EDITION" in
-  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.0}" ;;
-  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.0}" ;;
+  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.3}" ;;
+  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.3}" ;;
 esac
 
 cd "$APP_DIR"
@@ -22,6 +22,7 @@ mkdir -p "$BACKUP_DIR"
 PREVIOUS_COMMIT=""
 TARGET_COMMIT=""
 UPDATE_SWITCHED=0
+TEMP_DIR=""
 STAMP="$(date +%Y%m%d-%H%M%S)"
 SNAPSHOT="$BACKUP_DIR/code-$STAMP.tar.gz"
 
@@ -35,24 +36,32 @@ rollback_update() {
     if command -v systemctl >/dev/null 2>&1; then
       systemctl restart "$SERVICE" || true
     fi
+  elif [ "$UPDATE_SWITCHED" = "1" ] && [ -f "$SNAPSHOT" ]; then
+    echo "[NexusPanel] Update failed. Restoring the previous code snapshot..." >&2
+    tar -xzf "$SNAPSHOT" -C "$APP_DIR" || echo "[NexusPanel] Code snapshot restore failed: $SNAPSHOT" >&2
+    npm install --no-audit --no-fund || true
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl restart "$SERVICE" || true
+    fi
   fi
   exit "$code"
 }
 
 trap rollback_update ERR
+trap 'if [ -n "$TEMP_DIR" ]; then rm -rf -- "$TEMP_DIR"; fi' EXIT
 
 protect_path() {
   case "$1" in
-    servers|data|backups|backupfolder|software|node_modules|.git|update/backups) return 0 ;;
+    servers|data|backups|backupfolder|software|node_modules|.git|.env|update/backups) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 echo "[NexusPanel][5%] Safe updater starting in $APP_DIR"
 echo "[NexusPanel] Edition: $EDITION ($UPDATE_TAG)"
-echo "[NexusPanel] Minecraft data is protected: servers/, data/, backups/, backupfolder/, software/"
+echo "[NexusPanel] Preserved paths: servers/, data/, backups/, backupfolder/, software/, node_modules/, .env"
 
-tar --exclude='./servers' --exclude='./data' --exclude='./backups' --exclude='./backupfolder' --exclude='./software' --exclude='./node_modules' --exclude='./.git' --exclude='./update/backups' -czf "$SNAPSHOT" .
+tar --exclude='./servers' --exclude='./data' --exclude='./backups' --exclude='./backupfolder' --exclude='./software' --exclude='./node_modules' --exclude='./.git' --exclude='./.env' --exclude='./update/backups' -czf "$SNAPSHOT" .
 echo "[NexusPanel][20%] Code snapshot saved: $SNAPSHOT"
 
 if command -v git >/dev/null 2>&1 && [ -d .git ]; then
@@ -109,7 +118,30 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
   fi
   echo "[NexusPanel][65%] Panel code verified at ${INSTALLED_COMMIT:0:12} ($INSTALLED_VERSION)."
 else
-  echo "[NexusPanel] No git repo detected. Copy new source into this folder, then run this updater again."
+  SOURCE_REPO="${REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
+  EXPECTED_VERSION="${UPDATE_TAG##*-v}"
+  EXPECTED_VERSION="${EXPECTED_VERSION#v}"
+  TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nexuspanel-update.XXXXXX")"
+  mkdir "$TEMP_DIR/source"
+  echo "[NexusPanel] No Git metadata found; downloading $UPDATE_TAG and preserving existing user files."
+  git clone --quiet --depth 1 --branch "$UPDATE_TAG" "$SOURCE_REPO" "$TEMP_DIR/repository"
+  SOURCE_VERSION="$(node -p "require('$TEMP_DIR/repository/package.json').version")"
+  if [ "$SOURCE_VERSION" != "$EXPECTED_VERSION" ]; then
+    echo "[NexusPanel] Downloaded release version $SOURCE_VERSION; expected $EXPECTED_VERSION." >&2
+    exit 1
+  fi
+  git -C "$TEMP_DIR/repository" archive --format=tar HEAD | tar -xf - -C "$TEMP_DIR/source"
+  UPDATE_SWITCHED=1
+  shopt -s dotglob nullglob
+  for source_path in "$TEMP_DIR/source"/*; do
+    entry="${source_path##*/}"
+    if protect_path "$entry"; then
+      continue
+    fi
+    cp -a -- "$source_path" "$APP_DIR/"
+  done
+  shopt -u dotglob nullglob
+  echo "[NexusPanel][65%] Panel code verified at release $UPDATE_TAG ($SOURCE_VERSION)."
 fi
 
 if [ -f package.json ]; then
@@ -135,4 +167,4 @@ else
 fi
 
 UPDATE_SWITCHED=0
-echo "[NexusPanel][100%] Update complete. Protected data was not touched."
+echo "[NexusPanel][100%] Update complete. Existing user data and configuration were preserved."

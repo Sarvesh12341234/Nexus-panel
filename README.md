@@ -1,4 +1,4 @@
-# NexusPanel 1.0.0
+# NexusPanel 1.0.3
 
 Linux-native Minecraft server panel with the **ASF (Advanced Sandbox Fabric)**
 kernel isolation protocol — our own Landlock + seccomp + cgroup v2 sandbox that
