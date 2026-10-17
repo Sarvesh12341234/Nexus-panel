@@ -27,7 +27,7 @@
     "test:asf": "bash native/asf/tests/test.sh",
     "audit:asf": "sudo bash native/asf/tests/test-audit.sh",
     "benchmark:asf": "bash native/asf/tests/benchmark.sh",
-    "test:security": "node tests/security-regression.test.js && node tests/request-security.test.js && node tests/isolation-security.test.js",
+    "test:security": "node tests/security-regression.test.js && node tests/request-security.test.js && node tests/isolation-security.test.js && node tests/node-version.test.js",
     "test:exploit": "node tests/security-exploit.test.js",
     "test:database": "node tests/database-provisioning.test.js",
     "test:advanced": "node tests/advanced-ops.test.js"

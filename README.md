@@ -7,7 +7,7 @@ outperforms Docker on speed, memory, and version compatibility.
 ## Requirements
 
 - Ubuntu / Debian / other systemd Linux (x86_64 or ARM64)
-- Node.js ≥ 22.5.0
+- Node.js ≥ 22.5.0 and < 25.0.0 (Node.js 24 is recommended)
 - A C compiler for the ASF sandbox (`apt install -y build-essential`)
 - `acl` for per-server identities (`apt install -y acl`)
 
@@ -25,6 +25,11 @@ sudo npm run service:install
 sudo nexuspanel setup-url
 # Open the printed URL in a browser
 ```
+
+Check `node --version` before installing manually. The panel uses Node's
+`node:sqlite` module and will reject unsupported runtimes before creating its
+systemd service. If the version is below 22.5.0, install Node.js 24 and rerun
+the installation; the Linux release installer handles this automatically.
 
 ## Installers
 

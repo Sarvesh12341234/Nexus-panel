@@ -1,5 +1,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { assertSupportedNode } = require('./node_version');
+
+assertSupportedNode();
 
 /**
  * SQLite driver selection.

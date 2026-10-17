@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { assertSupportedNode } = require('./node_version');
 
 const serviceName = process.env.NEXUSPANEL_SERVICE_NAME || 'nexuspanel';
 const hostAgentServiceName = `${serviceName}-host-agent`;
@@ -175,6 +176,7 @@ function requireRoot() {
 }
 
 function install({ start = true } = {}) {
+  assertSupportedNode();
   requireLinuxSystemd();
   requireRoot();
   ensureRuntimePermissions();
