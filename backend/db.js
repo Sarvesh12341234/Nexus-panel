@@ -5,16 +5,19 @@ const path = require('node:path');
  * SQLite driver selection.
  *
  * node:sqlite is experimental before Node 24 and its API can shift between
- * minors, so we prefer better-sqlite3 (stable, synchronous, same semantics)
- * when it is installed, and fall back to node:sqlite otherwise. Both expose a
- * compatible subset: prepare().run/get/all, exec, pragma via exec.
+ * minors, so we use better-sqlite3 only if it exposes the DatabaseSync API
+ * consumed below; otherwise we fall back to node:sqlite. Both expose the
+ * compatible prepare().run/get/all and exec methods used by the panel.
  *
- * To opt into the stable driver: npm install better-sqlite3
+ * The current better-sqlite3 package exports a different constructor API, so
+ * it falls back to node:sqlite until a compatible adapter is available.
  */
 let DatabaseSync;
 let sqliteDriver = 'node:sqlite';
 try {
-  ({ DatabaseSync } = require('better-sqlite3'));
+  const betterSqlite3 = require('better-sqlite3');
+  if (typeof betterSqlite3.DatabaseSync !== 'function') throw new Error('better-sqlite3 does not expose the DatabaseSync interface.');
+  ({ DatabaseSync } = betterSqlite3);
   sqliteDriver = 'better-sqlite3';
 } catch {
   ({ DatabaseSync } = require('node:sqlite'));
@@ -520,11 +523,20 @@ db.exec(`
     password_encrypted TEXT NOT NULL,
     database TEXT NOT NULL,
     driver TEXT NOT NULL DEFAULT 'mysql' CHECK (driver IN ('mysql', 'postgres')),
+    provisioned INTEGER NOT NULL DEFAULT 0,
+    user_host TEXT NOT NULL DEFAULT '%',
     created_at INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE SET NULL
   )
 `);
+const existingDatabaseConnectionColumns = new Set(db.prepare('PRAGMA table_info(database_connections)').all().map((column) => column.name));
+if (!existingDatabaseConnectionColumns.has('provisioned')) {
+  db.exec('ALTER TABLE database_connections ADD COLUMN provisioned INTEGER NOT NULL DEFAULT 0');
+}
+if (!existingDatabaseConnectionColumns.has('user_host')) {
+  db.exec("ALTER TABLE database_connections ADD COLUMN user_host TEXT NOT NULL DEFAULT '%'");
+}
 
 // ---------------------------------------------------------------------------
 // Network allocations (Pterodactyl-style port/IP assignment)

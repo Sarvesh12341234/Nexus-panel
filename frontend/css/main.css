@@ -577,6 +577,61 @@ code {
   word-break: break-word;
 }
 
+.database-manual-connect {
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255,255,255,.025);
+}
+
+.database-manual-connect summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.database-details-dialog {
+  width: min(760px, calc(100vw - 2rem));
+  max-height: min(88vh, 900px);
+  padding: 1.25rem;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--sidebar);
+  box-shadow: 0 24px 90px rgba(0,0,0,.55);
+}
+
+.database-details-dialog::backdrop {
+  background: rgba(0,0,0,.76);
+  backdrop-filter: blur(5px);
+}
+
+.database-details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: .9rem;
+  margin: 1rem 0;
+}
+
+.database-details-grid label {
+  display: grid;
+  gap: .35rem;
+  min-width: 0;
+  color: var(--muted);
+}
+
+.database-details-grid input {
+  width: 100%;
+  min-width: 0;
+  color: var(--text);
+  font-size: .85rem;
+}
+
+.database-details-dialog > .row-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
 .server-actions,
 .user-actions,
 .file-toolbar {

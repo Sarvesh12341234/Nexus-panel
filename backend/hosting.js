@@ -16,6 +16,7 @@ const path = require('node:path');
 const net = require('node:net');
 const crypto = require('node:crypto');
 const { db } = require('./db');
+const mysql = require('mysql2/promise');
 
 const DATA_ROOT = path.join(__dirname, '..', 'data');
 const SECRET_FILE = path.join(DATA_ROOT, 'db_connections.secret');
@@ -48,6 +49,81 @@ function decryptPassword(value) {
   } catch {
     return '';
   }
+}
+
+function databaseHostConfig() {
+  const host = String(process.env.NEXUSPANEL_DB_HOST || '').trim();
+  const port = Number(process.env.NEXUSPANEL_DB_PORT || 3306);
+  const username = String(process.env.NEXUSPANEL_DB_USER || '').trim();
+  const password = String(process.env.NEXUSPANEL_DB_PASSWORD || '');
+  const allowedHost = String(process.env.NEXUSPANEL_DB_ALLOWED_HOST || '%').trim();
+  const publicHost = String(process.env.NEXUSPANEL_DB_PUBLIC_HOST || host).trim();
+  const configured = Boolean(host && username && password && Number.isSafeInteger(port) && port >= 1 && port <= 65535);
+  return {
+    configured,
+    host,
+    port,
+    publicHost,
+    allowedHost,
+  };
+}
+
+function requireDatabaseHostConfig() {
+  const config = databaseHostConfig();
+  if (!config.configured) {
+    throw new Error('Database provisioning is not configured. Set NEXUSPANEL_DB_HOST, NEXUSPANEL_DB_USER, and NEXUSPANEL_DB_PASSWORD for the panel service.');
+  }
+  if (!/^[A-Za-z0-9%._:-]{1,255}$/.test(config.allowedHost)) {
+    throw new Error('NEXUSPANEL_DB_ALLOWED_HOST must be a valid host pattern such as %, an IP address, or a hostname.');
+  }
+  return {
+    ...config,
+    username: String(process.env.NEXUSPANEL_DB_USER).trim(),
+    password: String(process.env.NEXUSPANEL_DB_PASSWORD),
+  };
+}
+
+function sqlIdentifier(value) {
+  const identifier = String(value || '');
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(identifier)) throw new Error('Generated database identifier is invalid.');
+  return `\`${identifier}\``;
+}
+
+function sqlString(value) {
+  const string = String(value);
+  if (string.includes('\0')) throw new Error('Database SQL value contains an invalid character.');
+  return `'${string.replaceAll("'", "''")}'`;
+}
+
+function mysqlAccount(user, host) {
+  return `${sqlString(user)}@${sqlString(host)}`;
+}
+
+function jdbcUrl(row, password) {
+  const host = net.isIP(row.host) === 6 ? `[${row.host}]` : row.host;
+  const scheme = row.driver === 'postgres' ? 'postgresql' : 'mysql';
+  return `jdbc:${scheme}://${host}:${row.port}/${encodeURIComponent(row.database)}?user=${encodeURIComponent(row.username)}&password=${encodeURIComponent(password)}`;
+}
+
+function connectionDetails(connectionId) {
+  const row = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(Number(connectionId));
+  if (!row) throw new Error('Connection not found.');
+  const password = decryptPassword(row.password_encrypted);
+  if (row.provisioned && !password) throw new Error('Could not decrypt the saved database password. Check the panel database secret file.');
+  return {
+    id: Number(row.id),
+    serverId: row.server_id,
+    name: row.name,
+    host: row.host,
+    port: Number(row.port),
+    username: row.username,
+    password,
+    database: row.database,
+    driver: row.driver,
+    userHost: row.user_host || '%',
+    provisioned: Boolean(row.provisioned),
+    jdbcUrl: jdbcUrl(row, password),
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -84,6 +160,8 @@ function connectionRows(serverId = null) {
     username: row.username,
     database: row.database,
     driver: row.driver,
+    provisioned: Boolean(row.provisioned),
+    userHost: row.user_host || '%',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }));
@@ -108,6 +186,115 @@ function createConnection(serverId, input) {
     now,
   );
   return connectionRows().find((row) => row.id === Number(result.lastInsertRowid));
+}
+
+async function provisionDatabase(serverId, input = {}, options = {}) {
+  const cleanServerId = Number(serverId);
+  if (!Number.isSafeInteger(cleanServerId) || cleanServerId < 1) throw new Error('Choose a server before provisioning a database.');
+  const server = db.prepare('SELECT id, name FROM servers WHERE id = ?').get(cleanServerId);
+  if (!server) throw new Error('Server not found.');
+  const name = String(input.name || '').trim().slice(0, 80);
+  if (name.length < 2) throw new Error('Database name must be at least 2 characters.');
+  const slug = name.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32);
+  if (slug.length < 2) throw new Error('Database name needs at least two letters or numbers.');
+  const hostConfig = requireDatabaseHostConfig();
+  const database = `s${cleanServerId}_${slug}_${crypto.randomBytes(4).toString('hex')}`;
+  const username = `np${crypto.randomBytes(12).toString('hex')}`;
+  const password = crypto.randomBytes(24).toString('base64url');
+  const account = mysqlAccount(username, hostConfig.allowedHost);
+  const connect = options.connect || mysql.createConnection;
+  const admin = await connect({
+    host: hostConfig.host,
+    port: hostConfig.port,
+    user: hostConfig.username,
+    password: hostConfig.password,
+    connectTimeout: 5000,
+  });
+  let savedConnectionId;
+  try {
+    await admin.query(`CREATE DATABASE ${sqlIdentifier(database)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+    await admin.query(`CREATE USER ${account} IDENTIFIED BY ${sqlString(password)}`);
+    await admin.query(`GRANT ALL PRIVILEGES ON ${sqlIdentifier(database)}.* TO ${account}`);
+    const now = Date.now();
+    const result = db.prepare(`
+      INSERT INTO database_connections
+        (server_id, name, host, port, username, password_encrypted, database, driver, provisioned, user_host, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'mysql', 1, ?, ?, ?)
+    `).run(
+      cleanServerId,
+      name,
+      hostConfig.publicHost,
+      hostConfig.port,
+      username,
+      encryptPassword(password),
+      database,
+      hostConfig.allowedHost,
+      now,
+      now,
+    );
+    savedConnectionId = Number(result.lastInsertRowid);
+  } catch (error) {
+    try { await admin.query(`DROP USER IF EXISTS ${account}`); } catch (cleanupError) {
+      console.error(`[NexusPanel] Could not clean up provisioned database user ${username}: ${cleanupError.message}`);
+    }
+    try { await admin.query(`DROP DATABASE IF EXISTS ${sqlIdentifier(database)}`); } catch (cleanupError) {
+      console.error(`[NexusPanel] Could not clean up provisioned database ${database}: ${cleanupError.message}`);
+    }
+    throw error;
+  } finally {
+    await admin.end();
+  }
+  return connectionDetails(savedConnectionId);
+}
+
+async function rotateProvisionedPassword(connectionId, options = {}) {
+  const row = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(Number(connectionId));
+  if (!row) throw new Error('Connection not found.');
+  if (!row.provisioned) throw new Error('Password rotation is available only for databases provisioned by NexusPanel.');
+  const hostConfig = requireDatabaseHostConfig();
+  const userHost = row.user_host || hostConfig.allowedHost;
+  const account = mysqlAccount(row.username, userHost);
+  const password = crypto.randomBytes(24).toString('base64url');
+  const connect = options.connect || mysql.createConnection;
+  const admin = await connect({
+    host: hostConfig.host,
+    port: hostConfig.port,
+    user: hostConfig.username,
+    password: hostConfig.password,
+    connectTimeout: 5000,
+  });
+  try {
+    await admin.query(`ALTER USER ${account} IDENTIFIED BY ${sqlString(password)}`);
+    db.prepare('UPDATE database_connections SET password_encrypted = ?, updated_at = ? WHERE id = ?')
+      .run(encryptPassword(password), Date.now(), Number(connectionId));
+  } finally {
+    await admin.end();
+  }
+  return connectionDetails(connectionId);
+}
+
+async function deleteProvisionedDatabase(connectionId, options = {}) {
+  const row = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(Number(connectionId));
+  if (!row) throw new Error('Connection not found.');
+  if (row.provisioned) {
+    const hostConfig = requireDatabaseHostConfig();
+    const account = mysqlAccount(row.username, row.user_host || hostConfig.allowedHost);
+    const connect = options.connect || mysql.createConnection;
+    const admin = await connect({
+      host: hostConfig.host,
+      port: hostConfig.port,
+      user: hostConfig.username,
+      password: hostConfig.password,
+      connectTimeout: 5000,
+    });
+    try {
+      await admin.query(`DROP USER IF EXISTS ${account}`);
+      await admin.query(`DROP DATABASE IF EXISTS ${sqlIdentifier(row.database)}`);
+    } finally {
+      await admin.end();
+    }
+  }
+  deleteConnection(connectionId);
 }
 
 function updateConnection(connectionId, input) {
@@ -138,14 +325,32 @@ function deleteConnection(connectionId) {
   return { ok: true };
 }
 
-/**
- * Test a connection with a TCP probe. We deliberately do NOT install mysql/
- * postgres client libraries — a TCP reachability check plus a handshake read
- * is enough to verify host/port/firewall without pulling native deps.
- */
+/** Authenticate to MySQL and run a query; use a TCP probe for PostgreSQL. */
 function testConnection(connectionId) {
   const row = db.prepare('SELECT * FROM database_connections WHERE id = ?').get(Number(connectionId));
   if (!row) throw new Error('Connection not found.');
+  if (row.driver === 'mysql') {
+    return (async () => {
+      const startedAt = Date.now();
+      let connection;
+      try {
+        connection = await mysql.createConnection({
+          host: row.host,
+          port: row.port,
+          user: row.username,
+          password: decryptPassword(row.password_encrypted),
+          database: row.database,
+          connectTimeout: 4000,
+        });
+        await connection.query('SELECT 1');
+        return { ok: true, latencyMs: Date.now() - startedAt, detail: 'MySQL authentication and query succeeded.' };
+      } catch (error) {
+        return { ok: false, latencyMs: Date.now() - startedAt, detail: error.code || error.message };
+      } finally {
+        await connection?.end().catch(() => {});
+      }
+    })();
+  }
   return new Promise((resolve) => {
     const socket = new net.Socket();
     const startedAt = Date.now();
@@ -247,12 +452,17 @@ function probeAllocation(allocationId) {
 
 module.exports = {
   allocationRows,
+  connectionDetails,
   connectionRows,
   createAllocation,
   createConnection,
+  databaseHostConfig,
+  deleteProvisionedDatabase,
   deleteAllocation,
   deleteConnection,
   probeAllocation,
+  provisionDatabase,
+  rotateProvisionedPassword,
   testConnection,
   updateConnection,
 };

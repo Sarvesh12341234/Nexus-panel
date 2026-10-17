@@ -13,8 +13,8 @@ if [ -z "$EDITION" ] && [ -f "$APP_DIR/data/edition" ]; then
 fi
 EDITION="${EDITION:-normal}"
 case "$EDITION" in
-  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-host-v1.0.0}" ;;
-  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-normal-v1.0.0}" ;;
+  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.2}" ;;
+  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.2}" ;;
 esac
 
 cd "$APP_DIR"
@@ -70,6 +70,7 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
   if git rev-parse "$UPDATE_TAG^{}" >/dev/null 2>&1; then
     TARGET_COMMIT="$(git rev-parse "$UPDATE_TAG^{}")"
     EXPECTED_VERSION="${UPDATE_TAG##*-v}"
+    EXPECTED_VERSION="${EXPECTED_VERSION#v}"
     BRANCH="${BRANCH:-main}"
     if git rev-parse "$REMOTE/$BRANCH" >/dev/null 2>&1; then
       BRANCH_COMMIT="$(git rev-parse "$REMOTE/$BRANCH")"

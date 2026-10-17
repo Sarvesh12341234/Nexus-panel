@@ -174,7 +174,7 @@ async function main() {
 
   if (command === 'help' || command === '--help' || command === '-h') return help();
   if (command === 'version' || command === '--version' || command === '-v') {
-    console.log('NexusPanel 1.0.0');
+    console.log('NexusPanel 1.0.2');
     return;
   }
   if (command === 'setup-url') return setupUrl();
@@ -242,7 +242,7 @@ async function main() {
     const { kernelStatus } = require('./asf');
     const { localStatus, request } = require('./host_agent');
     console.log(JSON.stringify({
-      version: '1.0.0',
+      version: '1.0.2',
       platform: platformDoctor(),
       node: process.version,
       systemd: hasSystemd(),

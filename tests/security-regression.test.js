@@ -65,6 +65,9 @@ const connectionRowsBlock = hosting.slice(
   hosting.indexOf('function createConnection'),
 );
 assert(!connectionRowsBlock.includes('password'), 'connection payload must not include the password');
+assert(hosting.includes('function provisionDatabase'), 'database host provisioning must create per-server database accounts');
+assert(hosting.includes('function rotateProvisionedPassword'), 'provisioned database passwords must be rotatable');
+assert(hosting.includes('function connectionDetails'), 'provisioned database connection details must be displayable');
 
 // --- Zip utils: Zip Slip guard present and module syntactically intact ---
 const zipUtils = backendSource('zip_utils.js');

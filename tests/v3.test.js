@@ -8,6 +8,7 @@ const service = require('../backend/service');
 assert.equal(fs.existsSync(hostAgent.localStatus().sourcePath), true, 'native host agent source is missing');
 assert.match(service.serviceContent(), /nexuspanel-host-agent\.service/);
 assert.match(service.serviceContent(), /nexuspanel-asf\.service/);
+assert.match(service.serviceContent(), /EnvironmentFile=-\/etc\/nexuspanel\/database\.env/);
 assert.match(service.hostAgentServiceContent(), /RestrictAddressFamilies=AF_UNIX/);
 assert.match(service.asfServiceContent(), /Type=oneshot/);
 

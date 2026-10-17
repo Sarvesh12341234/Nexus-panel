@@ -2481,10 +2481,10 @@ function renderSettings() {
         <div class="row-actions"><button class="secondary" type="button" data-action="asf-doctor">Run Kernel Doctor</button></div>
       </div>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
-      <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.0.0')}"></label>
+      <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.0.2')}"></label>
       <label>Visible servers before scrolling <input name="serverSwitcherVisibleCount" type="number" min="1" max="20" value="${Number(settings.serverSwitcherVisibleCount || 3)}"></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
-      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="normal-v1.0.0"></label>
+      <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="v1.0.2"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
       <div class="settings-group">
         <strong>World converter</strong>
@@ -2947,36 +2947,90 @@ async function renderAllocations() {
 async function renderDatabases() {
   if (!elements.databasesPanel) return;
   const server = activeServer();
-  const data = await api(`/api/databases${server ? `?serverId=${server.id}` : ''}`).catch(() => ({ connections: [] }));
+  const [data, hostData] = await Promise.all([
+    api(`/api/databases${server ? `?serverId=${server.id}` : ''}`).catch(() => ({ connections: [] })),
+    api('/api/databases/host').catch((error) => ({ host: { configured: false }, error: error.message })),
+  ]);
   const connections = data.connections || [];
+  const host = hostData.host || {};
   elements.databasesPanel.innerHTML = `
-    <div class="section-head"><div><p class="eyebrow">Databases</p><h2>External connections</h2></div></div>
-    <form class="settings-form" id="databaseForm">
-      <label>Name <input name="name" placeholder="Main MySQL" required minlength="2" maxlength="80"></label>
-      <label>Driver <select name="driver"><option value="mysql">MySQL / MariaDB</option><option value="postgres">PostgreSQL</option></select></label>
-      <label>Host <input name="host" placeholder="127.0.0.1" required maxlength="200"></label>
-      <label>Port <input name="port" type="number" min="1" max="65535" value="3306" required></label>
-      <label>Username <input name="username" required maxlength="80"></label>
-      <label>Password <input name="password" type="password" autocomplete="new-password" maxlength="200"></label>
-      <label>Database <input name="database" placeholder="minecraft_main" required maxlength="80"></label>
-      <button type="submit">Create connection</button>
-    </form>
-    <p class="muted">Passwords are encrypted at rest (AES-256-GCM) and never returned by the API.</p>
+    <div class="section-head"><div><p class="eyebrow">Databases</p><h2>Server databases</h2></div></div>
+    <div class="public-help-grid">
+      <article>
+        <strong>${host.configured ? 'Database host configured' : 'Database host not configured'}</strong>
+        <span>${host.configured
+          ? `${escapeHtml(host.publicHost || host.host)}:${Number(host.port)} · new database users can connect from ${escapeHtml(host.allowedHost || '%')}`
+          : escapeHtml(hostData.error || 'Set the panel database-host environment variables and restart the service to enable per-server database provisioning.')}</span>
+      </article>
+    </div>
+    ${host.configured && server ? `
+      <form class="settings-form" id="databaseProvisionForm">
+        <label>Database name <input name="name" placeholder="luckperms" required minlength="2" maxlength="80"></label>
+        <button type="submit">Create database</button>
+      </form>
+      <p class="muted">NexusPanel creates a separate database and random user for ${escapeHtml(server.name)}. Credentials are encrypted at rest. Allowed database-user host: <code>${escapeHtml(host.allowedHost || '%')}</code>.</p>
+    ` : !server
+      ? '<p class="muted">Select a server to create a database for it.</p>'
+      : ''}
+    <details class="database-manual-connect">
+      <summary>Connect an existing database manually</summary>
+      <form class="settings-form" id="databaseForm">
+        <label>Name <input name="name" placeholder="Main MySQL" required minlength="2" maxlength="80"></label>
+        <label>Driver <select name="driver"><option value="mysql">MySQL / MariaDB</option><option value="postgres">PostgreSQL</option></select></label>
+        <label>Host <input name="host" placeholder="127.0.0.1" required maxlength="200"></label>
+        <label>Port <input name="port" type="number" min="1" max="65535" value="3306" required></label>
+        <label>Username <input name="username" required maxlength="80"></label>
+        <label>Password <input name="password" type="password" autocomplete="new-password" maxlength="200"></label>
+        <label>Database <input name="database" placeholder="minecraft_main" required maxlength="80"></label>
+        <button type="submit">Save existing connection</button>
+      </form>
+      <p class="muted">Passwords are encrypted at rest (AES-256-GCM).</p>
+    </details>
     <div class="plugin-list">
       ${connections.map((connection) => `
         <div class="plugin-row" data-connection-id="${connection.id}">
           <div>
             <strong>${escapeHtml(connection.name)}</strong>
             <div class="muted">${escapeHtml(connection.driver)} · ${escapeHtml(connection.host)}:${connection.port} / ${escapeHtml(connection.database)} · user ${escapeHtml(connection.username)}</div>
+            <div class="muted">${connection.provisioned ? `Provisioned · connections from ${escapeHtml(connection.userHost || '%')}` : 'Existing connection'}</div>
           </div>
           <div class="row-actions">
             <button class="secondary" type="button" data-action="test-connection" data-connection-id="${connection.id}">Test</button>
-            <button class="danger" type="button" data-action="delete-connection" data-connection-id="${connection.id}">Delete</button>
+            <button class="secondary" type="button" data-action="database-details" data-connection-id="${connection.id}">Details</button>
+            ${connection.provisioned ? `<button class="secondary" type="button" data-action="rotate-database-password" data-connection-id="${connection.id}">Rotate password</button>` : ''}
+            <button class="danger" type="button" data-action="delete-connection" data-connection-id="${connection.id}" data-provisioned="${connection.provisioned}" data-database="${escapeHtml(connection.database)}">Delete</button>
           </div>
         </div>
       `).join('') || '<p class="empty-state">No database connections yet.</p>'}
     </div>
   `;
+}
+
+function showDatabaseDetails(connection) {
+  const previous = document.querySelector('[data-database-dialog]');
+  if (previous?.open) previous.close();
+  previous?.remove();
+  const dialog = document.createElement('dialog');
+  dialog.className = 'database-details-dialog';
+  dialog.dataset.databaseDialog = '1';
+  dialog.innerHTML = `
+    <div class="section-head"><div><p class="eyebrow">Database connection details</p><h2>${escapeHtml(connection.name)}</h2></div></div>
+    <div class="database-details-grid">
+      <label>Endpoint<input readonly value="${escapeHtml(`${connection.host}:${connection.port}`)}"></label>
+      <label>Connections from<input readonly value="${escapeHtml(connection.userHost || '%')}"></label>
+      <label>Database<input readonly value="${escapeHtml(connection.database)}"></label>
+      <label>Username<input readonly value="${escapeHtml(connection.username)}"></label>
+      <label>Password<input readonly value="${escapeHtml(connection.password)}"></label>
+      <label>JDBC connection string<input readonly value="${escapeHtml(connection.jdbcUrl)}"></label>
+    </div>
+    <div class="row-actions">
+      ${connection.provisioned ? `<button class="secondary" type="button" data-action="rotate-database-password" data-connection-id="${connection.id}">Rotate password</button>` : ''}
+      <button class="secondary" type="button" data-action="close-database-details">Close</button>
+    </div>
+  `;
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
 }
 
 /* ------------------------------------------------------------------ */
@@ -4043,6 +4097,26 @@ document.addEventListener('submit', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
+  if (event.target.id !== 'databaseProvisionForm') return;
+  event.preventDefault();
+  const server = activeServer();
+  if (!server) return showToast('Select a server first.');
+  const payload = formData(event.target);
+  payload.serverId = server.id;
+  const button = event.target.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    const result = await api('/api/databases/provision', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 15000 });
+    showToast('Database and user created.');
+    await renderDatabases();
+    showDatabaseDetails(result.connection);
+  } catch (error) {
+    showToast(error.message);
+    if (button) button.disabled = false;
+  }
+});
+
+document.addEventListener('submit', async (event) => {
   if (!['tebexSetupForm', 'tebexWebhookSecretForm'].includes(event.target.id)) return;
   event.preventDefault();
   const server = activeServer();
@@ -4691,9 +4765,36 @@ document.addEventListener('click', async (event) => {
       actionTarget.disabled = false;
       return;
     }
+    if (action === 'database-details') {
+      try {
+        const data = await api(`/api/databases/${encodeURIComponent(actionTarget.dataset.connectionId)}/details`);
+        showDatabaseDetails(data.connection);
+      } catch (error) { showToast(error.message); }
+      return;
+    }
+    if (action === 'rotate-database-password') {
+      const id = actionTarget.dataset.connectionId;
+      if (!confirm('Rotate this database password? Any game-server configuration using the current password must be updated.')) return;
+      actionTarget.disabled = true;
+      try {
+        const data = await api(`/api/databases/${encodeURIComponent(id)}/rotate-password`, { method: 'POST' });
+        showToast('Database password rotated. Update the server configuration with the new password.');
+        showDatabaseDetails(data.connection);
+        await renderDatabases();
+      } catch (error) { showToast(error.message); }
+      finally { actionTarget.disabled = false; }
+      return;
+    }
+    if (action === 'close-database-details') {
+      actionTarget.closest('dialog')?.close();
+      return;
+    }
     if (action === 'delete-connection') {
       const id = actionTarget.dataset.connectionId;
-      if (!confirm('Delete this database connection?')) return;
+      const message = actionTarget.dataset.provisioned === 'true'
+        ? `Delete database ${actionTarget.dataset.database}, its database user, and the saved connection? This permanently removes its data.`
+        : 'Delete this saved database connection?';
+      if (!confirm(message)) return;
       try {
         await api(`/api/databases/${encodeURIComponent(id)}`, { method: 'DELETE' });
         showToast('Connection deleted.');

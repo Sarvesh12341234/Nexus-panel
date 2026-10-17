@@ -1,6 +1,6 @@
 {
   "name": "nexuspanel",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Lightweight cross-platform Minecraft server panel with the ASF (Advanced Sandbox Fabric) isolation protocol, secure server management, and safe change planning.",
   "main": "backend/index.js",
   "bin": {
@@ -16,7 +16,7 @@
     "service:logs": "journalctl -u nexuspanel -f",
     "cli": "node backend/cli.js",
     "update": "bash update/update.sh",
-    "test": "npm run test:auth && npm run test:v3 && npm run test:security && npm run test:advanced && npm run test:exploit && npm run test:asf",
+    "test": "npm run test:auth && npm run test:v3 && npm run test:security && npm run test:advanced && npm run test:exploit && npm run test:database && npm run test:asf",
     "test:auth": "node tests/auth.test.js",
     "test:v3": "node tests/v3.test.js && node tests/setup.test.js",
     "test-auth": "npm run test:auth",
@@ -29,6 +29,7 @@
     "benchmark:asf": "bash native/asf/tests/benchmark.sh",
     "test:security": "node tests/security-regression.test.js",
     "test:exploit": "node tests/security-exploit.test.js",
+    "test:database": "node tests/database-provisioning.test.js",
     "test:advanced": "node tests/advanced-ops.test.js"
   },
   "keywords": [],
@@ -40,7 +41,8 @@
     "npm": ">=10.0.0"
   },
   "dependencies": {
-    "express": "^5.3.0"
+    "express": "^5.3.0",
+    "mysql2": "^3.24.6"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^3.8.1",

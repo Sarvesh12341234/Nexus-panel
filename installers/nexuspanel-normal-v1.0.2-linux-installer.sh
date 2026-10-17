@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# NexusPanel Linux Installer v1.0.1
+# NexusPanel Linux Installer v1.0.2
 # Smart Ubuntu/Linux installer
 #
 
 set -uo pipefail
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 REPO_URL="${NEXUSPANEL_REPO_URL:-https://github.com/Sarvesh12341234/Nexus-panel.git}"
 INSTALL_DIR="${NEXUSPANEL_INSTALL_DIR:-/opt/nexuspanel}"
 SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
 SERVICE_NAME="${NEXUSPANEL_SERVICE_NAME:-nexuspanel}"
 EDITION="${NEXUSPANEL_EDITION:-normal}"
-REF="${NEXUSPANEL_REF:-v1.0.1}"
+REF="${NEXUSPANEL_REF:-v1.0.2}"
 INSTALL_AI="${NEXUSPANEL_INSTALL_AI:-ask}"
 SKIP_TUNNELS="${NEXUSPANEL_SKIP_TUNNELS:-no}"
 MAX_RETRIES="${NEXUSPANEL_MAX_RETRIES:-3}"

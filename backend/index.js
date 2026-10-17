@@ -78,7 +78,7 @@ let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const dummyPasswordHash = hashPassword(crypto.randomBytes(24).toString('base64url'));
 const FIXED_UPDATE_REPO = 'https://github.com/Sarvesh12341234/Nexus-panel.git';
-const PANEL_VERSION = '1.0.0';
+const PANEL_VERSION = '1.0.2';
 let updateStatus = {
   running: false,
   progress: 0,
@@ -266,7 +266,7 @@ function setSettingValue(key, value) {
 function panelSettingsPayload(user = null) {
   const edition = panelEdition();
   const hostToken = reqOwnerSafeHostToken();
-  const defaultTag = edition === 'host' ? 'host-v1.0.0' : 'normal-v1.0.0';
+  const defaultTag = 'v1.0.2';
   let configuredTag = settingValue('update_target_tag', defaultTag);
   // Migrate any pre-1.0 tag (v1.x-v5.x) to the 1.0 scheme automatically.
   if (/^(?:normal|host)-v(?:[1-5]\.)\d/.test(configuredTag)) {
@@ -5092,9 +5092,35 @@ app.get('/api/servers/:id/tebex/payments/stream', requirePermission(capabilities
 // ---------------------------------------------------------------------------
 // Database connections (Pterodactyl-style)
 // ---------------------------------------------------------------------------
+app.get('/api/databases/host', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  res.json({ host: hosting.databaseHostConfig() });
+});
+
 app.get('/api/databases', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   res.json({ connections: hosting.connectionRows(req.query.serverId ? Number(req.query.serverId) : null) });
 });
+
+app.post('/api/databases/provision', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.body.serverId, req.user);
+  const connection = await hosting.provisionDatabase(server.id, req.body || {});
+  logFixed({ category: 'database', title: 'Server database provisioned', detail: `${connection.name} → ${connection.host}:${connection.port}/${connection.database}`, source: 'owner-action' });
+  res.status(201).json({ connection });
+}));
+
+app.get('/api/databases/:id/details', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
+  const connection = hosting.connectionDetails(req.params.id);
+  if (connection.serverId) getServerOr404(connection.serverId, req.user);
+  res.json({ connection });
+});
+
+app.post('/api/databases/:id/rotate-password', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const existing = hosting.connectionRows().find((row) => row.id === Number(req.params.id));
+  if (!existing) throw new Error('Connection not found.');
+  if (existing.serverId) getServerOr404(existing.serverId, req.user);
+  const connection = await hosting.rotateProvisionedPassword(req.params.id);
+  logFixed({ category: 'database', title: 'Server database password rotated', detail: `${connection.name} password was rotated.`, source: 'owner-action' });
+  res.json({ connection });
+}));
 
 app.post('/api/databases', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const connection = hosting.createConnection(req.body.serverId || null, req.body || {});
@@ -5107,10 +5133,13 @@ app.put('/api/databases/:id', requirePermission(capabilities.SERVER_MANAGE, perm
   res.json({ connection });
 });
 
-app.delete('/api/databases/:id', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
-  hosting.deleteConnection(req.params.id);
+app.delete('/api/databases/:id', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const existing = hosting.connectionRows().find((row) => row.id === Number(req.params.id));
+  if (!existing) throw new Error('Connection not found.');
+  if (existing.serverId) getServerOr404(existing.serverId, req.user);
+  await hosting.deleteProvisionedDatabase(req.params.id);
   res.json({ ok: true });
-});
+}));
 
 app.post('/api/databases/:id/test', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   res.json({ test: await hosting.testConnection(req.params.id) });
