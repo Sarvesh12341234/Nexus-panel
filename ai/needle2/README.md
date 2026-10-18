@@ -31,7 +31,7 @@ python -m pip install 'cactus-needle[train,gpu]==2.0.15'
 cd /mnt/c/Users/Sinjita/Pictures/spawn/Nexus-panel-review
 python scripts/prepare_needle2_dataset.py
 python -c 'import jax; print(jax.devices())'
-needle finetune data/needle2/repair-train.jsonl --epochs 10 --batch-size 2 --max-len 256 --val-split 0.1 --seed 17 --checkpoint-dir data/needle2/checkpoints --out data/needle2/repair-lora.pkl
+needle finetune data/needle2/repair-train.jsonl --checkpoint data/needle2/checkpoints/needle2.pkl --epochs 10 --batch-size 2 --max-len 256 --val-split 0.1 --seed 17 --checkpoint-dir data/needle2/checkpoints --out data/needle2/repair-lora.pkl
 needle build data/needle2/checkpoints/needle2.pkl --lora data/needle2/repair-lora.pkl --out data/needle2/nexuspanel-needle2.cact
 ```
 
