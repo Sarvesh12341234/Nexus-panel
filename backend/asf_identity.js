@@ -186,6 +186,12 @@ function launchExecutables(profile, nativeBinary = '') {
   }))];
 }
 
+function mutableServerFiles(serverRoot) {
+  return fs.readdirSync(serverRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !/\.(?:jar|exe|sh|bin)$/i.test(entry.name))
+    .map((entry) => path.join(serverRoot, entry.name));
+}
+
 function applyAcl(name, serverRoot, nativeBinary = '', extraExecutables = []) {
   const javaExecutables = javaRuntimeExecutables(serverRoot);
   const executableInputs = [...new Set([...extraExecutables, ...javaExecutables].filter(Boolean))];
@@ -254,6 +260,21 @@ function verifyIdentity(name, serverRoot, nativeBinary = '', extraExecutables = 
   const checks = ['test', '-r', serverRoot, '-a', '-w', serverRoot, '-a', '-x', serverRoot];
   const rootCheck = run('runuser', ['-u', name, '--', ...checks], 5000);
   if (rootCheck.status !== 0) return { ok: false, reason: 'identity-root-access-failed' };
+  const files = mutableServerFiles(serverRoot);
+  if (files.length) {
+    const fileCheck = run('runuser', [
+      '-u', name, '--', 'sh', '-c',
+      'for file do if ! test -r "$file" || ! test -w "$file"; then printf "%s" "$file"; exit 1; fi; done',
+      'nexuspanel-acl-check', ...files,
+    ], 10000);
+    if (fileCheck.status !== 0) {
+      return {
+        ok: false,
+        reason: 'identity-file-access-failed',
+        path: String(fileCheck.stdout || '').trim() || serverRoot,
+      };
+    }
+  }
   for (const binary of launchExecutables({ extraExecutablePaths: extraExecutables }, nativeBinary)) {
     const binaryCheck = run('runuser', ['-u', name, '--', 'test', '-r', binary, '-a', '-x', binary], 5000);
     if (binaryCheck.status !== 0) return { ok: false, reason: 'identity-runtime-access-failed' };
@@ -308,7 +329,13 @@ function ensureServerIdentity(profile, nativeBinary = '') {
     const verification = verifyIdentity(name, serverRoot, nativeBinary, extraExecutables);
     if (!verification.ok) {
       cache.delete(cacheKey);
-      return { available: false, ...verification, name, uid: accountUid(name) };
+      const acl = applyAcl(name, serverRoot, nativeBinary, extraExecutables);
+      if (!acl.ok) return { available: false, ...acl, name, uid: accountUid(name) };
+      const repairedVerification = verifyIdentity(name, serverRoot, nativeBinary, extraExecutables);
+      if (!repairedVerification.ok) {
+        return { available: false, ...repairedVerification, name, uid: accountUid(name) };
+      }
+      cached.value.aclDirectories = acl.directories;
     }
     return cached.value;
   }
@@ -386,4 +413,11 @@ function removeServerIdentity(serverId) {
   return { removed: true, name };
 }
 
-module.exports = { ensureServerIdentity, identityName, identitySupportStatus, removeServerIdentity, traversalPaths };
+module.exports = {
+  ensureServerIdentity,
+  identityName,
+  identitySupportStatus,
+  mutableServerFiles,
+  removeServerIdentity,
+  traversalPaths,
+};

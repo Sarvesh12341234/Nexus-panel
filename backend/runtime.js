@@ -70,6 +70,12 @@ function appendLog(serverId, line) {
   rows.push(rendered);
   while (rows.length > MAX_LOG_LINES) rows.shift();
   logs.set(id, rows);
+  const child = processes.get(id);
+  if (child) {
+    child.runLogs = child.runLogs || [];
+    child.runLogs.push(rendered);
+    while (child.runLogs.length > MAX_LOG_LINES) child.runLogs.shift();
+  }
   const pending = pendingLogWrites.get(id) || [];
   pending.push(rendered);
   pendingLogWrites.set(id, pending);
@@ -513,6 +519,7 @@ function launchServer(server, software, options = {}) {
         intentional,
         uptimeMs,
         recoveryReason: child.recoveryReason || '',
+        runLogs: [...(child.runLogs || [])],
       }))
         .catch((error) => appendLog(server.id, `[NexusPanel] Exit recovery failed: ${error.message}`));
     }

@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { requireLaunchIsolation } = require('../backend/asf');
 const { beginServerFileOperation, startServer } = require('../backend/runtime');
-const { traversalPaths } = require('../backend/asf_identity');
+const { mutableServerFiles, traversalPaths } = require('../backend/asf_identity');
 const { bundledJavaBinary } = require('../backend/java_runtime');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -29,10 +29,14 @@ try {
   const javaBinary = path.join(serverRoot, 'runtime', 'java', 'bin', 'java');
   fs.mkdirSync(path.dirname(javaBinary), { recursive: true });
   fs.writeFileSync(javaBinary, '');
+  fs.writeFileSync(path.join(serverRoot, 'server.properties'), 'motd=test\n');
+  fs.writeFileSync(path.join(serverRoot, 'paper.jar'), 'jar');
+  fs.mkdirSync(path.join(serverRoot, 'plugins'));
   const traversal = traversalPaths([serverRoot, javaBinary], serverRoot);
   assert.ok(traversal.includes(aclTestRoot), 'the isolated account needs execute permission on parent directories');
   assert.ok(!traversal.includes(serverRoot), 'traversal ACLs must not replace server-root read/write permissions');
   assert.ok(!traversal.includes(path.dirname(javaBinary)), 'traversal ACLs must not replace runtime-directory permissions');
+  assert.deepEqual(mutableServerFiles(serverRoot), [path.join(serverRoot, 'server.properties')]);
 } finally {
   fs.rmSync(aclTestRoot, { recursive: true, force: true });
 }

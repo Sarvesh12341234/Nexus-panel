@@ -7247,7 +7247,7 @@ function startConfiguredServers() {
   }
 }
 
-setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 0, recoveryReason = '' }) => {
+setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 0, recoveryReason = '', runLogs = [] }) => {
   if (intentional) {
     crashHistory.delete(server.id);
     const pendingRestart = crashRestartTimers.get(server.id);
@@ -7264,7 +7264,7 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
   const launchFailure = uptimeMs < 10 * 1000;
   pauseServerBackups(current.id, launchFailure ? 30 * 60 * 1000 : 10 * 60 * 1000, launchFailure ? 'the last launch never became stable' : 'the game crashed');
   const crash = rememberCrash(current, software, code, signal);
-  const crashDiagnostics = diagnoseRuntime(consoleLogs(current.id), { limit: 5 });
+  const crashDiagnostics = diagnoseRuntime(runLogs, { limit: 5 });
   if (crashDiagnostics.length) {
     crashDiagnostics.forEach((diagnostic) => {
       appendLog(current.id, `[NexusPanel] Crash intelligence (${diagnostic.severity}): ${diagnostic.summary} Next: ${diagnostic.techniques[0]}`);
