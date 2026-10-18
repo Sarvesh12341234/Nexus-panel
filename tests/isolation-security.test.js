@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { requireLaunchIsolation } = require('../backend/asf');
 const { beginServerFileOperation, startServer } = require('../backend/runtime');
-const { mutableServerFiles, traversalPaths } = require('../backend/asf_identity');
+const { directoryTree, mutableServerFiles, traversalPaths } = require('../backend/asf_identity');
 const { bundledJavaBinary } = require('../backend/java_runtime');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -32,8 +32,9 @@ try {
   const serverRoot = path.join(aclTestRoot, 'servers', '1-test');
   const javaBinary = path.join(serverRoot, 'runtime', 'java', 'bin', 'java');
   fs.mkdirSync(path.dirname(javaBinary), { recursive: true });
-  fs.writeFileSync(javaBinary, '');
-  fs.writeFileSync(path.join(serverRoot, 'server.properties'), 'motd=test\n');
+  fs.writeFileSync(javaBinary, '', { mode: 0o755 });
+  const propertiesPath = path.join(serverRoot, 'server.properties');
+  fs.writeFileSync(propertiesPath, 'motd=test\n', { mode: 0o650 });
   fs.writeFileSync(path.join(serverRoot, 'paper.jar'), 'jar');
   fs.mkdirSync(path.join(serverRoot, 'plugins'));
   const traversal = traversalPaths([serverRoot, javaBinary], serverRoot);
@@ -41,6 +42,9 @@ try {
   assert.ok(!traversal.includes(serverRoot), 'traversal ACLs must not replace server-root read/write permissions');
   assert.ok(!traversal.includes(path.dirname(javaBinary)), 'traversal ACLs must not replace runtime-directory permissions');
   assert.deepEqual(mutableServerFiles(serverRoot), [path.join(serverRoot, 'server.properties')]);
+  const tree = directoryTree(serverRoot);
+  assert.ok(tree.executables.includes(javaBinary), 'owner-executable runtime binaries must receive execute ACLs');
+  assert.ok(!tree.executables.includes(propertiesPath), 'group execute permissions must not classify config files as executables');
 } finally {
   fs.rmSync(aclTestRoot, { recursive: true, force: true });
 }

@@ -89,7 +89,7 @@ function directoryTree(root) {
         queue.push(child);
       } else {
         try {
-          if ((fs.statSync(child).mode & 0o111) !== 0) executables.push(child);
+          if ((fs.statSync(child).mode & 0o100) !== 0) executables.push(child);
         } catch {}
       }
     }
@@ -198,6 +198,7 @@ function applyAcl(name, serverRoot, nativeBinary = '', extraExecutables = []) {
   const traversal = grantTraversal(name, [serversRoot, serverRoot, nativeBinary, ...executableInputs], serverRoot);
   if (!traversal.ok) return traversal;
 
+  const tree = directoryTree(serverRoot);
   const access = run('setfacl', [
     '-R', '-P', '-m', `u:${name}:rw-,g::---,o::---,m::rwx`, '--', serverRoot,
   ], 120000);
@@ -205,7 +206,6 @@ function applyAcl(name, serverRoot, nativeBinary = '', extraExecutables = []) {
     return { ok: false, reason: 'acl-apply-failed', error: String(access.stderr || access.stdout || '').trim().slice(0, 800) };
   }
 
-  const tree = directoryTree(serverRoot);
   const directories = tree.directories;
   for (let index = 0; index < directories.length; index += 100) {
     const batch = directories.slice(index, index + 100);
@@ -416,6 +416,7 @@ function removeServerIdentity(serverId) {
 
 module.exports = {
   ensureServerIdentity,
+  directoryTree,
   identityName,
   identitySupportStatus,
   mutableServerFiles,
