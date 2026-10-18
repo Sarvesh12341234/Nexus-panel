@@ -6450,6 +6450,7 @@ app.post('/api/servers/:id/eula', requirePermission(capabilities.SERVER_MANAGE, 
 app.post('/api/servers/:id/stop', requirePermission(capabilities.SERVER_STOP, permissions.POWER_SERVERS), (req, res) => {
   const id = Number(req.params.id);
   const result = stopServer(id);
+  refreshWakeWatchers();
   logFixed({ serverId: id, category: 'server', title: 'Server stop requested', detail: result.message || '', source: 'owner-action' });
   res.json(result);
 });
@@ -6469,6 +6470,7 @@ app.post('/api/servers/:id/restart', requirePermission(capabilities.SERVER_RESTA
 app.post('/api/servers/:id/kill', requirePermission(capabilities.SERVER_KILL, permissions.POWER_SERVERS), (req, res) => {
   const id = Number(req.params.id);
   const result = killServer(id);
+  refreshWakeWatchers();
   logFixed({ serverId: id, category: 'server', title: 'Server kill requested', detail: result.message || '', source: 'owner-action' });
   res.json(result);
 });

@@ -21,6 +21,7 @@ const fileOperations = new Map();
 const startingServers = new Set();
 const stopEscalationTimers = new Map();
 let exitHandler = null;
+let asfUnitSnapshot = { expiresAt: 0, units: new Map() };
 const MAX_LOG_LINES = 600;
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const STOP_GRACE_PERIOD_MS = 20000;
@@ -118,8 +119,52 @@ function detectRecoverableStartupFailure(serverId, line) {
   }
 }
 
+function runningAsfUnits() {
+  if (process.platform !== 'linux') return new Map();
+  if (asfUnitSnapshot.expiresAt > Date.now()) return asfUnitSnapshot.units;
+  const result = spawnSync('systemctl', [
+    'list-units', '--type=service', '--state=active', '--no-legend', '--plain', 'asf-*.service',
+  ], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+  const units = new Map();
+  if (!result.error && result.status === 0) {
+    for (const line of String(result.stdout || '').split(/\r?\n/)) {
+      const columns = line.trim().split(/\s+/);
+      const unit = columns[0] || '';
+      const match = unit.match(/^asf-(\d+)-[^\s]+\.service$/);
+      if (!match || columns[2] !== 'active' || !['running', 'start', 'stop'].includes(columns[3])) continue;
+      const serverId = Number(match[1]);
+      if (!units.has(serverId)) units.set(serverId, unit);
+    }
+  }
+  asfUnitSnapshot = { expiresAt: Date.now() + 2000, units };
+  return units;
+}
+
+function activeAsfUnit(serverId) {
+  return runningAsfUnits().get(Number(serverId)) || '';
+}
+
+function invalidateAsfUnitSnapshot() {
+  asfUnitSnapshot.expiresAt = 0;
+}
+
+function stopRecoveredAsfUnit(serverId, unit, force = false) {
+  const args = force
+    ? ['kill', '--kill-whom=all', '--signal=SIGKILL', unit]
+    : ['stop', unit];
+  const result = spawnSync('systemctl', args, { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  invalidateAsfUnitSnapshot();
+  if (result.error || result.status !== 0) {
+    const detail = String(result.stderr || result.error?.message || '').trim();
+    throw new Error(detail || `systemctl ${args[0]} failed for ${unit}.`);
+  }
+  appendLog(serverId, `[NexusPanel] ${force ? 'Killed' : 'Stopped'} recovered server unit ${unit}.`);
+  return { ok: true, message: force ? 'Recovered server process killed.' : 'Recovered server stopped.' };
+}
+
 function runtimeStatus(serverId) {
-  return processes.has(Number(serverId)) ? 'online' : 'offline';
+  const id = Number(serverId);
+  return processes.has(id) || activeAsfUnit(id) ? 'online' : 'offline';
 }
 
 function consoleLogs(serverId) {
@@ -169,10 +214,11 @@ function trackPlayerLine(serverId, line) {
 function runtimeDetails(serverId) {
   const id = Number(serverId);
   const child = processes.get(id);
+  const recoveredUnit = child ? '' : activeAsfUnit(id);
   return {
-    status: child ? 'online' : 'offline',
+    status: child || recoveredUnit ? 'online' : 'offline',
     pid: child ? child.pid : null,
-    unit: child?.asfUnit || '',
+    unit: child?.asfUnit || recoveredUnit,
     startedAt: child?.startedAt || 0,
     players: [...(players.get(id) || new Set())],
   };
@@ -282,6 +328,8 @@ function trackServerFileOperation(id) {
 function startServer(server, software, options = {}) {
   const serverId = Number(server.id);
   if (processes.has(serverId)) return { ok: true, message: 'Server already running.' };
+  const recoveredUnit = activeAsfUnit(serverId);
+  if (recoveredUnit) return { ok: true, message: `Server is already running in recovered systemd unit ${recoveredUnit}.` };
   if (fileOperations.has(serverId) || startingServers.has(serverId)) {
     throw new Error('Server cannot start while a file-manager operation is active.');
   }
@@ -792,7 +840,12 @@ function scheduleStopEscalation(serverId, child) {
 function restartServer(server, software) {
   const serverId = Number(server.id);
   const child = processes.get(serverId);
-  if (!child) return startServer(server, software);
+  if (!child) {
+    const recoveredUnit = activeAsfUnit(serverId);
+    if (!recoveredUnit) return startServer(server, software);
+    stopRecoveredAsfUnit(serverId, recoveredUnit);
+    return startServer(server, software);
+  }
   appendLog(serverId, '[NexusPanel] Restart requested.');
   intentionalStops.add(serverId);
   try {
@@ -818,7 +871,11 @@ function restartServer(server, software) {
 function sendCommand(serverId, command) {
   const id = Number(serverId);
   const child = processes.get(id);
-  if (!child) throw new Error('Server is not running.');
+  if (!child) {
+    const recoveredUnit = activeAsfUnit(id);
+    if (recoveredUnit) throw new Error('The server survived a NexusPanel restart. Stop and start it from the panel to restore its live console.');
+    throw new Error('Server is not running.');
+  }
   const clean = String(command || '').trim().replace(/^\//, '');
   if (!clean) throw new Error('Command is empty.');
   child.stdin.write(`${clean}\n`);
@@ -829,7 +886,11 @@ function sendCommand(serverId, command) {
 function stopServer(serverId) {
   const id = Number(serverId);
   const child = processes.get(id);
-  if (!child) return { ok: true, message: 'Server is already offline.' };
+  if (!child) {
+    const recoveredUnit = activeAsfUnit(id);
+    if (!recoveredUnit) return { ok: true, message: 'Server is already offline.' };
+    return stopRecoveredAsfUnit(id, recoveredUnit);
+  }
   intentionalStops.add(id);
   try {
     child.stdin.write(`${child.stopCommand || 'stop'}\n`);
@@ -846,7 +907,11 @@ function stopServer(serverId) {
 function killServer(serverId) {
   const id = Number(serverId);
   const child = processes.get(id);
-  if (!child) return { ok: true, message: 'Server is already offline.' };
+  if (!child) {
+    const recoveredUnit = activeAsfUnit(id);
+    if (!recoveredUnit) return { ok: true, message: 'Server is already offline.' };
+    return stopRecoveredAsfUnit(id, recoveredUnit, true);
+  }
   intentionalStops.add(id);
   if (child.asfUnit && process.platform === 'linux') {
     forceStopServer(id, child);
