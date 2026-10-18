@@ -1327,6 +1327,8 @@ async function apiText(path) {
 async function watchServerOperation(server, job, progressNode, onComplete = null, kind = 'files') {
   if (!job?.id) throw new Error('The operation did not return a tracking id.');
   const startedAt = Date.now();
+  let completed = false;
+  try {
   while (true) {
     const response = await api(`/api/servers/${server.id}/${kind === 'backup' ? 'backups/' : ''}operations/${encodeURIComponent(job.id)}`);
     const current = response.job;
@@ -1341,14 +1343,37 @@ async function watchServerOperation(server, job, progressNode, onComplete = null
     }
     if (current.status === 'failed') throw new Error(current.message || 'Operation failed.');
     if (current.status === 'complete') {
-      if (kind === 'backup') {
-        const visibleFor = Date.now() - startedAt;
-        if (visibleFor < 2200) await new Promise((resolve) => window.setTimeout(resolve, 2200 - visibleFor));
-      }
+      completed = true;
+      const progress = progressNode?.querySelector('progress');
+      if (progress) progress.value = 100;
+      const percent = progressNode?.querySelector('[data-operation-percent]');
+      if (percent) percent.textContent = '100%';
+      const message = progressNode?.querySelector('[data-operation-message]');
+      if (message) message.textContent = 'Complete';
       await onComplete?.(current.result);
       return current.result;
     }
     await new Promise((resolve) => window.setTimeout(resolve, 350));
+  }
+  } catch (error) {
+    if (progressNode?.isConnected) {
+      const message = progressNode.querySelector('[data-operation-message]');
+      if (message) message.textContent = `Failed: ${error.message}`;
+    }
+    throw error;
+  } finally {
+    if (progressNode?.isConnected) {
+      const minimumVisibleMs = kind === 'backup' ? 2200 : 0;
+      const remainingVisibleMs = Math.max(completed ? 700 : 1200, minimumVisibleMs - (Date.now() - startedAt));
+      if (remainingVisibleMs) await new Promise((resolve) => window.setTimeout(resolve, remainingVisibleMs));
+      progressNode.hidden = true;
+      const progress = progressNode.querySelector('progress');
+      if (progress) progress.value = 0;
+      const percent = progressNode.querySelector('[data-operation-percent]');
+      if (percent) percent.textContent = '0%';
+      const message = progressNode.querySelector('[data-operation-message]');
+      if (message) message.textContent = 'Starting';
+    }
   }
 }
 
