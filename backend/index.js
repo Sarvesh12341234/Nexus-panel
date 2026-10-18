@@ -5511,6 +5511,9 @@ function refreshWakeWatchers() {
         appendLog(server.id, `[NexusPanel] Wake-on-join failed: ${error.message}`);
       } finally {
         wakeStarting.delete(server.id);
+        // If launch failed, put the wake listener back immediately so the
+        // server port never stays closed until the maintenance timer runs.
+        refreshWakeWatchers();
       }
     };
     if (protocol === 'udp') {
@@ -5526,6 +5529,9 @@ function refreshWakeWatchers() {
       socket.on('error', (error) => {
         appendLog(server.id, `[NexusPanel] Wake UDP listener failed: ${error.message}`);
         closeWakeWatcher(server.id);
+      });
+      socket.once('listening', () => {
+        appendLog(server.id, `[NexusPanel] Wake-on-join is listening on UDP ${server.port}.`);
       });
       socket.bind(server.port, '0.0.0.0');
       wakeWatchers.set(server.id, { handle: socket, protocol });
@@ -5583,6 +5589,9 @@ function refreshWakeWatchers() {
       listener.on('error', (error) => {
         appendLog(server.id, `[NexusPanel] Wake TCP listener failed: ${error.message}`);
         closeWakeWatcher(server.id);
+      });
+      listener.once('listening', () => {
+        appendLog(server.id, `[NexusPanel] Wake-on-join is listening on TCP ${server.port}.`);
       });
       listener.listen(server.port, '0.0.0.0');
       wakeWatchers.set(server.id, { handle: listener, protocol });
@@ -5783,6 +5792,7 @@ app.patch('/api/servers/:id', requirePermission(capabilities.SERVER_MANAGE, perm
   db.prepare('UPDATE servers SET nexus_mark_profile = ? WHERE id = ?').run(JSON.stringify(mark), id);
   updated = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   writeServerMetadata(updated, root);
+  refreshWakeWatchers();
   res.json({ server: serverPayload(updated) });
 });
 
@@ -7685,6 +7695,7 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
     const pendingRestart = crashRestartTimers.get(server.id);
     if (pendingRestart) clearTimeout(pendingRestart);
     crashRestartTimers.delete(server.id);
+    refreshWakeWatchers();
     return;
   }
   const current = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
