@@ -6,6 +6,7 @@ const { hostCpuCount } = require('./system_info');
 const { ensureServerDirs, externalDataRoot } = require('./paths');
 const { processTreeMetrics } = require('./process_metrics');
 const { installedJavaMajor, requiredJavaMajorForMinecraftVersion } = require('./software');
+const { bundledJavaBinary: resolveBundledJavaBinary } = require('./java_runtime');
 
 const processes = new Map();
 const logs = new Map();
@@ -175,34 +176,24 @@ function assertCommandAvailable(command, args, message) {
   }
 }
 
-function parseJsonFile(filePath) {
-  try {
-    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return value && typeof value === 'object' ? value : null;
-  } catch {
-    return null;
-  }
-}
-
 function bundledJavaBinary(root, requiredMajor = 0) {
-  const meta = parseJsonFile(path.join(root, 'runtime', 'java-runtime.json'));
-  if (!meta?.javaBinary || !fs.existsSync(meta.javaBinary)) return '';
-  if (requiredMajor && Number(meta.major || 0) < requiredMajor) return '';
+  const javaBinary = resolveBundledJavaBinary(root, requiredMajor);
+  if (!javaBinary) return '';
 
   // A bundled runtime is an executable dependency, not an ordinary data file.
   // Archives/downloads can lose the executable bit. Repair only the runtime
   // launcher instead of using unsafe recursive chmod 777.
   try {
-    const st = fs.statSync(meta.javaBinary);
+    const st = fs.statSync(javaBinary);
     if (!st.isFile()) return '';
-    if ((st.mode & 0o111) !== 0) return meta.javaBinary;
-    fs.chmodSync(meta.javaBinary, st.mode | 0o100);
+    if ((st.mode & 0o111) !== 0) return javaBinary;
+    fs.chmodSync(javaBinary, st.mode | 0o100);
 
   } catch (error) {
     // Return the path so the identity/supervisor diagnostics can report the
     // authoritative failure instead of hiding it as "Java not found".
   }
-  return meta.javaBinary;
+  return javaBinary;
 }
 
 function verifyExecutablePath(binary, serverRoot) {

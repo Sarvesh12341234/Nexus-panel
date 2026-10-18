@@ -11,6 +11,7 @@ const { pipeline } = require('node:stream/promises');
 const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
 const { extractJavaRuntimeArchive } = require('./java_runtime_archive');
+const { bundledJavaBinary } = require('./java_runtime');
 const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
 const { audit: auditPermissions, repair: repairPermissions } = require('./permission_repair');
 const worldConverter = require('./world_converter');
@@ -3452,13 +3453,6 @@ function javaRuntimeMetaPath(root) {
   return path.join(root, 'runtime', 'java-runtime.json');
 }
 
-function bundledJavaBinary(root, requiredMajor = 0) {
-  const meta = parseJsonObject(fs.existsSync(javaRuntimeMetaPath(root)) ? fs.readFileSync(javaRuntimeMetaPath(root), 'utf8') : '{}');
-  if (!meta?.javaBinary || !fs.existsSync(meta.javaBinary)) return '';
-  if (requiredMajor && Number(meta.major || 0) < requiredMajor) return '';
-  return meta.javaBinary;
-}
-
 function adoptiumArchitecture() {
   if (process.arch === 'x64') return 'x64';
   if (process.arch === 'arm64') return 'aarch64';
@@ -3484,7 +3478,7 @@ async function installBundledJavaRuntime(root, serverId, major, onProgress) {
   if (process.platform !== 'win32') await fs.promises.chmod(javaBinary, 0o755).catch(() => {});
   await fs.promises.writeFile(javaRuntimeMetaPath(root), JSON.stringify({
     major,
-    javaBinary,
+    javaBinary: path.relative(root, javaBinary),
     provider: 'eclipse-temurin',
     installedAt: new Date().toISOString(),
   }, null, 2));

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { requireLaunchIsolation } = require('../backend/asf');
 const { beginServerFileOperation, startServer } = require('../backend/runtime');
 const { traversalPaths } = require('../backend/asf_identity');
+const { bundledJavaBinary } = require('../backend/java_runtime');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -34,6 +35,33 @@ try {
   assert.ok(!traversal.includes(path.dirname(javaBinary)), 'traversal ACLs must not replace runtime-directory permissions');
 } finally {
   fs.rmSync(aclTestRoot, { recursive: true, force: true });
+}
+
+const relocatedServerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-java-relocation-test-'));
+try {
+  const javaRelativePath = path.join('runtime', 'java-25', 'jdk-25.0.4.1+1-jre', 'bin', 'java');
+  const javaBinary = path.join(relocatedServerRoot, javaRelativePath);
+  fs.mkdirSync(path.dirname(javaBinary), { recursive: true });
+  fs.writeFileSync(javaBinary, '', { mode: 0o755 });
+  fs.mkdirSync(path.join(relocatedServerRoot, 'runtime'), { recursive: true });
+  fs.writeFileSync(path.join(relocatedServerRoot, 'runtime', 'java-runtime.json'), JSON.stringify({
+    major: 25,
+    javaBinary: `/root/Nexus-panel/servers/1-skyfallen/${javaRelativePath}`,
+  }));
+  assert.equal(bundledJavaBinary(relocatedServerRoot, 21), javaBinary);
+  assert.equal(bundledJavaBinary(relocatedServerRoot, 26), '');
+  const escapedJava = path.join(relocatedServerRoot, 'runtime', 'java-25', 'jdk-escape', 'bin', 'java');
+  fs.mkdirSync(path.dirname(escapedJava), { recursive: true });
+  const outsideJava = path.join(relocatedServerRoot, 'outside-java');
+  fs.writeFileSync(outsideJava, '', { mode: 0o755 });
+  fs.symlinkSync(outsideJava, escapedJava);
+  fs.writeFileSync(path.join(relocatedServerRoot, 'runtime', 'java-runtime.json'), JSON.stringify({
+    major: 25,
+    javaBinary: escapedJava,
+  }));
+  assert.equal(bundledJavaBinary(relocatedServerRoot, 21), javaBinary);
+} finally {
+  fs.rmSync(relocatedServerRoot, { recursive: true, force: true });
 }
 
 const serverId = 987632;

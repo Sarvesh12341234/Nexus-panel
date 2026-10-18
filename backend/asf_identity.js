@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { externalDataRoot, serversRoot } = require('./paths');
+const { bundledJavaBinary } = require('./java_runtime');
 
 const identityRoot = path.join(externalDataRoot, 'asf', 'identities');
 const cache = new Map();
@@ -295,12 +296,8 @@ function ensureServerIdentity(profile, nativeBinary = '') {
   if (cached && cached.expiresAt > Date.now() && accountUid(name)) {
     const runtimeAccess = grantWritableRuntimePaths(name, profile);
     if (!runtimeAccess.ok) return { available: false, ...runtimeAccess, name, uid: accountUid(name) };
-    let javaBinary = '';
-    try {
-      const meta = JSON.parse(fs.readFileSync(path.join(serverRoot, 'runtime', 'java-runtime.json'), 'utf8'));
-      javaBinary = meta?.javaBinary || '';
-    } catch {}
-    if (javaBinary && fs.existsSync(javaBinary) && commandAvailable('runuser')) {
+    const javaBinary = bundledJavaBinary(serverRoot);
+    if (javaBinary && commandAvailable('runuser')) {
       const javaExec = run('runuser', ['-u', name, '--', javaBinary, '-version'], 10000);
       if (javaExec.status !== 0) {
         cache.delete(cacheKey);
@@ -335,12 +332,8 @@ function ensureServerIdentity(profile, nativeBinary = '') {
   const runtimeAccess = grantWritableRuntimePaths(name, profile);
   if (!runtimeAccess.ok) return { available: false, ...runtimeAccess, name, uid: accountUid(name) };
 
-  let javaBinary = '';
-  try {
-    const meta = JSON.parse(fs.readFileSync(path.join(serverRoot, 'runtime', 'java-runtime.json'), 'utf8'));
-    javaBinary = meta?.javaBinary || '';
-  } catch {}
-  if (javaBinary && fs.existsSync(javaBinary) && commandAvailable('runuser')) {
+  const javaBinary = bundledJavaBinary(serverRoot);
+  if (javaBinary && commandAvailable('runuser')) {
     const javaExec = run('runuser', ['-u', name, '--', javaBinary, '-version'], 10000);
     if (javaExec.status !== 0) {
       return { available: false, reason: 'identity-java-exec-failed', name, uid: accountUid(name), error: String(javaExec.stderr || javaExec.stdout || '').trim().slice(0, 800) };
