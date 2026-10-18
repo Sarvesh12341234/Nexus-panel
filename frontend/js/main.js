@@ -112,6 +112,7 @@ let filePath = '';
 let fileSearchQuery = '';
 let fileSearchTimer = 0;
 let fileContextPath = '';
+let fileContextType = '';
 let fileRenderToken = 0;
 const fileLayoutModes = ['default', 'windows', 'linux', 'advanced'];
 let fileLayoutMode = fileLayoutModes.includes(localStorage.getItem('nexusFileLayout')) ? localStorage.getItem('nexusFileLayout') : 'default';
@@ -1500,6 +1501,7 @@ function showFileContextMenu(file, x, y) {
     checkbox.checked = true;
   }
   fileContextPath = row?.querySelector('.file-pick')?.value || file.dataset.filePath || '';
+  fileContextType = row?.querySelector('.file-pick')?.dataset.fileType || '';
   const menu = document.querySelector('#fileContextMenu');
   if (!menu) return;
   const openButton = menu.querySelector('[data-action="file-open-context"]');
@@ -1542,6 +1544,16 @@ function selectedFileEntries() {
     path: input.value,
     type: input.dataset.fileType || 'file',
   }));
+}
+
+function contextFilePaths() {
+  const selected = selectedFilePaths();
+  return selected.length ? selected : (fileContextPath ? [fileContextPath] : []);
+}
+
+function contextFileEntries() {
+  const selected = selectedFileEntries();
+  return selected.length ? selected : (fileContextPath ? [{ path: fileContextPath, type: fileContextType || 'file' }] : []);
 }
 
 function startFastDownload(url) {
@@ -4075,7 +4087,11 @@ document.querySelector('#fileEditorFind')?.addEventListener('keydown', (event) =
 });
 
 document.addEventListener('pointerdown', (event) => {
-  if (!event.target.closest('#fileContextMenu, .file-context-trigger')) closeFileContextMenu();
+  if (!event.target.closest('#fileContextMenu, .file-context-trigger')) {
+    closeFileContextMenu();
+    fileContextPath = '';
+    fileContextType = '';
+  }
 });
 
 elements.fileList.addEventListener('dragleave', () => {
@@ -5675,7 +5691,7 @@ document.addEventListener('click', async (event) => {
       return;
     }
     if (action === 'file-copy-selected' || action === 'file-cut-selected') {
-      const selected = selectedFilePaths();
+      const selected = contextFilePaths();
       if (!selected.length) return showToast('Select files or folders first.');
       const server = activeServer();
       fileClipboard = { mode: action === 'file-copy-selected' ? 'copy' : 'move', paths: selected, serverId: server?.id || null };
@@ -5786,7 +5802,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'file-delete-selected') {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
-      const selected = selectedFilePaths();
+      const selected = contextFilePaths();
       if (!selected.length) return showToast('Select files or folders first.');
       if (!confirm(`Delete ${selected.length} selected item(s)?`)) return;
       await Promise.all(selected.map((target) => api(`/api/servers/${server.id}/files?path=${encodeURIComponent(target)}`, { method: 'DELETE' })));
@@ -5797,7 +5813,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'file-download-selected') {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
-      const selected = selectedFileEntries();
+      const selected = contextFileEntries();
       const editorPath = !selected.length && elements.fileEditor && !elements.fileEditor.hidden
         ? elements.fileEditor.path.value
         : '';
@@ -5828,9 +5844,8 @@ document.addEventListener('click', async (event) => {
     if (action === 'file-archive') {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
-      const selected = selectedFilePaths();
-      const paths = selected.length ? selected : [filePath];
-      const editorPath = !selected.length && elements.fileEditor && !elements.fileEditor.hidden
+      const paths = contextFilePaths();
+      const editorPath = !paths.length && elements.fileEditor && !elements.fileEditor.hidden
         ? elements.fileEditor.path.value
         : '';
       const destination = editorPath ? editorPath.split('/').slice(0, -1).join('/') : filePath;
@@ -5849,7 +5864,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'file-unzip') {
       const server = activeServer();
       if (!server) return showToast('Create a server first.');
-      const selected = selectedFilePaths();
+      const selected = contextFilePaths();
       const archiveExtensions = /\.(?:zip|7z|rar|tar|tgz|tbz2?|txz|tzst|tar\.(?:gz|bz2?|xz|zst|zstd)|gz|bz2?|xz|zst|zstd)$/i;
       const archives = selected.filter((item) => archiveExtensions.test(item));
       if (!archives.length) return showToast('Select one or more supported archives first (ZIP, TAR, GZ, BZ2, XZ, ZST, 7Z, or RAR).');
