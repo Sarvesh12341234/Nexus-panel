@@ -150,15 +150,24 @@ function invalidateAsfUnitSnapshot() {
   asfUnitSnapshot.expiresAt = 0;
 }
 
+function signalSystemdUnit(unit, signal) {
+  const run = (target) => spawnSync('systemctl', [
+    'kill', target, `--signal=${signal}`, unit,
+  ], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+  const current = run('--kill-whom=all');
+  if (!current.error && current.status === 0) return current;
+  const currentError = String(current.stderr || current.error?.message || '');
+  if (!/unrecognized option|unknown option|invalid option/i.test(currentError)) return current;
+  return run('--kill-who=all');
+}
+
 function stopRecoveredAsfUnit(serverId, unit, force = false) {
-  const args = force
-    ? ['kill', '--kill-whom=all', '--signal=SIGKILL', unit]
-    : ['kill', '--kill-whom=all', '--signal=SIGTERM', unit];
-  const result = spawnSync('systemctl', args, { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+  const signal = force ? 'SIGKILL' : 'SIGTERM';
+  const result = signalSystemdUnit(unit, signal);
   invalidateAsfUnitSnapshot();
   if (result.error || result.status !== 0) {
     const detail = String(result.stderr || result.error?.message || '').trim();
-    throw new Error(detail || `systemctl ${args[0]} failed for ${unit}.`);
+    throw new Error(detail || `systemctl kill failed for ${unit}.`);
   }
   appendLog(serverId, `[NexusPanel] ${force ? 'Force-killed' : 'Graceful stop signal sent to'} recovered server unit ${unit}.`);
   return { ok: true, message: force ? 'Recovered server process killed.' : 'Stop signal sent to recovered server.' };
@@ -809,9 +818,7 @@ function terminateProcessTree(child) {
 
 function forceStopServer(serverId, child, signal = 'SIGKILL') {
   if (child.asfUnit && process.platform === 'linux') {
-    const result = spawnSync('systemctl', [
-      'kill', '--kill-whom=all', `--signal=${signal}`, child.asfUnit,
-    ], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    const result = signalSystemdUnit(child.asfUnit, signal);
     if (!result.error && result.status === 0) {
       invalidateAsfUnitSnapshot();
       return true;
