@@ -200,7 +200,11 @@ function requireLaunchIsolation(platform, status, identity) {
     throw new Error('Server launch is disabled: ASF isolation preflight did not pass. Check systemd, cgroup v2, and host isolation logs.');
   }
   if (!identity?.available) {
-    throw new Error(`Server launch is disabled: per-server OS identity is unavailable${identity?.reason ? ` (${identity.reason})` : ''}.`);
+    const detail = [identity?.path && `file: ${identity.path}`, identity?.error].filter(Boolean).join('; ');
+    throw new Error(
+      `Server launch is disabled: per-server OS identity is unavailable${identity?.reason ? ` (${identity.reason})` : ''}` +
+      `${detail ? `: ${detail}` : ''}.`,
+    );
   }
 }
 

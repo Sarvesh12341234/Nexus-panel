@@ -272,6 +272,7 @@ function verifyIdentity(name, serverRoot, nativeBinary = '', extraExecutables = 
         ok: false,
         reason: 'identity-file-access-failed',
         path: String(fileCheck.stdout || '').trim() || serverRoot,
+        error: String(fileCheck.stderr || '').trim().slice(0, 800),
       };
     }
   }

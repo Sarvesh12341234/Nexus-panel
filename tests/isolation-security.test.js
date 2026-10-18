@@ -14,8 +14,12 @@ assert.throws(
   /no per-server OS isolation/,
 );
 assert.throws(
-  () => requireLaunchIsolation('linux', { preflightPassed: true }, { available: false, reason: 'setfacl-missing' }),
-  /per-server OS identity is unavailable/,
+  () => requireLaunchIsolation('linux', { preflightPassed: true }, {
+    available: false,
+    reason: 'identity-file-access-failed',
+    path: '/servers/1-test/server.properties',
+  }),
+  /per-server OS identity is unavailable \(identity-file-access-failed\): file: \/servers\/1-test\/server\.properties/,
 );
 assert.throws(
   () => requireLaunchIsolation('linux', { preflightPassed: false }, { available: true }),
