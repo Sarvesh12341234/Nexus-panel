@@ -4,7 +4,6 @@ const state = {
   needsSetup: false,
   servers: [],
   users: [],
-  optimizer: null,
   plugins: [],
   softwareCatalog: [],
   templates: [],
@@ -77,10 +76,6 @@ const elements = {
   onlineCount: document.querySelector('#onlineCount'),
   softwareCount: document.querySelector('#softwareCount'),
   accessLabel: document.querySelector('#accessLabel'),
-  optimizerSummary: document.querySelector('#optimizerSummary'),
-  tweakGrid: document.querySelector('#tweakGrid'),
-  techniqueGrid: document.querySelector('#techniqueGrid'),
-  optimizerPlan: document.querySelector('#optimizerPlan'),
   healthPanel: document.querySelector('#healthPanel'),
   auditPanel: document.querySelector('#auditPanel'),
   fixedPanel: document.querySelector('#fixedPanel'),
@@ -163,7 +158,6 @@ const CAPABILITIES = Object.freeze({
   PLUGINS_MANAGE: 'plugins.manage',
   FILES_MANAGE: 'files.manage',
   BACKUPS_MANAGE: 'backups.manage',
-  OPTIMIZER_MANAGE: 'optimizer.manage',
   NETWORK_MANAGE: 'network.manage',
   ADMINS_MANAGE: 'admins.manage',
   SECURITY_VIEW: 'security.view',
@@ -179,7 +173,7 @@ const ADMIN_PERMISSION_PRESETS = {
     CAPABILITIES.SERVER_START, CAPABILITIES.SERVER_STOP, CAPABILITIES.SERVER_RESTART, CAPABILITIES.SERVER_KILL,
     CAPABILITIES.CONSOLE_VIEW, CAPABILITIES.CONSOLE_COMMAND, CAPABILITIES.SERVER_MANAGE,
     CAPABILITIES.SOFTWARE_MANAGE, CAPABILITIES.PROPERTIES_MANAGE, CAPABILITIES.WHITELIST_MANAGE,
-    CAPABILITIES.OPTIMIZER_MANAGE, CAPABILITIES.NETWORK_MANAGE,
+    CAPABILITIES.NETWORK_MANAGE,
   ],
   80: Object.values(CAPABILITIES).filter((key) => ![CAPABILITIES.ADMINS_MANAGE, CAPABILITIES.SECURITY_VIEW, CAPABILITIES.SETTINGS_MANAGE].includes(key)),
   100: Object.values(CAPABILITIES),
@@ -198,7 +192,6 @@ const ADMIN_PERMISSION_LABELS = {
   [CAPABILITIES.PLUGINS_MANAGE]: 'Plugins',
   [CAPABILITIES.FILES_MANAGE]: 'Files',
   [CAPABILITIES.BACKUPS_MANAGE]: 'Backups',
-  [CAPABILITIES.OPTIMIZER_MANAGE]: 'Optimizer',
   [CAPABILITIES.NETWORK_MANAGE]: 'Network',
   [CAPABILITIES.ADMINS_MANAGE]: 'Admins',
   [CAPABILITIES.SECURITY_VIEW]: 'Security',
@@ -249,7 +242,6 @@ const viewTitles = {
   whitelist: ['Server', 'Whitelist'],
   plugins: ['Server', 'Plugins and Packs'],
   backups: ['Safety', 'Backups'],
-  optimizer: ['Host', 'Optimizer'],
   network: ['Host', 'Network'],
   allocations: ['Host', 'Port Allocations'],
   databases: ['Host', 'Databases'],
@@ -269,7 +261,6 @@ const viewAccess = {
   whitelist: { keys: [CAPABILITIES.WHITELIST_MANAGE], level: 'MANAGE_SERVERS' },
   plugins: { keys: [CAPABILITIES.PLUGINS_MANAGE], level: 'MANAGE_FILES' },
   backups: { keys: [CAPABILITIES.BACKUPS_MANAGE], level: 'MANAGE_FILES' },
-  optimizer: { keys: [CAPABILITIES.OPTIMIZER_MANAGE], level: 'MANAGE_SERVERS' },
   network: { keys: [CAPABILITIES.NETWORK_MANAGE], level: 'MANAGE_SERVERS' },
   allocations: { keys: [CAPABILITIES.NETWORK_MANAGE], level: 'MANAGE_SERVERS' },
   databases: { keys: [CAPABILITIES.SERVER_MANAGE], level: 'MANAGE_SERVERS' },
@@ -580,7 +571,6 @@ const COMPONENT_SELECTOR = [
   '.software-grid',
   '.template-grid',
   '.modrinth-grid',
-  '.optimizer-summary',
   '.audit-row',
   '.stat-row',
   '.status-row',
@@ -1927,7 +1917,6 @@ async function renderActiveView({ shellScroll = null } = {}) {
       await renderUploadSessions();
     }
     if (view === 'backups') renderBackups();
-    if (view === 'optimizer') await renderOptimizer();
     if (view === 'network') await renderNetwork();
     if (view === 'allocations') await renderAllocations();
     if (view === 'databases') await renderDatabases();
@@ -2882,40 +2871,6 @@ function renderBackups() {
   }).catch((error) => showToast(error.message));
 }
 
-async function renderOptimizer() {
-  if (!can(CAPABILITIES.OPTIMIZER_MANAGE, state.permissions.MANAGE_SERVERS)) return;
-  if (!elements.optimizerSummary) return;
-
-  try {
-    const optimizer = state.optimizer || await api('/api/optimizer/status').catch(() => ({}));
-    const commands = await api('/api/optimizer/plan').catch(() => ({ commands: [] }));
-    const cards = [
-      ['Platform', optimizer.platform || 'System', 'Host profile detected by NexusPanel'],
-      ['Applied', optimizer.applied ? 'Yes' : 'No', optimizer.message || 'No optimizer changes applied yet'],
-      ['CPU Cores', state.settings?.maxCpuCores || navigator.hardwareConcurrency || 1, 'Used for server allocation limits'],
-      ['RAM Ceiling', `${state.settings?.maxAllocatableMemoryMb || 0} MB`, 'Max allocatable memory after host reserve'],
-      ['Plan Items', commands.commands?.length || 0, 'Safe host tuning commands available'],
-      ['Mode', 'No background agent', 'Runs only when you click Optimize'],
-    ];
-    elements.optimizerSummary.innerHTML = `
-      <article class="optimizer-action optimizer-hero">
-        <span>Host Optimizer</span>
-        <strong>${escapeHtml(optimizer.platform || 'System')}</strong>
-        <p>${escapeHtml(optimizer.message || 'Review and apply safe VPS tuning from one place.')}</p>
-        <button type="button" data-action="apply-optimizer">Optimize VPS</button>
-      </article>
-      ${cards.map(([label, value, detail]) => `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`).join('')}
-      <article class="optimizer-plan">
-        <span>Command Preview</span>
-        ${(commands.commands || []).slice(0, 8).map((item) => `<code>${escapeHtml(item.command || item)}</code>`).join('') || '<small>No host commands required on this OS.</small>'}
-      </article>
-    `;
-  } catch (error) {
-    elements.optimizerSummary.innerHTML = '<p class="empty-state">Error loading optimizer data.</p>';
-    console.error('Optimizer error:', error);
-  }
-}
-
 async function renderNetwork(speed = null) {
   if (!elements.networkPanel) return;
   const data = await api('/api/network/metrics').catch(() => ({ network: { inboundBytes: 0, outboundBytes: 0, interfaces: [] } }));
@@ -3473,7 +3428,6 @@ async function refresh({ keepView = true } = {}) {
     state.user = overview.user;
     state.servers = overview.servers || [];
     state.users = overview.users || [];
-    state.optimizer = overview.optimizer;
     state.plugins = overview.plugins || [];
     state.softwareCatalog = overview.softwareCatalog || [];
     state.templates = overview.templates || [];
@@ -4517,7 +4471,7 @@ function accessLevelForPermissionKeys(keys) {
   if (selected.size === 0) return 0;
   if ([CAPABILITIES.ADMINS_MANAGE, CAPABILITIES.SECURITY_VIEW, CAPABILITIES.SETTINGS_MANAGE].some((key) => selected.has(key))) return 100;
   if ([CAPABILITIES.FILES_MANAGE, CAPABILITIES.BACKUPS_MANAGE, CAPABILITIES.PLUGINS_MANAGE].some((key) => selected.has(key))) return 80;
-  if ([CAPABILITIES.SERVER_MANAGE, CAPABILITIES.SOFTWARE_MANAGE, CAPABILITIES.PROPERTIES_MANAGE, CAPABILITIES.WHITELIST_MANAGE, CAPABILITIES.OPTIMIZER_MANAGE, CAPABILITIES.NETWORK_MANAGE].some((key) => selected.has(key))) return 60;
+  if ([CAPABILITIES.SERVER_MANAGE, CAPABILITIES.SOFTWARE_MANAGE, CAPABILITIES.PROPERTIES_MANAGE, CAPABILITIES.WHITELIST_MANAGE, CAPABILITIES.NETWORK_MANAGE].some((key) => selected.has(key))) return 60;
   if (selected.has(CAPABILITIES.CONSOLE_COMMAND)) return 40;
   if (selected.has(CAPABILITIES.CONSOLE_VIEW)) return 20;
   return 5;
@@ -5022,12 +4976,6 @@ document.addEventListener('click', async (event) => {
       if (!server) return showToast('Create a server first.');
       await api(`/api/servers/${server.id}/eula`, { method: 'POST' });
       showToast('EULA agreed for this server.');
-      await refresh();
-      return;
-    }
-    if (action === 'apply-optimizer') {
-      await api('/api/optimizer/apply', { method: 'POST' });
-      showToast('Optimizer applied.');
       await refresh();
       return;
     }

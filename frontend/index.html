@@ -83,7 +83,6 @@
           <button class="nav-item" type="button" data-view="whitelist">Whitelist</button>
           <button class="nav-item" type="button" data-view="plugins">Plugins</button>
           <button class="nav-item" type="button" data-view="backups">Backups</button>
-          <button class="nav-item" type="button" data-view="optimizer">Optimizer</button>
           <button class="nav-item" type="button" data-view="network">Network</button>
           <button class="nav-item" type="button" data-view="allocations">Allocations</button>
           <button class="nav-item" type="button" data-view="databases">Databases</button>
@@ -290,13 +289,6 @@
           <div class="surface tool-surface" id="backupPanel"></div>
         </section>
 
-        <section class="view-section" id="view-optimizer" hidden>
-          <div class="optimizer-summary" id="optimizerSummary"></div>
-          <div id="tweakGrid" hidden></div>
-          <div id="techniqueGrid" hidden></div>
-          <pre id="optimizerPlan" hidden></pre>
-        </section>
-
         <section class="view-section" id="view-network" hidden>
           <div class="surface tool-surface" id="networkPanel"></div>
         </section>
@@ -392,7 +384,6 @@
                     <label><input type="checkbox" name="permissionKey" value="backups.manage"> Backups</label>
                   </div>
                   <div class="permission-group"><h4>Operations</h4>
-                    <label><input type="checkbox" name="permissionKey" value="optimizer.manage"> Optimizer</label>
                     <label><input type="checkbox" name="permissionKey" value="network.manage"> Network</label>
                     <label><input type="checkbox" name="permissionKey" value="timezone.manage"> Timezone</label>
                   </div>
