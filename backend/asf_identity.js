@@ -186,10 +186,25 @@ function launchExecutables(profile, nativeBinary = '') {
   }))];
 }
 
-function mutableServerFiles(serverRoot) {
-  return fs.readdirSync(serverRoot, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && !/\.(?:jar|exe|sh|bin)$/i.test(entry.name))
-    .map((entry) => path.join(serverRoot, entry.name));
+function serverTreeAccessFindArgs(serverRoot) {
+  return [
+    serverRoot,
+    '(',
+    '-type', 'd',
+    '(',
+    '!', '-readable', '-o', '!', '-writable', '-o', '!', '-executable',
+    ')',
+    '-o',
+    '-type', 'f',
+    '(',
+    '!', '-readable', '-o',
+    '(',
+    '!', '-perm', '/u=x', '-a', '!', '-writable',
+    ')',
+    ')',
+    ')',
+    '-print', '-quit',
+  ];
 }
 
 function applyAcl(name, serverRoot, nativeBinary = '', extraExecutables = []) {
@@ -260,21 +275,17 @@ function verifyIdentity(name, serverRoot, nativeBinary = '', extraExecutables = 
   const checks = ['test', '-r', serverRoot, '-a', '-w', serverRoot, '-a', '-x', serverRoot];
   const rootCheck = run('runuser', ['-u', name, '--', ...checks], 5000);
   if (rootCheck.status !== 0) return { ok: false, reason: 'identity-root-access-failed' };
-  const files = mutableServerFiles(serverRoot);
-  if (files.length) {
-    const fileCheck = run('runuser', [
-      '-u', name, '--', 'sh', '-c',
-      'for file do if ! test -r "$file" || ! test -w "$file"; then printf "%s" "$file"; exit 1; fi; done',
-      'nexuspanel-acl-check', ...files,
-    ], 10000);
-    if (fileCheck.status !== 0) {
-      return {
-        ok: false,
-        reason: 'identity-file-access-failed',
-        path: String(fileCheck.stdout || '').trim() || serverRoot,
-        error: String(fileCheck.stderr || '').trim().slice(0, 800),
-      };
-    }
+  const treeCheck = run('runuser', [
+    '-u', name, '--', 'find', ...serverTreeAccessFindArgs(serverRoot),
+  ], 30000);
+  const inaccessiblePath = String(treeCheck.stdout || '').trim();
+  if (treeCheck.status !== 0 || inaccessiblePath) {
+    return {
+      ok: false,
+      reason: 'identity-file-access-failed',
+      path: inaccessiblePath || serverRoot,
+      error: String(treeCheck.stderr || '').trim().slice(0, 800),
+    };
   }
   for (const binary of launchExecutables({ extraExecutablePaths: extraExecutables }, nativeBinary)) {
     const binaryCheck = run('runuser', ['-u', name, '--', 'test', '-r', binary, '-a', '-x', binary], 5000);
@@ -419,7 +430,7 @@ module.exports = {
   directoryTree,
   identityName,
   identitySupportStatus,
-  mutableServerFiles,
   removeServerIdentity,
+  serverTreeAccessFindArgs,
   traversalPaths,
 };

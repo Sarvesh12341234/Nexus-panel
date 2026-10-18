@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { preflightTiers, requireLaunchIsolation } = require('../backend/asf');
 const { beginServerFileOperation, startServer } = require('../backend/runtime');
-const { directoryTree, mutableServerFiles, traversalPaths } = require('../backend/asf_identity');
+const { directoryTree, serverTreeAccessFindArgs, traversalPaths } = require('../backend/asf_identity');
 const { bundledJavaBinary } = require('../backend/java_runtime');
 const { diagnoseRuntime } = require('../backend/repair_knowledge');
 const fs = require('node:fs');
@@ -35,6 +35,10 @@ const syscallDiagnostics = diagnoseRuntime([
 ]);
 assert.ok(syscallDiagnostics.some((diagnostic) => diagnostic.id === 'syscall-filter'));
 assert.ok(!syscallDiagnostics.some((diagnostic) => diagnostic.id === 'java-heap'));
+const worldSettingsDiagnostics = diagnoseRuntime([
+  'Unable to read or access the world gen settings file for dimension minecraft:overworld.',
+]);
+assert.ok(worldSettingsDiagnostics.some((diagnostic) => diagnostic.id === 'world-gen-settings'));
 
 const aclTestRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-acl-traversal-test-'));
 try {
@@ -42,18 +46,23 @@ try {
   const javaBinary = path.join(serverRoot, 'runtime', 'java', 'bin', 'java');
   fs.mkdirSync(path.dirname(javaBinary), { recursive: true });
   fs.writeFileSync(javaBinary, '', { mode: 0o755 });
-  const propertiesPath = path.join(serverRoot, 'server.properties');
-  fs.writeFileSync(propertiesPath, 'motd=test\n', { mode: 0o650 });
+  fs.writeFileSync(path.join(serverRoot, 'server.properties'), 'motd=test\n', { mode: 0o650 });
+  const worldSettingsPath = path.join(serverRoot, 'world', 'dimensions', 'minecraft', 'overworld', 'data', 'minecraft', 'world_gen_settings.dat');
+  fs.mkdirSync(path.dirname(worldSettingsPath), { recursive: true });
+  fs.writeFileSync(worldSettingsPath, 'world settings');
   fs.writeFileSync(path.join(serverRoot, 'paper.jar'), 'jar');
   fs.mkdirSync(path.join(serverRoot, 'plugins'));
   const traversal = traversalPaths([serverRoot, javaBinary], serverRoot);
   assert.ok(traversal.includes(aclTestRoot), 'the isolated account needs execute permission on parent directories');
   assert.ok(!traversal.includes(serverRoot), 'traversal ACLs must not replace server-root read/write permissions');
   assert.ok(!traversal.includes(path.dirname(javaBinary)), 'traversal ACLs must not replace runtime-directory permissions');
-  assert.deepEqual(mutableServerFiles(serverRoot), [path.join(serverRoot, 'server.properties')]);
   const tree = directoryTree(serverRoot);
   assert.ok(tree.executables.includes(javaBinary), 'owner-executable runtime binaries must receive execute ACLs');
-  assert.ok(!tree.executables.includes(propertiesPath), 'group execute permissions must not classify config files as executables');
+  assert.ok(!tree.executables.includes(path.join(serverRoot, 'server.properties')), 'group execute permissions must not classify config files as executables');
+  const accessCheckArgs = serverTreeAccessFindArgs(serverRoot);
+  assert.equal(accessCheckArgs[0], serverRoot, 'recursive identity verification must scan from the server root');
+  assert.ok(accessCheckArgs.includes('-type') && accessCheckArgs.includes('d') && accessCheckArgs.includes('f'));
+  assert.ok(accessCheckArgs.includes('/u=x'), 'write checks must identify executables by the owner execute bit, not the ACL mask');
 } finally {
   fs.rmSync(aclTestRoot, { recursive: true, force: true });
 }
