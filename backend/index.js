@@ -63,6 +63,7 @@ const healthPath = path.join(dataRoot, 'panel_health.json');
 const editionPath = path.join(dataRoot, 'edition');
 const setupTokenPath = path.join(dataRoot, 'setup_token');
 const wakeWatchers = new Map();
+const wakeStarting = new Set();
 const tunnelProcesses = new Map();
 const passwordResetRequests = new Map();
 const keyedOperations = new Map();
@@ -5371,16 +5372,31 @@ app.post('/api/settings/update', requirePermission(capabilities.SETTINGS_MANAGE,
 
 function closeWakeWatcher(serverId) {
   const watcher = wakeWatchers.get(serverId);
-  if (!watcher) return;
-  try { watcher.close(); } catch {}
+  if (!watcher) return Promise.resolve();
   wakeWatchers.delete(serverId);
+  return new Promise((resolve) => {
+    try {
+      if (watcher.protocol === 'udp') {
+        watcher.handle.close(resolve);
+      } else if (watcher.handle.listening) {
+        watcher.handle.close(resolve);
+      } else {
+        resolve();
+      }
+    } catch {
+      resolve();
+    }
+  });
 }
 
 function refreshWakeWatchers() {
-  const servers = db.prepare('SELECT * FROM servers WHERE wake_on_join = 1 AND auto_start = 0').all();
+  // Auto-start controls panel boot behavior; it must not disable wake-on-join
+  // after an operator stops a server manually.
+  const servers = db.prepare('SELECT * FROM servers WHERE wake_on_join = 1').all();
   const wanted = new Set();
   for (const server of servers) {
     wanted.add(server.id);
+    if (wakeStarting.has(server.id)) continue;
     if (runtimeStatus(server.id) === 'online') {
       closeWakeWatcher(server.id);
       continue;
@@ -5389,36 +5405,45 @@ function refreshWakeWatchers() {
     const software = softwareForServer(server);
     if (!software) continue;
     const protocol = server.type === 'java' ? 'tcp' : 'udp';
+    let wakeStarted = false;
     const start = async () => {
-      closeWakeWatcher(server.id);
+      if (wakeStarted) return;
+      wakeStarted = true;
+      wakeStarting.add(server.id);
       try {
+        // The game server must bind this same port. Wait for the watcher to
+        // finish closing before spawning it, otherwise its bind can fail with
+        // EADDRINUSE while Node is still draining the accepted connection.
+        await closeWakeWatcher(server.id);
         appendLog(server.id, '[NexusPanel] Wake-on-join packet detected. Starting server...');
         if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
         startServer(resolveInstalledExecutable(server, software), software);
       } catch (error) {
         appendLog(server.id, `[NexusPanel] Wake-on-join failed: ${error.message}`);
+      } finally {
+        wakeStarting.delete(server.id);
       }
     };
     if (protocol === 'udp') {
       const socket = require('node:dgram').createSocket('udp4');
-      socket.once('message', start);
+      socket.once('message', () => { void start(); });
       socket.on('error', (error) => {
         appendLog(server.id, `[NexusPanel] Wake UDP listener failed: ${error.message}`);
         closeWakeWatcher(server.id);
       });
       socket.bind(server.port, '0.0.0.0');
-      wakeWatchers.set(server.id, socket);
+      wakeWatchers.set(server.id, { handle: socket, protocol });
     } else {
       const listener = require('node:net').createServer((socket) => {
         socket.destroy();
-        start();
+        void start();
       });
       listener.on('error', (error) => {
         appendLog(server.id, `[NexusPanel] Wake TCP listener failed: ${error.message}`);
         closeWakeWatcher(server.id);
       });
       listener.listen(server.port, '0.0.0.0');
-      wakeWatchers.set(server.id, listener);
+      wakeWatchers.set(server.id, { handle: listener, protocol });
     }
   }
   for (const id of [...wakeWatchers.keys()]) {
@@ -6166,6 +6191,7 @@ app.post('/api/servers/:id/start', requirePermission(capabilities.SERVER_START, 
   if (!hasJavaEula(server)) return res.status(409).json({ error: 'Agree to the Minecraft EULA first.' });
   const software = softwareForServer(server);
   if (!software) return res.status(400).json({ error: 'This Nexu template needs an installer/runtime before it can start.' });
+  await closeWakeWatcher(server.id);
   await safeTimelinePoint(server, req, 'Before server start', 'Captured configuration before launching the process.');
   if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
   try {
