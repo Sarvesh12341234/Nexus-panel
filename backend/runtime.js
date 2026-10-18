@@ -1,6 +1,7 @@
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { parseJavaStartupFlags } = require('./startup_flags');
 const { spawnOptions, wrapCommand } = require('./asf');
 const { hostCpuCount } = require('./system_info');
 const { ensureServerDirs, externalDataRoot } = require('./paths');
@@ -345,6 +346,7 @@ function launchServer(server, software, options = {}) {
       `-Dio.netty.native.workdir=${runtimeEnv.natives}`,
       `-Dorg.lwjgl.system.SharedLibraryExtractPath=${runtimeEnv.natives}`,
       `-Duser.home=${runtimeEnv.home}`,
+      ...parseJavaStartupFlags(server.startup_flags),
       '-jar',
       executable,
       'nogui',

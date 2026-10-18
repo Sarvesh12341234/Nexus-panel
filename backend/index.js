@@ -27,6 +27,7 @@ const { appendLog, beginLiveServerFileOperation, beginServerFileOperation, conso
 const { archiveCollisions, archiveEntries, archiveFormat, copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { processTreeMetrics } = require('./process_metrics');
+const { parseJavaStartupFlags } = require('./startup_flags');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
 const { DDOS_PARAMETER_COUNT, collectDdosEvidence } = require('./ddos_guard');
 const tebex = require('./tebex');
@@ -1104,6 +1105,7 @@ function serverPayload(server, req = null) {
     tunnelProvider: 'none',
     publicAlias: server.public_alias,
     startupDelaySec: server.startup_delay_sec,
+    startupFlags: server.startup_flags || '',
     serverPath: server.server_path ? displayPath(server.server_path) : '',
     softwareKey: software ? software.key : server.software_key || '',
     softwareName: software ? software.name : 'Unconfigured',
@@ -5599,6 +5601,8 @@ app.post('/api/servers', requirePermission(capabilities.SERVER_MANAGE, permissio
   if (!selectedSoftware || selectedSoftware.edition !== type) {
     return res.status(400).json({ error: 'Selected software is not compatible with this server type.' });
   }
+  const startupFlags = String(req.body.startupFlags || '');
+  try { parseJavaStartupFlags(startupFlags); } catch (error) { return res.status(400).json({ error: error.message }); }
 
   const ownerUserId = ownerOnly(req) ? resolveServerOwnerUserId(req, req.body.ownerUserId, null) : req.user.id;
   assertHostServerQuota(ownerUserId);
@@ -5606,9 +5610,9 @@ app.post('/api/servers', requirePermission(capabilities.SERVER_MANAGE, permissio
     INSERT INTO servers (
       name, type, port, max_memory_mb, auto_start, auto_restart, crash_backup,
       scheduled_backups, backup_interval_hours, backup_interval_minutes, backup_retention, wake_on_join, whitelist,
-      tunnel_provider, public_alias, startup_delay_sec, software_key, software_version, cpu_cores, disk_limit_mb, owner_user_id
+      tunnel_provider, public_alias, startup_delay_sec, startup_flags, software_key, software_version, cpu_cores, disk_limit_mb, owner_user_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     name,
     type,
@@ -5626,6 +5630,7 @@ app.post('/api/servers', requirePermission(capabilities.SERVER_MANAGE, permissio
     'none',
     '',
     clampNumber(req.body.startupDelaySec, 0, 600, 0),
+    startupFlags,
     selectedSoftware.key,
     String(req.body.softwareVersion || 'latest').trim().slice(0, 32) || 'latest',
     clampNumber(req.body.cpuCores, 1, hostCpuCount(), 1),
@@ -5734,13 +5739,15 @@ app.patch('/api/servers/:id', requirePermission(capabilities.SERVER_MANAGE, perm
   const ownerUserId = ownerOnly(req)
     ? resolveServerOwnerUserId(req, req.body.ownerUserId, target.owner_user_id)
     : target.owner_user_id;
+  const startupFlags = String(req.body.startupFlags ?? target.startup_flags ?? '');
+  try { parseJavaStartupFlags(startupFlags); } catch (error) { return res.status(400).json({ error: error.message }); }
 
   db.prepare(`
     UPDATE servers
     SET name = ?, type = ?, port = ?, max_memory_mb = ?, auto_start = ?,
         auto_restart = ?, crash_backup = ?, scheduled_backups = ?,
         backup_interval_hours = ?, backup_interval_minutes = ?, backup_retention = ?, wake_on_join = ?, whitelist = ?,
-        tunnel_provider = ?, public_alias = ?, startup_delay_sec = ?,
+        tunnel_provider = ?, public_alias = ?, startup_delay_sec = ?, startup_flags = ?,
         server_path = ?, software_key = ?, software_version = ?, executable_path = ?,
         owner_user_id = ?, cpu_cores = ?
     WHERE id = ?
@@ -5761,6 +5768,7 @@ app.patch('/api/servers/:id', requirePermission(capabilities.SERVER_MANAGE, perm
     'none',
     '',
     clampNumber(req.body.startupDelaySec, 0, 600, target.startup_delay_sec),
+    startupFlags,
     root,
     selectedSoftware ? selectedSoftware.key : target.software_key,
     String(req.body.softwareVersion ?? target.software_version ?? 'latest').trim().slice(0, 32) || 'latest',
@@ -6939,6 +6947,45 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
   });
 }));
 
+app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  const query = String(req.query.q || '').trim().toLocaleLowerCase();
+  if (query.length < 2) return res.json({ query, results: [] });
+  if (query.length > 120) return res.status(400).json({ error: 'Search text must be 120 characters or fewer.' });
+
+  const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  const queue = [{ absolute: root, relative: '', depth: 0 }];
+  const results = [];
+  let visited = 0;
+  while (queue.length && results.length < 250 && visited < 50000) {
+    const directory = queue.pop();
+    if (directory.depth > 24) continue;
+    const children = await fs.promises.readdir(directory.absolute, { withFileTypes: true }).catch(() => []);
+    for (const child of children) {
+      if (++visited > 50000) break;
+      if (child.isSymbolicLink()) continue;
+      const relative = path.posix.join(directory.relative, child.name).replace(/^\.\//, '');
+      if (!isUserVisibleServerEntry(relative)) continue;
+      const absolute = path.join(directory.absolute, child.name);
+      if (relative.toLocaleLowerCase().includes(query)) {
+        const stats = await fs.promises.stat(absolute).catch(() => null);
+        if (stats) results.push({
+          name: child.name,
+          path: relative,
+          type: child.isDirectory() ? 'directory' : 'file',
+          size: stats.isFile() ? stats.size : 0,
+          modifiedAt: stats.mtimeMs,
+          ...(stats.isDirectory() ? { extension: '', kind: 'folder', mime: '', editable: false, previewable: false } : fileDescriptor(child.name, stats.size)),
+        });
+      }
+      if (child.isDirectory()) queue.push({ absolute, relative, depth: directory.depth + 1 });
+      if (results.length >= 250) break;
+    }
+  }
+  results.sort((left, right) => left.path.localeCompare(right.path));
+  res.json({ query, results, truncated: queue.length > 0 || visited >= 50000 });
+}));
+
 app.get('/api/servers/:id/files/preview', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
   const target = safeServerFile(server, req.query.path || '');
@@ -7284,6 +7331,10 @@ app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_
 app.post('/api/servers/:id/files/archive', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  const requestedDestination = String(req.body.destination || '').replaceAll('\\', '/').replace(/^\/+/, '');
+  const destination = safeServerFile(server, requestedDestination);
+  const destinationStats = await fs.promises.stat(destination.absolute).catch(() => null);
+  if (!destinationStats?.isDirectory()) return res.status(400).json({ error: 'Archive destination must be an existing folder.' });
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
   const relativePaths = requested
     .map((item) => String(item || '').replaceAll('\\', '/').replace(/^\/+/, ''))
@@ -7296,11 +7347,12 @@ app.post('/api/servers/:id/files/archive', requirePermission(capabilities.FILES_
     if (blockedEntry) return res.status(403).json({ error: `Cannot archive protected NexusPanel metadata/runtime path: ${blockedEntry}` });
   }
   const archiveName = `${server.name.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'server'}-${Date.now()}.zip`;
-  const archivePath = assertInside(root, path.join(root, 'archives', archiveName));
+  const archiveRelative = path.posix.join(destination.relative, archiveName);
+  const archivePath = assertInside(root, path.join(root, archiveRelative));
   await createZip(root, relativePaths, archivePath);
   res.json({
-    archive: path.posix.join('archives', archiveName),
-    downloadUrl: `/api/servers/${server.id}/files/download?path=${encodeURIComponent(path.posix.join('archives', archiveName))}`,
+    archive: archiveRelative,
+    downloadUrl: `/api/servers/${server.id}/files/download?path=${encodeURIComponent(archiveRelative)}`,
   });
 }));
 

@@ -109,6 +109,10 @@ const elements = {
 };
 
 let filePath = '';
+let fileSearchQuery = '';
+let fileSearchTimer = 0;
+let fileContextPath = '';
+let fileRenderToken = 0;
 const fileLayoutModes = ['default', 'windows', 'linux', 'advanced'];
 let fileLayoutMode = fileLayoutModes.includes(localStorage.getItem('nexusFileLayout')) ? localStorage.getItem('nexusFileLayout') : 'default';
 let fileClipboard = { mode: '', paths: [], serverId: null };
@@ -1134,12 +1138,22 @@ function openPowerPalette() {
 }
 
 document.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && !elements.fileEditor?.hidden && state.activeView === 'files') {
+    event.preventDefault();
+    const find = document.querySelector('#fileEditorFind');
+    find?.focus();
+    find?.select();
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault();
     document.querySelector('#powerPalette') ? closePowerPalette() : openPowerPalette();
     return;
   }
-  if (event.key === 'Escape') closePowerPalette();
+  if (event.key === 'Escape') {
+    closePowerPalette();
+    closeFileContextMenu();
+  }
   if (event.altKey && event.key.toLowerCase() === 's' && state.servers.length) {
     event.preventDefault();
     const index = state.servers.findIndex((server) => server.id === state.activeServerId);
@@ -1311,6 +1325,7 @@ async function apiText(path) {
 
 async function watchServerOperation(server, job, progressNode, onComplete = null, kind = 'files') {
   if (!job?.id) throw new Error('The operation did not return a tracking id.');
+  const startedAt = Date.now();
   while (true) {
     const response = await api(`/api/servers/${server.id}/${kind === 'backup' ? 'backups/' : ''}operations/${encodeURIComponent(job.id)}`);
     const current = response.job;
@@ -1325,6 +1340,10 @@ async function watchServerOperation(server, job, progressNode, onComplete = null
     }
     if (current.status === 'failed') throw new Error(current.message || 'Operation failed.');
     if (current.status === 'complete') {
+      if (kind === 'backup') {
+        const visibleFor = Date.now() - startedAt;
+        if (visibleFor < 2200) await new Promise((resolve) => window.setTimeout(resolve, 2200 - visibleFor));
+      }
       await onComplete?.(current.result);
       return current.result;
     }
@@ -1387,6 +1406,9 @@ function fillServerConfigForm(server, force = false) {
   form.cpuCores.title = state.user?.role === 'owner' ? 'Owner can change CPU allocation.' : 'Only the owner can change CPU allocation.';
   form.port.value = server.port;
   form.startupDelaySec.value = server.startupDelaySec || 0;
+  if (form.startupFlags) form.startupFlags.value = server.startupFlags || '';
+  const startupFlagsField = form.querySelector('.startup-flags-field');
+  if (startupFlagsField) startupFlagsField.hidden = server.type !== 'java';
   form.autoRestart.checked = Boolean(server.autoRestart);
   form.autoStart.checked = Boolean(server.autoStart);
   form.crashBackup.checked = Boolean(server.crashBackup);
@@ -1470,6 +1492,52 @@ async function renderUploadSessions() {
 
 function selectedFilePaths() {
   return [...document.querySelectorAll('.file-pick:checked')].map((input) => input.value);
+}
+
+function showFileContextMenu(file, x, y) {
+  if (!file) return;
+  const row = file.closest('.file-row');
+  const checkbox = row?.querySelector('.file-pick');
+  if (checkbox && !checkbox.checked) {
+    document.querySelectorAll('.file-pick').forEach((input) => { input.checked = false; });
+    checkbox.checked = true;
+  }
+  fileContextPath = row?.querySelector('.file-pick')?.value || file.dataset.filePath || '';
+  const menu = document.querySelector('#fileContextMenu');
+  if (!menu) return;
+  const openButton = menu.querySelector('[data-action="file-open-context"]');
+  if (openButton) openButton.hidden = selectedFilePaths().length !== 1;
+  menu.hidden = false;
+  const bounds = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - bounds.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - bounds.height - 8))}px`;
+}
+
+function closeFileContextMenu() {
+  const menu = document.querySelector('#fileContextMenu');
+  if (menu) menu.hidden = true;
+}
+
+function findEditorText(direction = 1) {
+  const query = document.querySelector('#fileEditorFind')?.value || '';
+  const editor = elements.fileEditor?.elements.content;
+  const status = document.querySelector('#fileEditorFindStatus');
+  if (!query || !editor) {
+    if (status) status.textContent = query ? 'Open a text file first.' : 'Enter text to find.';
+    return;
+  }
+  const content = editor.value.toLocaleLowerCase();
+  const needle = query.toLocaleLowerCase();
+  const from = direction > 0 ? editor.selectionEnd : Math.max(0, editor.selectionStart - 1);
+  let index = direction > 0 ? content.indexOf(needle, from) : content.lastIndexOf(needle, from);
+  if (index < 0) index = direction > 0 ? content.indexOf(needle) : content.lastIndexOf(needle);
+  if (index < 0) {
+    if (status) status.textContent = 'No matches.';
+    return;
+  }
+  editor.focus();
+  editor.setSelectionRange(index, index + query.length);
+  if (status) status.textContent = `Found at character ${index + 1}.`;
 }
 
 function selectedFileEntries() {
@@ -2438,20 +2506,41 @@ async function renderWhitelist() {
 
 async function renderFiles() {
   const server = activeServer();
+  const renderToken = ++fileRenderToken;
   if (!elements.fileList) return;
   if (!server) {
     elements.fileList.innerHTML = '<p class="empty-state">Create a server to browse files.</p>';
     return;
   }
-  const data = await api(`/api/servers/${server.id}/files?path=${encodeURIComponent(filePath)}`).catch((error) => {
+  const query = fileSearchQuery.trim();
+  if (query) {
+    if (elements.fileEditor) elements.fileEditor.hidden = true;
+    if (elements.filePreview) elements.filePreview.hidden = true;
+  }
+  if (query && query.length < 2) {
+    elements.fileList.innerHTML = '<p class="empty-state">Enter at least two characters to search this server.</p>';
+    return;
+  }
+  const endpoint = query
+    ? `/api/servers/${server.id}/files/search?q=${encodeURIComponent(query)}`
+    : `/api/servers/${server.id}/files?path=${encodeURIComponent(filePath)}`;
+  const data = await api(endpoint).catch((error) => {
     showToast(error.message);
     return null;
   });
+  if (renderToken !== fileRenderToken || activeServer()?.id !== server.id) return;
   if (!data) return;
   const serverRunning = server.status === 'online';
   const liveNotice = document.querySelector('#fileLiveNotice');
   if (liveNotice) liveNotice.hidden = !serverRunning;
-  if (elements.filePathLabel) elements.filePathLabel.textContent = `/${data.path || ''}`;
+  if (elements.filePathLabel) elements.filePathLabel.textContent = query ? `Search: ${query}` : `/${data.path || ''}`;
+  if (data.results) {
+    if (elements.fileEditor) elements.fileEditor.hidden = true;
+    if (elements.filePreview) elements.filePreview.hidden = true;
+    renderFileEntries(data.results, 'No files match this search.');
+    if (data.truncated) showToast('Showing the first 250 matching files. Refine your search for more results.');
+    return;
+  }
   if (data.type === 'file') {
     elements.fileList.innerHTML = '';
     if (data.editable) {
@@ -2473,7 +2562,11 @@ async function renderFiles() {
   }
   if (elements.fileEditor) elements.fileEditor.hidden = true;
   if (elements.filePreview) elements.filePreview.hidden = true;
-  elements.fileList.innerHTML = data.entries.map((entry) => `
+  renderFileEntries(data.entries);
+}
+
+function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a file or paste config here.') {
+  elements.fileList.innerHTML = entries.map((entry) => `
     <div class="file-row">
       <label class="file-check"><input type="checkbox" class="file-pick" value="${escapeHtml(entry.path)}" data-file-type="${escapeHtml(entry.type)}"><span></span></label>
       <button class="file-open" type="button" data-action="file-open" data-file-path="${escapeHtml(entry.path)}">
@@ -2481,8 +2574,9 @@ async function renderFiles() {
         <span class="file-main"><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === 'directory' ? 'Folder' : `${escapeHtml(fileTypeLabel(entry))} · ${formatBytes(entry.size)}`}</small></span>
       </button>
       <div class="file-meta"><code>${escapeHtml(entry.path)}</code><time>${entry.modifiedAt ? escapeHtml(formatPanelDate(entry.modifiedAt)) : ''}</time></div>
+      <button class="file-context-trigger" type="button" data-action="file-show-context" data-file-path="${escapeHtml(entry.path)}" aria-label="More actions for ${escapeHtml(entry.name)}">...</button>
     </div>
-  `).join('') || '<p class="empty-state">Folder is empty. Create a file or paste config here.</p>';
+  `).join('') || `<p class="empty-state">${escapeHtml(emptyText)}</p>`;
   applyFileManagerLayout();
 }
 
@@ -3887,6 +3981,9 @@ if (elements.templateGameSelect) {
 elements.activeServerSelect.addEventListener('change', () => {
   state.activeServerId = Number(elements.activeServerSelect.value);
   filePath = '';
+  fileSearchQuery = '';
+  const search = document.querySelector('#fileSearch');
+  if (search) search.value = '';
   consoleRenderToken += 1;
   consoleStickToBottom = true;
   closeConsoleStream();
@@ -3941,6 +4038,33 @@ if (elements.nexuImportInput) {
 elements.fileList.addEventListener('dragover', (event) => {
   event.preventDefault();
   elements.fileList.classList.add('is-dropping');
+});
+
+elements.fileList.addEventListener('contextmenu', (event) => {
+  const row = event.target.closest('.file-row');
+  if (!row) return;
+  event.preventDefault();
+  showFileContextMenu(row, event.clientX, event.clientY);
+});
+
+document.querySelector('#fileSearch')?.addEventListener('input', (event) => {
+  fileSearchQuery = event.target.value;
+  window.clearTimeout(fileSearchTimer);
+  fileSearchTimer = window.setTimeout(() => { void renderFiles(); }, 250);
+});
+
+document.querySelector('#fileEditorFind')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    findEditorText(event.shiftKey ? -1 : 1);
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    elements.fileEditor?.elements.content?.focus();
+  }
+});
+
+document.addEventListener('pointerdown', (event) => {
+  if (!event.target.closest('#fileContextMenu, .file-context-trigger')) closeFileContextMenu();
 });
 
 elements.fileList.addEventListener('dragleave', () => {
@@ -4019,7 +4143,7 @@ if (elements.serverConfigForm) {
     }
     try {
       await api(`/api/servers/${server.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
-      showToast('Server settings saved. Restart to apply RAM and CPU changes.');
+      showToast('Server settings saved. Restart to apply RAM, CPU, or Java startup flag changes.');
       elements.serverConfigForm.dataset.dirty = '0';
       await refresh();
       fillServerConfigForm(activeServer(), true);
@@ -4598,6 +4722,7 @@ document.addEventListener('click', async (event) => {
   const view = viewTarget?.dataset.view;
   if (view) return setView(view);
   if (!action) return;
+  if (actionTarget.closest('#fileContextMenu')) closeFileContextMenu();
 
   try {
     const serverCard = event.target.closest('[data-server-id]');
@@ -5466,7 +5591,28 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'file-open') {
       filePath = actionTarget.dataset.filePath;
+      fileSearchQuery = '';
+      const search = document.querySelector('#fileSearch');
+      if (search) search.value = '';
       await renderFiles();
+      return;
+    }
+    if (action === 'file-show-context') {
+      const bounds = actionTarget.getBoundingClientRect();
+      showFileContextMenu(actionTarget, bounds.right, bounds.bottom);
+      return;
+    }
+    if (action === 'file-open-context') {
+      if (!fileContextPath) return;
+      filePath = fileContextPath;
+      fileSearchQuery = '';
+      const search = document.querySelector('#fileSearch');
+      if (search) search.value = '';
+      await renderFiles();
+      return;
+    }
+    if (action === 'file-find-next' || action === 'file-find-prev') {
+      findEditorText(action === 'file-find-next' ? 1 : -1);
       return;
     }
     if (action === 'file-upload') {
@@ -5580,6 +5726,9 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'file-up') {
       filePath = filePath.split('/').slice(0, -1).join('/');
+      fileSearchQuery = '';
+      const search = document.querySelector('#fileSearch');
+      if (search) search.value = '';
       await renderFiles();
       return;
     }
@@ -5646,7 +5795,7 @@ document.addEventListener('click', async (event) => {
       showToast('Packing selected items for download...');
       const result = await api(`/api/servers/${server.id}/files/archive`, {
         method: 'POST',
-        body: JSON.stringify({ paths: selected.map((item) => item.path) }),
+        body: JSON.stringify({ paths: selected.map((item) => item.path), destination: filePath }),
       });
       showToast('Archive ready. Download starting.');
       startFastDownload(result.downloadUrl);
@@ -5658,12 +5807,19 @@ document.addEventListener('click', async (event) => {
       if (!server) return showToast('Create a server first.');
       const selected = selectedFilePaths();
       const paths = selected.length ? selected : [filePath];
+      const editorPath = !selected.length && elements.fileEditor && !elements.fileEditor.hidden
+        ? elements.fileEditor.path.value
+        : '';
+      const destination = editorPath ? editorPath.split('/').slice(0, -1).join('/') : filePath;
       const result = await api(`/api/servers/${server.id}/files/archive`, {
         method: 'POST',
-        body: JSON.stringify({ paths }),
+        body: JSON.stringify({ paths: editorPath ? [editorPath] : paths, destination }),
       });
-      showToast('Archive created. Download starting.');
-      window.location.href = result.downloadUrl;
+      showToast(`Archive created: ${result.archive}`);
+      filePath = destination;
+      fileSearchQuery = '';
+      const search = document.querySelector('#fileSearch');
+      if (search) search.value = '';
       await renderFiles();
       return;
     }

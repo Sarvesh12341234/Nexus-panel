@@ -182,6 +182,7 @@
               <label>Port <input name="port" type="number" min="1024" max="65535"></label>
               <label id="serverOwnerConfigLabel" hidden>Assigned user <select name="ownerUserId"><option value="">Owner / unassigned</option></select></label>
               <label>Startup delay sec <input name="startupDelaySec" type="number" min="0" max="600" value="0"></label>
+              <label class="startup-flags-field">Java startup flags <textarea name="startupFlags" rows="3" placeholder="-Xms512M&#10;-XX:+UseG1GC"></textarea><small>One Java flag per line. NexusPanel keeps control of maximum memory and runtime paths.</small></label>
               <label class="switch"><input name="autoRestart" type="checkbox"><span></span>Auto restart</label>
               <label class="switch"><input name="autoStart" type="checkbox"><span></span>Auto start</label>
               <label class="switch"><input name="crashBackup" type="checkbox"><span></span>Crash backup</label>
@@ -215,17 +216,10 @@
               <button class="secondary" type="button" data-action="file-select-all">Select All</button>
               <button class="secondary" type="button" data-action="file-clear-selection">Clear</button>
               <button class="secondary" type="button" data-action="file-upload">Upload</button>
-              <button class="secondary" type="button" data-action="file-download-selected">Download</button>
-              <button class="secondary" type="button" data-action="file-copy-selected">Copy</button>
-              <button class="secondary" type="button" data-action="file-cut-selected">Cut</button>
               <button class="secondary" type="button" data-action="file-paste">Paste</button>
               <button class="secondary" type="button" data-action="file-new">New File</button>
               <button class="secondary" type="button" data-action="folder-new">New Folder</button>
-              <button class="secondary" type="button" data-action="file-scroll-top">Top</button>
-              <button class="secondary" type="button" data-action="file-scroll-bottom">Bottom</button>
-              <button class="secondary" type="button" data-action="file-unzip">Extract Selected</button>
-              <button class="secondary" type="button" data-action="file-archive">Archive Selected</button>
-              <button class="danger" type="button" data-action="file-delete-selected">Delete Selected</button>
+              <label class="file-search-label">Search files <input id="fileSearch" type="search" placeholder="Search this server..."></label>
               <input id="fileUploadInput" type="file" multiple hidden>
               <code id="filePathLabel">/</code>
             </div>
@@ -240,9 +234,25 @@
               <div class="upload-session-list" id="uploadSessionList"></div>
             </div>
             <div class="file-list" id="fileList"></div>
+            <div class="file-context-menu" id="fileContextMenu" role="menu" hidden>
+              <button type="button" data-action="file-open-context">Open</button>
+              <button type="button" data-action="file-cut-selected">Cut</button>
+              <button type="button" data-action="file-copy-selected">Copy</button>
+              <button type="button" data-action="file-paste">Paste</button>
+              <button type="button" data-action="file-download-selected">Download</button>
+              <button type="button" data-action="file-archive">Archive here</button>
+              <button type="button" data-action="file-unzip">Extract here</button>
+              <button class="danger" type="button" data-action="file-delete-selected">Delete</button>
+            </div>
             <div class="file-preview" id="filePreview" hidden></div>
             <form class="file-editor" id="fileEditor" hidden>
               <label>Editing <input name="path" readonly></label>
+              <div class="file-editor-find">
+                <label>Find in file <input id="fileEditorFind" type="search" placeholder="Text to find (Ctrl+F)"></label>
+                <button class="secondary" type="button" data-action="file-find-prev">Previous</button>
+                <button class="secondary" type="button" data-action="file-find-next">Next</button>
+                <small id="fileEditorFindStatus" aria-live="polite"></small>
+              </div>
               <textarea name="content" spellcheck="false"></textarea>
               <div class="server-actions">
                 <button type="submit">Save file</button>
