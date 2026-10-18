@@ -2904,6 +2904,7 @@ async function renderAllocations() {
   const allocations = data.allocations || [];
   elements.allocationsPanel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Allocations</p><h2>Port & IP assignments</h2></div></div>
+    <p class="muted">An allocation records an address and port; it does not open the firewall or start a listener. Minecraft uses one game port per server. Use “Make game port” to apply an assigned allocation, then restart the server and allow the port through your VPS firewall.</p>
     <form class="settings-form" id="allocationForm">
       <label>IP <input name="ip" value="127.0.0.1" required></label>
       <label>Port <input name="port" type="number" min="1024" max="65535" required></label>
@@ -2916,9 +2917,10 @@ async function renderAllocations() {
         <div class="plugin-row" data-allocation-id="${allocation.id}">
           <div>
             <strong>${escapeHtml(allocation.ip)}:${allocation.port}</strong>
-            <div class="muted">${escapeHtml(allocation.protocol.toUpperCase())}${allocation.label ? ` · ${escapeHtml(allocation.label)}` : ''}${allocation.serverId ? ` · server #${allocation.serverId}` : ' · unassigned'}</div>
+            <div class="muted">${escapeHtml(allocation.protocol.toUpperCase())}${allocation.label ? ` · ${escapeHtml(allocation.label)}` : ''}${allocation.serverId ? ` · server #${allocation.serverId}` : ' · unassigned'}${server && Number(allocation.serverId) === Number(server.id) && Number(allocation.port) === Number(server.port) ? ' · current game port' : ''}</div>
           </div>
           <div class="row-actions">
+            ${server && Number(allocation.serverId) === Number(server.id) && Number(allocation.port) !== Number(server.port) ? `<button class="secondary" type="button" data-action="make-game-port" data-allocation-id="${allocation.id}" ${server.status !== 'offline' ? 'disabled' : ''}>Make game port</button>` : ''}
             <button class="secondary" type="button" data-action="probe-allocation" data-allocation-id="${allocation.id}">Probe</button>
             <button class="danger" type="button" data-action="delete-allocation" data-allocation-id="${allocation.id}">Delete</button>
           </div>
@@ -4729,6 +4731,19 @@ document.addEventListener('click', async (event) => {
         const probe = data.probe || {};
         showToast(probe.note || (probe.listening ? 'Port is in use (a service is listening).' : `Port check: ${probe.detail || 'free'}`));
       } catch (error) { showToast(error.message); }
+      return;
+    }
+    if (action === 'make-game-port') {
+      const id = actionTarget.dataset.allocationId;
+      actionTarget.disabled = true;
+      try {
+        const result = await api(`/api/network/allocations/${encodeURIComponent(id)}/make-game-port`, { method: 'POST' });
+        showToast(`Game port changed to ${result.server.port}. Restart the server and check the VPS firewall.`);
+        await refresh();
+      } catch (error) {
+        showToast(error.message);
+        actionTarget.disabled = false;
+      }
       return;
     }
     if (action === 'delete-allocation') {

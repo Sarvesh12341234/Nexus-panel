@@ -414,6 +414,21 @@ function createAllocation(serverId, input) {
   return allocationRows().find((row) => row.id === Number(result.lastInsertRowid));
 }
 
+function gamePortFromAllocation(server, allocation) {
+  if (!allocation || Number(allocation.serverId) !== Number(server.id)) {
+    throw new Error('Allocation is not assigned to this server.');
+  }
+  const port = Number(allocation.port);
+  if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) {
+    throw new Error('Allocation port must be between 1024 and 65535.');
+  }
+  const requiredProtocol = server.type === 'bedrock' ? 'udp' : 'tcp';
+  if (!['both', requiredProtocol].includes(allocation.protocol)) {
+    throw new Error(`This server requires a ${requiredProtocol.toUpperCase()} allocation for its game port.`);
+  }
+  return port;
+}
+
 function deleteAllocation(allocationId) {
   const result = db.prepare('DELETE FROM network_allocations WHERE id = ?').run(Number(allocationId));
   if (!result.changes) throw new Error('Allocation not found.');
@@ -455,6 +470,7 @@ module.exports = {
   connectionDetails,
   connectionRows,
   createAllocation,
+  gamePortFromAllocation,
   createConnection,
   databaseHostConfig,
   deleteProvisionedDatabase,

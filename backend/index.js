@@ -5152,6 +5152,57 @@ app.post('/api/network/allocations', requirePermission(capabilities.NETWORK_MANA
   res.status(201).json({ allocation });
 });
 
+app.post('/api/network/allocations/:id/make-game-port', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
+  const allocation = hosting.allocationRows().find((item) => item.id === Number(req.params.id));
+  if (!allocation) return res.status(404).json({ error: 'Allocation not found.' });
+  if (!allocation.serverId) return res.status(400).json({ error: 'Assign the allocation to a server first.' });
+  const server = getServerOr404(allocation.serverId, req.user);
+  const port = hosting.gamePortFromAllocation(server, allocation);
+  if (runtimeStatus(server.id) !== 'offline') {
+    return res.status(409).json({ error: 'Stop the server before changing its game port.' });
+  }
+  const collision = db.prepare(`
+    SELECT id, name FROM servers
+    WHERE port = ? AND id != ?
+    LIMIT 1
+  `).get(port, server.id);
+  if (collision) return res.status(409).json({ error: `Port ${port} is already used by ${collision.name || `server #${collision.id}`}.` });
+
+  await safeTimelinePoint(server, req, 'Before game port change', `Captured server state before changing the game port to ${port}.`);
+  const previousPort = Number(server.port);
+  if (port !== previousPort) {
+    db.prepare('UPDATE servers SET port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(port, server.id);
+    const updatedServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
+    try {
+      await writeProfile(updatedServer);
+      await writeProperties(updatedServer, { 'server-port': String(port) });
+      const verified = await readProperties(updatedServer);
+      if (Number(verified['server-port']) !== port) throw new Error('server.properties did not retain the selected game port.');
+    } catch (error) {
+      db.prepare('UPDATE servers SET port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(previousPort, server.id);
+      const restoredServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
+      const rollbackErrors = [];
+      try {
+        await writeProfile(restoredServer);
+      } catch (rollbackError) {
+        rollbackErrors.push(`ASF profile: ${rollbackError.message}`);
+      }
+      try {
+        await writeProperties(restoredServer, { 'server-port': String(previousPort) });
+      } catch (rollbackError) {
+        rollbackErrors.push(`server.properties: ${rollbackError.message}`);
+      }
+      if (rollbackErrors.length) {
+        throw new Error(`Game port change failed (${error.message}) and rollback was incomplete (${rollbackErrors.join('; ')}).`);
+      }
+      throw new Error(`Game port change failed and was rolled back: ${error.message}`);
+    }
+    appendLog(server.id, `[NexusPanel] Game port changed from ${previousPort} to ${port} using allocation ${allocation.ip}:${allocation.port}. Restart the server to apply it.`);
+  }
+  const updatedServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
+  res.json({ ok: true, server: serverPayload(updatedServer, req), allocation });
+}));
+
 app.delete('/api/network/allocations/:id', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   hosting.deleteAllocation(req.params.id);
   res.json({ ok: true });
