@@ -29,6 +29,7 @@ const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info
 const { processTreeMetrics } = require('./process_metrics');
 const { parseJavaStartupFlags } = require('./startup_flags');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
+const needle2Agent = require('./needle2_agent');
 const { DDOS_PARAMETER_COUNT, collectDdosEvidence } = require('./ddos_guard');
 const tebex = require('./tebex');
 const hosting = require('./hosting');
@@ -2718,6 +2719,9 @@ function publicAgentAnalysis(analysis) {
 async function analyzeServerWithAgent(server, software, diagnostics) {
   const root = findServerRoot({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const knowledge = knowledgeStatus();
+  const modelSuggestion = diagnostics?.length
+    ? null
+    : await needle2Agent.classify(server.id, consoleLogs(server.id).join('\n'));
   return {
     engine: 'deterministic',
     serverId: server.id,
@@ -2733,6 +2737,8 @@ async function analyzeServerWithAgent(server, software, diagnostics) {
       source: 'knowledge',
       techniques: item.techniques || [],
     })),
+    modelSuggestion,
+    model: needle2Agent.status(),
     webResearch: {
       query: '',
       results: [],

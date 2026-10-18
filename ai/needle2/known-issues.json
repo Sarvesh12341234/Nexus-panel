@@ -1,0 +1,1976 @@
+{
+  "cli-unknown-command": {
+    "error": "Unknown command: frobnicate",
+    "cause": "The command is not in the CLI dispatch table.",
+    "fix": "Run `nexuspanel help` to list valid commands.",
+    "httpStatus": "",
+    "exitCode": "1"
+  },
+  "cli-root-required": {
+    "error": "Root is required. Run: sudo npm run service:install",
+    "cause": "systemd unit installation writes to /etc/systemd/system.",
+    "fix": "Re-run with sudo.",
+    "httpStatus": "",
+    "exitCode": "1"
+  },
+  "cli-systemd-missing": {
+    "error": "Systemd is required for VPS background service mode.",
+    "cause": "/run/systemd/system does not exist.",
+    "fix": "Use `nexuspanel foreground` or install systemd.",
+    "httpStatus": "",
+    "exitCode": "1"
+  },
+  "cli-no-owner-interactive": {
+    "error": "No owner account exists. Run nexuspanel start in an interactive terminal or set NEXUSPANEL_OWNER_EMAIL and NEXUSPANEL_OWNER_PASSWORD.",
+    "cause": "First-run owner creation needs interactive input.",
+    "fix": "Set NEXUSPANEL_OWNER_EMAIL + NEXUSPANEL_OWNER_PASSWORD, or run interactively.",
+    "httpStatus": "",
+    "exitCode": "1"
+  },
+  "cli-setup-already-done": {
+    "error": "Initial setup is already complete.",
+    "cause": "A user already exists in the database.",
+    "fix": "Sign in normally; the setup URL is single-use.",
+    "httpStatus": "",
+    "exitCode": "1"
+  },
+  "cli-port-invalid": {
+    "error": "Panel port must be between 1 and 65535.",
+    "cause": "Port out of range.",
+    "fix": "Choose a port in 1-65535.",
+    "httpStatus": "",
+    "exitCode": "1"
+  },
+  "cli-service-not-active": {
+    "error": "nexuspanel did not become active. Run: journalctl -u nexuspanel -n 100 --no-pager",
+    "cause": "The service crashed on boot.",
+    "fix": "Read the journal, fix the reported error, restart.",
+    "httpStatus": "",
+    "exitCode": "1"
+  },
+  "perm-not-authenticated": {
+    "error": "Your session expired. Sign in again.",
+    "cause": "No valid session cookie, or the session expired/idle-timed-out.",
+    "fix": "Sign in again.",
+    "httpStatus": "401",
+    "exitCode": ""
+  },
+  "perm-insufficient-capability": {
+    "error": "This account does not have that permission.",
+    "cause": "The admin's permissions_json does not include the required capability.",
+    "fix": "Owner grants the capability in Admins, or raises access_level.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "perm-owner-only": {
+    "error": "Only the owner account can <action>.",
+    "cause": "The route is hard-gated to role=owner.",
+    "fix": "Sign in as the owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "perm-server-not-found": {
+    "error": "Server not found.",
+    "cause": "The server does not exist OR the admin does not own it (deliberate ambiguity to prevent enumeration).",
+    "fix": "Verify the server id and that the account owns it.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "perm-owner-cannot-be-edited": {
+    "error": "Owner account cannot be edited by another user.",
+    "cause": "A non-owner tried to PATCH the owner.",
+    "fix": "Only the owner can edit their own account.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "perm-owner-cannot-be-deleted": {
+    "error": "Owner account cannot be deleted.",
+    "cause": "DELETE /api/users/:id targeting the owner.",
+    "fix": "Transfer ownership first (not supported); keep the owner account.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "perm-assign-all-owner-only": {
+    "error": "Only the owner can assign every server.",
+    "cause": "A non-owner used assignedServerId=all.",
+    "fix": "Assign servers individually, or ask the owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "perm-invalid-assigned-user": {
+    "error": "Assign servers to a valid admin user, or leave unassigned for owner-only.",
+    "cause": "resolveServerOwnerUserId got a non-existent id or the owner id.",
+    "fix": "Pick an existing admin user id.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "perm-grant-escalation-blocked": {
+    "error": "",
+    "cause": "A non-owner tried to grant a capability they do not hold.",
+    "fix": "Only grant capabilities you already have.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "asf-landlock-unavailable": {
+    "error": "[ASF] Landlock is unavailable on this kernel: <errno>",
+    "cause": "Kernel < 5.13 or Landlock disabled at boot.",
+    "fix": "Upgrade to Linux 5.13+ (Ubuntu 22.04+). Panel falls back to systemd isolation.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-landlock-abi-too-low": {
+    "error": "[ASF] Landlock ABI 3+ required (host ABI: <n>)",
+    "cause": "Kernel older than 6.2 (ABI 3 needed for truncate blocking).",
+    "fix": "Upgrade kernel, or the panel auto-selects the 'core' tier.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-ruleset-create-failed": {
+    "error": "[ASF] cannot create Landlock ruleset: <errno>",
+    "cause": "seccomp/LSM policy conflict or missing CAP_SYS_ADMIN.",
+    "fix": "Check `dmesg` for LSM denials; ensure the panel runs as root.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-path-open-failed": {
+    "error": "[ASF] cannot open allowed path <path>: <errno>",
+    "cause": "A required read-only path is missing on this distro.",
+    "fix": "Usually harmless (non-required paths are skipped). If fatal, install the missing package.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-net-port-rule-failed": {
+    "error": "[ASF] cannot restrict TCP bind port <n>: <errno>",
+    "cause": "Landlock ABI < 4 (kernel < 6.7).",
+    "fix": "Panel retries with the 'core' tier automatically.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-no-new-privs-failed": {
+    "error": "[ASF] cannot set no_new_privs: <errno>",
+    "cause": "prctl blocked (rare; nested container without privileges).",
+    "fix": "Run the panel outside an unprivileged container.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-seccomp-install-failed": {
+    "error": "[ASF] cannot install seccomp filter: <errno>",
+    "cause": "seccomp already restricted by an outer sandbox.",
+    "fix": "Relax the outer sandbox, or accept the systemd fallback.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-invalid-port": {
+    "error": "[ASF] invalid assigned port",
+    "cause": "--port outside 1-65535.",
+    "fix": "Panel bug; report it. Port comes from the server row.",
+    "httpStatus": "",
+    "exitCode": "64"
+  },
+  "asf-invalid-identity": {
+    "error": "[ASF] invalid isolated identity",
+    "cause": "--uid/--gid outside 1-2147483647.",
+    "fix": "Panel bug; report it.",
+    "httpStatus": "",
+    "exitCode": "64"
+  },
+  "asf-pdeathsig-failed": {
+    "error": "[ASF] cannot bind workload lifetime to supervisor",
+    "cause": "Parent died between fork and prctl.",
+    "fix": "Transient; the panel restarts the server.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-invalid-root": {
+    "error": "[ASF] invalid server root: <errno>",
+    "cause": "realpath() failed — root missing or unreadable.",
+    "fix": "Recreate the server folder or run Repair & Diagnose.",
+    "httpStatus": "",
+    "exitCode": "66"
+  },
+  "asf-root-not-directory": {
+    "error": "[ASF] server root is not a directory",
+    "cause": "server_path points at a file.",
+    "fix": "Fix server_path in the database or recreate the server.",
+    "httpStatus": "",
+    "exitCode": "66"
+  },
+  "asf-chdir-failed": {
+    "error": "[ASF] cannot enter server root: <errno>",
+    "cause": "Missing execute permission on the root.",
+    "fix": "Run `nexuspanel permissions repair`.",
+    "httpStatus": "",
+    "exitCode": "66"
+  },
+  "asf-uid-gid-mismatch": {
+    "error": "[ASF] both isolated uid and gid are required",
+    "cause": "Only one of --uid/--gid supplied.",
+    "fix": "Panel bug; report it.",
+    "httpStatus": "",
+    "exitCode": "64"
+  },
+  "asf-setresuid-failed": {
+    "error": "[ASF] cannot enter isolated uid/gid: <errno>",
+    "cause": "setresuid/setresgid failed — usually the identity user was deleted.",
+    "fix": "Delete and recreate the server, or re-run the ASF doctor.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-identity-verify-failed": {
+    "error": "[ASF] isolated identity verification failed",
+    "cause": "getresuid/getresgid did not match the target after the drop.",
+    "fix": "Kernel/container quirk; the panel retries with compatibility isolation.",
+    "httpStatus": "",
+    "exitCode": "77"
+  },
+  "asf-root-too-long": {
+    "error": "[ASF] server root is too long",
+    "cause": "Path exceeds 4096 bytes.",
+    "fix": "Shorten the server name / move the install to a shorter path.",
+    "httpStatus": "",
+    "exitCode": "66"
+  },
+  "asf-private-tmp-failed": {
+    "error": "[ASF] cannot create private temporary directory: <errno>",
+    "cause": "Root not writable.",
+    "fix": "Run `nexuspanel permissions repair`.",
+    "httpStatus": "",
+    "exitCode": "66"
+  },
+  "asf-exec-not-found": {
+    "error": "[ASF] cannot execute <path>: No such file or directory",
+    "cause": "The payload binary is missing.",
+    "fix": "Reinstall the server software.",
+    "httpStatus": "",
+    "exitCode": "127"
+  },
+  "asf-exec-not-executable": {
+    "error": "[ASF] cannot execute <path>: Permission denied",
+    "cause": "Missing execute bit or a noexec mount.",
+    "fix": "Reinstall software, or remount without noexec.",
+    "httpStatus": "",
+    "exitCode": "126"
+  },
+  "auth-invalid-credentials": {
+    "error": "Invalid email or password.",
+    "cause": "Email not found OR password mismatch (deliberately identical).",
+    "fix": "Check credentials. After 5 failures the account throttles.",
+    "httpStatus": "401",
+    "exitCode": ""
+  },
+  "auth-throttled": {
+    "error": "Too many login attempts. Try again in <n> seconds.",
+    "cause": "5 account failures or 10 IP failures within 15 minutes.",
+    "fix": "Wait for the backoff window (exponential, capped at 1 hour).",
+    "httpStatus": "429",
+    "exitCode": ""
+  },
+  "auth-session-expired": {
+    "error": "Your session expired. Sign in again.",
+    "cause": "12h absolute TTL or 2h idle timeout.",
+    "fix": "Sign in again.",
+    "httpStatus": "401",
+    "exitCode": ""
+  },
+  "auth-user-agent-mismatch": {
+    "error": "",
+    "cause": "Cookie stolen and replayed from a different browser.",
+    "fix": "Sign in again; the stolen cookie is now dead.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "auth-account-expired": {
+    "error": "",
+    "cause": "expires_at passed.",
+    "fix": "Owner recreates the admin with a new expiry.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "auth-setup-token-invalid": {
+    "error": "Invalid or expired setup link.",
+    "cause": "Wrong/missing x-nexuspanel-setup-token.",
+    "fix": "Run `nexuspanel setup-url` for a fresh link.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "auth-setup-already-complete": {
+    "error": "Initial setup has already been completed.",
+    "cause": "A user already exists.",
+    "fix": "Sign in normally.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "auth-email-invalid": {
+    "error": "Enter a valid email address.",
+    "cause": "Missing '@' or length > 254.",
+    "fix": "Enter a valid email.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "auth-name-invalid": {
+    "error": "Name must be between 2 and 100 characters.",
+    "cause": "",
+    "fix": "Use 2-100 characters.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "auth-password-too-short": {
+    "error": "Password must be between 12 and 256 characters.",
+    "cause": "",
+    "fix": "Use at least 12 characters.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "auth-password-mismatch": {
+    "error": "Passwords do not match.",
+    "cause": "",
+    "fix": "Re-enter the confirmation.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "auth-email-taken": {
+    "error": "That email address is already registered.",
+    "cause": "",
+    "fix": "Use a different email or sign in.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "auth-otp-invalid": {
+    "error": "Invalid OTP.",
+    "cause": "Wrong 6-digit code (constant-time compared).",
+    "fix": "Re-enter the code. 5 attempts max.",
+    "httpStatus": "401",
+    "exitCode": ""
+  },
+  "auth-otp-expired": {
+    "error": "OTP expired. Request a new code.",
+    "cause": "10-minute OTP TTL passed.",
+    "fix": "Request a new code.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "auth-otp-too-many-attempts": {
+    "error": "Too many OTP attempts. Request a new code.",
+    "cause": "5 failed OTP attempts.",
+    "fix": "Request a new code.",
+    "httpStatus": "429",
+    "exitCode": ""
+  },
+  "auth-otp-rate-limited": {
+    "error": "Wait one minute before requesting another code.",
+    "cause": "Two forgot-password requests within 60s.",
+    "fix": "Wait 60 seconds.",
+    "httpStatus": "429",
+    "exitCode": ""
+  },
+  "auth-otp-delivery-failed": {
+    "error": "Email delivery failed. Owner can read data/password-reset-otp.log on the VPS.",
+    "cause": "SMTP not configured or unreachable.",
+    "fix": "Read the OTP from data/password-reset-otp.log.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "auth-csrf-blocked": {
+    "error": "Request verification failed.",
+    "cause": "Missing x-nexuspanel-request: 1 header on a mutating request.",
+    "fix": "Use the panel UI; direct API calls must send the header.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "auth-cross-site-blocked": {
+    "error": "Cross-site request blocked.",
+    "cause": "Sec-Fetch-Site header indicates a cross-site origin.",
+    "fix": "Only same-origin requests are accepted.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "auth-host-maintenance": {
+    "error": "Host maintenance is active. Only the panel owner can sign in.",
+    "cause": "host_maintenance_mode=1 in host edition.",
+    "fix": "Owner disables maintenance mode.",
+    "httpStatus": "503",
+    "exitCode": ""
+  },
+  "perm-runtime-protected": {
+    "error": "NexusPanel runtime files are protected.",
+    "cause": "A file operation targeted the `runtime/` folder.",
+    "fix": "Runtime files are managed by the installer; do not edit them.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "perm-metadata-protected": {
+    "error": "NexusPanel metadata files are protected. Resource limits are enforced from the database, not editable server files.",
+    "cause": "A file operation targeted `.nexus-server.json` / `.nexus-mark.json` / `.nexuspanel`.",
+    "fix": "Change limits in the server settings, not in files.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "perm-symlink-blocked": {
+    "error": "Symlinks are blocked in the server file manager.",
+    "cause": "A path component is a symlink (escape attempt).",
+    "fix": "Use real paths inside the server root.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "perm-root-symlink-blocked": {
+    "error": "Server root symlinks are blocked.",
+    "cause": "The server root itself is a symlink.",
+    "fix": "Recreate the server folder as a real directory.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "perm-path-escapes-storage": {
+    "error": "Path escapes NexusPanel storage.",
+    "cause": "assertInside detected `..` traversal or an absolute path outside the root.",
+    "fix": "Use a relative path inside the server root.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "perm-plugin-name-invalid": {
+    "error": "Plugin file name must be a plain file name.",
+    "cause": "The plugin filename contained a path separator.",
+    "fix": "Provide just the filename, e.g. MyPlugin.jar.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-name-required": {
+    "error": "Server name is required.",
+    "cause": "",
+    "fix": "Use at least 2 characters.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "server-software-incompatible": {
+    "error": "Selected software is not compatible with this server type.",
+    "cause": "Java software chosen for a Bedrock server (or vice versa).",
+    "fix": "Pick software matching the server edition.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "server-already-running": {
+    "error": "Server already running.",
+    "cause": "startServer called while the process is live.",
+    "fix": "No action needed.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-not-installed": {
+    "error": "Install server software before starting.",
+    "cause": "executable_path missing or the file does not exist.",
+    "fix": "Install software from the Software tab.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-eula-required": {
+    "error": "Agree to the Minecraft EULA first.",
+    "cause": "",
+    "fix": "Accept the EULA in the panel.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "server-no-runtime": {
+    "error": "This Nexu template needs an installer/runtime before it can start.",
+    "cause": "",
+    "fix": "Run the template installer (owner + full access).",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "server-stop-before-delete": {
+    "error": "Stop the server before deleting it.",
+    "cause": "",
+    "fix": "Stop the server, then delete.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "server-stop-before-port-change": {
+    "error": "Stop the server before changing its game port.",
+    "cause": "",
+    "fix": "Stop the server, change the port, restart.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "server-port-invalid": {
+    "error": "Server port must be an integer between 1024 and 65535.",
+    "cause": "",
+    "fix": "Choose a port in 1024-65535.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "server-port-collision": {
+    "error": "Port <n> is already allocated to <name>.",
+    "cause": "",
+    "fix": "Choose a free port.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "server-port-verify-failed": {
+    "error": "Port verification failed after saving.",
+    "cause": "server.properties write did not persist the port.",
+    "fix": "Check file permissions; run Repair & Diagnose.",
+    "httpStatus": "500",
+    "exitCode": ""
+  },
+  "server-port-profile-rollback": {
+    "error": "Port changed in database but ASF profile regeneration failed; change was rolled back.",
+    "cause": "writeProfile threw after the DB update.",
+    "fix": "Check data/asf/ is writable.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-command-empty": {
+    "error": "Command is empty.",
+    "cause": "",
+    "fix": "Enter a console command.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-not-running": {
+    "error": "Server is not running.",
+    "cause": "sendCommand on an offline server.",
+    "fix": "Start the server first.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-console-command-empty": {
+    "error": "Console command is empty.",
+    "cause": "",
+    "fix": "Enter a command.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-whitelist-name-required": {
+    "error": "Player name is required.",
+    "cause": "",
+    "fix": "Enter a player name (2+ chars).",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "server-whitelist-java-format": {
+    "error": "Java usernames must be 3-16 letters, numbers, or underscores.",
+    "cause": "",
+    "fix": "Use a valid Java username.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "server-world-convert-same-edition": {
+    "error": "Choose the opposite edition for conversion.",
+    "cause": "",
+    "fix": "Pick Java→Bedrock or Bedrock→Java.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-world-convert-online": {
+    "error": "Stop the source server before converting its world.",
+    "cause": "",
+    "fix": "Stop the server first.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-converter-missing": {
+    "error": "Chunker CLI is not installed. Install the converter first.",
+    "cause": "",
+    "fix": "Install the world converter from Settings.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-converter-no-jar": {
+    "error": "No Chunker CLI jar was found in the latest GitHub release. Download the CLI jar manually into data/tools/chunker-cli.jar.",
+    "cause": "",
+    "fix": "Download the jar manually.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-converter-release-failed": {
+    "error": "Chunker release lookup failed with <status>",
+    "cause": "GitHub API rate limit or network issue.",
+    "fix": "Retry later or download manually.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-tombstoned": {
+    "error": "",
+    "cause": "SQLite reuses ids after deletion.",
+    "fix": "Expected behaviour; no action.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "server-quota-exceeded": {
+    "error": "Host server quota reached.",
+    "cause": "host_server_quota limit hit in host edition.",
+    "fix": "Owner raises the quota.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-version-resolve-failed": {
+    "error": "Could not resolve a downloadable version for <software>.",
+    "cause": "Upstream API (PaperMC/Mojang/Fabric) unreachable or version invalid.",
+    "fix": "Check network, retry, or pick a different version.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-download-404": {
+    "error": "Download URL returned 404: <url>",
+    "cause": "The selected version was removed upstream.",
+    "fix": "Pick a different version.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-download-failed": {
+    "error": "Download failed: <status>",
+    "cause": "Upstream HTTP error.",
+    "fix": "Retry; the panel retries 3 times automatically.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-download-incomplete": {
+    "error": "Download incomplete: <received>/<total> bytes",
+    "cause": "Connection dropped mid-download.",
+    "fix": "Retry; the panel re-downloads.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-jar-invalid": {
+    "error": "<software> download is not a valid jar. Recheck the selected version and retry.",
+    "cause": "The file is not a ZIP (jar) — wrong URL or HTML error page.",
+    "fix": "Pick a different version.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-jar-missing": {
+    "error": "<software> download did not create a jar file.",
+    "cause": "The download path was not written.",
+    "fix": "Check disk space and permissions.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-forge-no-args": {
+    "error": "Forge installer finished but no launch args or Forge jar was found.",
+    "cause": "The Forge installer failed silently.",
+    "fix": "Check the install log; retry with a different Forge version.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-forge-installer-failed": {
+    "error": "Forge installer exited non-zero.",
+    "cause": "Java version mismatch or corrupt download.",
+    "fix": "Install the correct Java version, retry.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-bedrock-no-binary": {
+    "error": "Bedrock archive extracted but server executable was not found.",
+    "cause": "Unexpected archive layout.",
+    "fix": "Reinstall Bedrock.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-bedrock-extract-failed": {
+    "error": "Failed to extract zip.",
+    "cause": "Corrupt download or missing unzip.",
+    "fix": "Install unzip (`apt install -y unzip`), retry.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-pocketmine-invalid-phar": {
+    "error": "PocketMine file is not a valid PHAR. Reinstall PocketMine from the Software tab.",
+    "cause": "Corrupt or wrong file.",
+    "fix": "Reinstall PocketMine.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-pocketmine-php-missing": {
+    "error": "PocketMine bundled PHP is missing or broken. Reinstall PocketMine from the Software tab.",
+    "cause": "PHP runtime download/extract failed.",
+    "fix": "Reinstall PocketMine.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-pocketmine-php-asset-missing": {
+    "error": "No compatible asset found in pmmp/PHP-Binaries latest release.",
+    "cause": "Upstream release layout changed.",
+    "fix": "Report; install PHP manually.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-nexu-no-commands": {
+    "error": "This Nexu template has no installer commands.",
+    "cause": "The template defines no runtime.install.commands.",
+    "fix": "Edit the template or use a standard software.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-nexu-executable-missing": {
+    "error": "Nexu install finished but executable was not found: <path>",
+    "cause": "The installer did not produce the expected binary.",
+    "fix": "Check the install log; fix the template's executable path.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-nexu-owner-required": {
+    "error": "Only the owner can run Nexu template installer commands.",
+    "cause": "Nexu installers run arbitrary shell; gated to owner.",
+    "fix": "Sign in as owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "install-nexu-full-access-required": {
+    "error": "Unlock time-limited owner full access before running Nexu installer commands.",
+    "cause": "",
+    "fix": "Unlock full access in Security, then retry.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "install-steamcmd-missing": {
+    "error": "SteamCMD missing. Installing requirement...",
+    "cause": "steamcmd not installed for a steamcmd-mode template.",
+    "fix": "Automatic; the panel installs it.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-java-required": {
+    "error": "<software> <version> requires Java <n>, but this VPS is running Java <m>.",
+    "cause": "Java too old for the Minecraft version.",
+    "fix": "Install Java <n>+ or pick an older Minecraft version.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-java-not-found": {
+    "error": "Java runtime was not found in PATH. Install Java 21+ (Linux: apt install -y openjdk-21-jre-headless) then restart the server.",
+    "cause": "",
+    "fix": "Install Java.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-bundled-java-broken": {
+    "error": "Bundled Java cannot be executed: <reason>",
+    "cause": "The bundled runtime lost its execute bit or is on a noexec mount.",
+    "fix": "Reinstall software, or remount without noexec.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-disk-full": {
+    "error": "ENOSPC: no space left on device",
+    "cause": "Disk full during download/extract.",
+    "fix": "Free disk space, retry.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-permission-denied": {
+    "error": "EACCES: permission denied",
+    "cause": "The panel user cannot write the server root.",
+    "fix": "Run `nexuspanel permissions repair`.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "install-progress-stuck": {
+    "error": "",
+    "cause": "The install promise rejected without updating status.",
+    "fix": "Check install_message; retry the install.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "java-missing": {
+    "error": "Java runtime was not found in PATH.",
+    "cause": "",
+    "fix": "apt install -y openjdk-21-jre-headless",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "java-too-old": {
+    "error": "requires Java <n>, but this VPS is running Java <m>.",
+    "cause": "",
+    "fix": "Install the newer JDK.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "file-path-required": {
+    "error": "Choose a file path inside the server folder.",
+    "cause": "",
+    "fix": "Provide a relative path.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-not-found": {
+    "error": "Path not found.",
+    "cause": "",
+    "fix": "Check the path.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "file-download-not-found": {
+    "error": "Download file not found.",
+    "cause": "",
+    "fix": "Check the path.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "file-preview-not-found": {
+    "error": "File not found.",
+    "cause": "",
+    "fix": "Check the path.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "file-preview-download-only": {
+    "error": "This file type is download-only.",
+    "cause": "The extension is not previewable.",
+    "fix": "Download the file.",
+    "httpStatus": "415",
+    "exitCode": ""
+  },
+  "file-preview-signature-mismatch": {
+    "error": "File signature does not match its extension.",
+    "cause": "Magic bytes do not match the claimed type (spoofing attempt).",
+    "fix": "Rename the file to its real type.",
+    "httpStatus": "415",
+    "exitCode": ""
+  },
+  "file-upload-not-binary": {
+    "error": "Upload body must be binary.",
+    "cause": "",
+    "fix": "Send application/octet-stream.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-upload-chunk-not-binary": {
+    "error": "Upload chunk body must be binary.",
+    "cause": "",
+    "fix": "Send application/octet-stream.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-upload-offset-invalid": {
+    "error": "Invalid upload offset.",
+    "cause": "",
+    "fix": "Send a non-negative integer offset.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-upload-size-invalid": {
+    "error": "Invalid upload size.",
+    "cause": "",
+    "fix": "Send a total size >= the chunk length.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-upload-chunk-exceeds": {
+    "error": "Chunk exceeds declared upload size.",
+    "cause": "",
+    "fix": "Fix the offset/size math.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-upload-too-large": {
+    "error": "Upload exceeds the configured size limit.",
+    "cause": "totalSize > NEXUSPANEL_MAX_UPLOAD_GB (default 50 GB).",
+    "fix": "Raise the env var or split the file.",
+    "httpStatus": "413",
+    "exitCode": ""
+  },
+  "file-upload-chunk-hash-mismatch": {
+    "error": "Chunk checksum mismatch. Retrying this chunk is safe.",
+    "cause": "",
+    "fix": "Retry the chunk.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "file-upload-final-hash-mismatch": {
+    "error": "Final file checksum mismatch. Retry the upload.",
+    "cause": "",
+    "fix": "Re-upload the file.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "file-upload-size-mismatch": {
+    "error": "Upload size mismatch. Retry the file.",
+    "cause": "",
+    "fix": "Re-upload.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "file-upload-missing-chunks": {
+    "error": "Upload has missing chunks. Reselect the same file to resume.",
+    "cause": "",
+    "fix": "Resume the upload.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "file-upload-canceled": {
+    "error": "Upload was canceled.",
+    "cause": "",
+    "fix": "Start a new upload.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "file-upload-session-missing": {
+    "error": "Upload session file was not found.",
+    "cause": "",
+    "fix": "Restart the upload.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "file-upload-session-not-found": {
+    "error": "Upload session was not found.",
+    "cause": "",
+    "fix": "Restart the upload.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "file-upload-path-required": {
+    "error": "Choose a destination file path.",
+    "cause": "",
+    "fix": "Provide a path.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-upload-progress-path-required": {
+    "error": "Choose an upload path.",
+    "cause": "",
+    "fix": "Provide a path.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-mkdir-name-required": {
+    "error": "Folder name is required.",
+    "cause": "",
+    "fix": "Provide a folder name.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-delete-root-blocked": {
+    "error": "Cannot delete the server root.",
+    "cause": "",
+    "fix": "Delete the server instead.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-copy-root-blocked": {
+    "error": "Cannot copy the server root.",
+    "cause": "",
+    "fix": "Select items inside the root.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-move-root-blocked": {
+    "error": "Cannot move the server root.",
+    "cause": "",
+    "fix": "Select items inside the root.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-archive-root-blocked": {
+    "error": "Cannot archive the server root directly. Select files or folders inside it.",
+    "cause": "",
+    "fix": "Select items inside the root.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-extract-not-zip": {
+    "error": "Select one or more .zip files to unzip.",
+    "cause": "",
+    "fix": "Select .zip files.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "file-extract-not-file": {
+    "error": "<path> is not a file.",
+    "cause": "",
+    "fix": "Select a file.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "file-extract-invalid-zip": {
+    "error": "<path> is not a complete valid ZIP. It may be an unfinished upload/download. Re-upload it or use a fresh backup/archive.",
+    "cause": "",
+    "fix": "Re-upload the archive.",
+    "httpStatus": "422",
+    "exitCode": ""
+  },
+  "file-extract-protected-entry": {
+    "error": "Archive contains protected NexusPanel metadata/runtime path: <entry>",
+    "cause": "The zip contains runtime/ or metadata paths.",
+    "fix": "Use a clean archive.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "file-extract-zip-slip": {
+    "error": "Archive entry escapes the extraction folder and was blocked: <entry>",
+    "cause": "Zip Slip attack — an entry with `../` or an absolute path.",
+    "fix": "The archive is malicious; do not extract it.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "file-extract-absolute-entry": {
+    "error": "Archive entry uses an absolute path and was blocked: <entry>",
+    "cause": "Zip Slip variant.",
+    "fix": "Reject the archive.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "file-extract-collisions": {
+    "error": "Extract would replace <n> existing file(s). Choose Replace all or Skip existing.",
+    "cause": "",
+    "fix": "Choose a mode.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "file-archive-protected": {
+    "error": "Cannot archive protected NexusPanel metadata/runtime path: <entry>",
+    "cause": "",
+    "fix": "Deselect protected paths.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "file-unzip-missing": {
+    "error": "unzip is required to extract zip files. Run: apt install -y unzip",
+    "cause": "",
+    "fix": "Install unzip.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "file-tar-missing": {
+    "error": "tar is required to extract this archive.",
+    "cause": "",
+    "fix": "Install tar.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "file-archive-write-stopped": {
+    "error": "Archive write stopped before the ZIP was complete.",
+    "cause": "Disk full or I/O error during zip creation.",
+    "fix": "Free disk space, retry.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "file-archive-transient": {
+    "error": "",
+    "cause": "Files changed during archiving.",
+    "fix": "Expected; retry if the archive is incomplete.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "file-edit-timeline": {
+    "error": "Captured state before editing <path>.",
+    "cause": "Normal — every edit creates a recovery point.",
+    "fix": "No action.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "file-upload-40mb-limit": {
+    "error": "request entity too large",
+    "cause": "Single-shot upload > 40 MB.",
+    "fix": "Use chunked upload (the UI does this automatically).",
+    "httpStatus": "413",
+    "exitCode": ""
+  },
+  "backup-restore-not-found": {
+    "error": "Backup not found.",
+    "cause": "",
+    "fix": "Refresh the backup list.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "backup-restore-online": {
+    "error": "Stop the server before restoring a backup.",
+    "cause": "",
+    "fix": "Stop the server first.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "backup-invalid-archive": {
+    "error": "Backup is not a valid ZIP.",
+    "cause": "",
+    "fix": "Choose a valid backup.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "backup-public-link-owner-only": {
+    "error": "Only the server owner can publish backup links.",
+    "cause": "",
+    "fix": "Sign in as the server owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "backup-public-link-invalid": {
+    "error": "Public backup link is invalid, expired, or revoked.",
+    "cause": "",
+    "fix": "Generate a new link.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "backup-public-direct-download": {
+    "error": "Direct browser downloads are disabled. Paste this URL into NexusPanel Import Backup.",
+    "cause": "By design — prevents hotlinking.",
+    "fix": "Use the Import Backup feature.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "backup-transfer-header-missing": {
+    "error": "This backup can only be transferred by NexusPanel.",
+    "cause": "Missing x-nexuspanel-transfer: backup-v1 header.",
+    "fix": "Use the panel's import feature.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "backup-import-url-invalid": {
+    "error": "Enter a valid public backup URL.",
+    "cause": "",
+    "fix": "Provide a valid URL.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "backup-import-not-nexuspanel": {
+    "error": "This is not a NexusPanel public backup URL.",
+    "cause": "The URL lacks /api/public/backups/.",
+    "fix": "Use a NexusPanel backup URL.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "backup-import-private-address": {
+    "error": "Backup imports cannot connect to local or private network addresses.",
+    "cause": "SSRF defense — the host resolves to a private IP.",
+    "fix": "Use a public host.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "backup-import-http-error": {
+    "error": "Remote panel returned HTTP <status>.",
+    "cause": "",
+    "fix": "Check the remote panel.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "backup-import-too-large": {
+    "error": "Remote backup is larger than the configured import limit.",
+    "cause": "content-length > NEXUSPANEL_MAX_REMOTE_BACKUP_GB (default 20 GB).",
+    "fix": "Raise the env var.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "backup-import-exceeded": {
+    "error": "Remote backup exceeded the configured import limit.",
+    "cause": "Streamed bytes exceeded the limit mid-transfer.",
+    "fix": "Raise the env var.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "backup-import-not-zip": {
+    "error": "Remote file is not a valid ZIP backup.",
+    "cause": "",
+    "fix": "Verify the source.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "backup-share-code-owner-only": {
+    "error": "Only the source server owner can create backup codes.",
+    "cause": "",
+    "fix": "Sign in as the owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "backup-share-code-hide-owner-only": {
+    "error": "Only the source server owner can hide backup codes.",
+    "cause": "",
+    "fix": "Sign in as the owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "plugin-extension-unsupported": {
+    "error": "Unsupported plugin or pack extension.",
+    "cause": "",
+    "fix": "Use .jar, .phar, .mcpack, or .mcaddon.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "plugin-incompatible": {
+    "error": "<kind> is not compatible with <software>.",
+    "cause": "",
+    "fix": "Match the plugin type to the server software.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "plugin-modrinth-unsupported": {
+    "error": "Modrinth install supports Paper/Purpur plugins and Fabric/Forge mods.",
+    "cause": "",
+    "fix": "Use a supported software.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "plugin-modrinth-project-required": {
+    "error": "Modrinth project id is required.",
+    "cause": "",
+    "fix": "Provide a project id.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "plugin-modrinth-versions-failed": {
+    "error": "Modrinth versions failed: <status>",
+    "cause": "",
+    "fix": "Retry later.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "plugin-modrinth-no-file": {
+    "error": "No compatible Modrinth file found.",
+    "cause": "",
+    "fix": "Pick a different project or version.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "plugin-modrinth-search-failed": {
+    "error": "Modrinth search failed: <status>",
+    "cause": "",
+    "fix": "Retry later.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "plugin-poggit-pocketmine-only": {
+    "error": "Poggit plugins can only be installed on PocketMine servers.",
+    "cause": "",
+    "fix": "Use a PocketMine server.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "plugin-poggit-url-invalid": {
+    "error": "Invalid Poggit download URL.",
+    "cause": "The URL does not start with https://poggit.pmmp.io/.",
+    "fix": "Use a Poggit URL.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "plugin-poggit-search-failed": {
+    "error": "Poggit search failed: <status>",
+    "cause": "",
+    "fix": "Retry later.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "plugin-not-found": {
+    "error": "Plugin not found.",
+    "cause": "",
+    "fix": "Refresh the plugin list.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "plugin-no-server-permission": {
+    "error": "No permission for this server.",
+    "cause": "",
+    "fix": "Use a server you own.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "asf-build-failed": {
+    "error": "<compiler stderr>",
+    "cause": "",
+    "fix": "Install build-essential; check the compiler output.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "asf-self-test-failed": {
+    "error": "<stderr>",
+    "cause": "The built binary failed its own sandbox self-test.",
+    "fix": "Check kernel LSM support; the panel keeps the previous binary.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "asf-preflight-storage": {
+    "error": "preflight storage unavailable: <error>",
+    "cause": "data/asf/ not writable.",
+    "fix": "Fix permissions on the data directory.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "service-install-root": {
+    "error": "Root is required. Run: sudo npm run service:install",
+    "cause": "",
+    "fix": "Use sudo.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "service-systemd-required": {
+    "error": "Systemd is required for VPS background service mode.",
+    "cause": "",
+    "fix": "Use a systemd host.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "service-not-active": {
+    "error": "nexuspanel did not become active. Run: journalctl -u nexuspanel -n 100 --no-pager",
+    "cause": "",
+    "fix": "Read the journal.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "service-restart-failed": {
+    "error": "nexuspanel restart failed. Run: journalctl -u nexuspanel -n 100 --no-pager",
+    "cause": "",
+    "fix": "Read the journal.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "service-port-invalid": {
+    "error": "Panel port must be between 1 and 65535.",
+    "cause": "",
+    "fix": "Choose a valid port.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "service-user-root-warning": {
+    "error": "",
+    "cause": "",
+    "fix": "Prefer a non-root service user.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "service-journal-empty": {
+    "error": "",
+    "cause": "The unit never started.",
+    "fix": "`systemctl status nexuspanel` and `systemctl daemon-reload`.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "net-upload-test-body": {
+    "error": "Upload body must be binary.",
+    "cause": "",
+    "fix": "Send application/octet-stream.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "net-ngrok-not-installed": {
+    "error": "ngrok is not installed.",
+    "cause": "",
+    "fix": "Install ngrok from the Network tab.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "net-ngrok-token-missing": {
+    "error": "Save your ngrok auth token first.",
+    "cause": "",
+    "fix": "Save the token in Settings.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "net-playit-not-installed": {
+    "error": "Playit is not installed.",
+    "cause": "",
+    "fix": "Install Playit from the Network tab.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "net-playit-apt-only": {
+    "error": "Playit one-click install currently supports Ubuntu/Debian apt hosts.",
+    "cause": "",
+    "fix": "Install manually on other distros.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "net-playit-claim-owner-only": {
+    "error": "Only the owner can run the Playit claim terminal.",
+    "cause": "",
+    "fix": "Sign in as owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "net-tunnels-removed": {
+    "error": "Tunnels were removed. Use Templates or your VPS reverse proxy setup instead.",
+    "cause": "",
+    "fix": "Use a reverse proxy.",
+    "httpStatus": "410",
+    "exitCode": ""
+  },
+  "net-host-edition-tunnels": {
+    "error": "Normal-edition tunnel setup is not available in host edition.",
+    "cause": "",
+    "fix": "Use the normal edition.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "net-ssrf-private": {
+    "error": "Backup imports cannot connect to local or private network addresses.",
+    "cause": "The host resolves to 10.x/172.16-31.x/192.168.x/127.x/169.254.x/::1/fc00::/fd00::/fe80::.",
+    "fix": "Use a public host.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "net-dns-rebinding": {
+    "error": "",
+    "cause": "",
+    "fix": "Expected defense.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "net-host-header-injection": {
+    "error": "",
+    "cause": "",
+    "fix": "Expected defense.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "net-xaccel-path-escape": {
+    "error": "",
+    "cause": "",
+    "fix": "Expected defense.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "db-snapshot-failed": {
+    "error": "Database snapshot failed: <error>",
+    "cause": "",
+    "fix": "Check disk space.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "db-locked": {
+    "error": "SQLITE_BUSY: database is locked",
+    "cause": "Concurrent write contention.",
+    "fix": "Retry; the panel uses WAL and BEGIN IMMEDIATE.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "db-unique-email": {
+    "error": "UNIQUE constraint failed: users.email",
+    "cause": "",
+    "fix": "Use a different email.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "db-verify-failed": {
+    "error": "Database verification failed.",
+    "cause": "",
+    "fix": "Restore from backup.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "db-backup-created": {
+    "error": "Database snapshot created.",
+    "cause": "",
+    "fix": "Informational.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-openrouter-no-key": {
+    "error": "OpenRouter API key is not configured.",
+    "cause": "",
+    "fix": "Save a key in Settings.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-openrouter-invalid-key": {
+    "error": "Invalid OpenRouter API key format.",
+    "cause": "The key does not match ^sk-or-v1-[A-Za-z0-9_-]{20,}$.",
+    "fix": "Paste a valid key.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-openrouter-http-error": {
+    "error": "<OpenRouter error message>",
+    "cause": "",
+    "fix": "Check the key, model, and quota.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-openrouter-no-model": {
+    "error": "No OpenRouter model selected.",
+    "cause": "",
+    "fix": "Select a model.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-openrouter-owner-only": {
+    "error": "Only the owner can configure external AI providers.",
+    "cause": "",
+    "fix": "Sign in as owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "ai-openrouter-chat-owner-only": {
+    "error": "Only the owner can use the external AI bridge.",
+    "cause": "",
+    "fix": "Sign in as owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "ai-openrouter-messages-invalid": {
+    "error": "messages must contain 1-40 items.",
+    "cause": "",
+    "fix": "Send 1-40 messages.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "ai-micro-reward-invalid": {
+    "error": "reward must be between -1 and 1.",
+    "cause": "",
+    "fix": "Send a reward in [-1, 1].",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "ai-micro-owner-only": {
+    "error": "Only the owner can update the MicroLM.",
+    "cause": "",
+    "fix": "Sign in as owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "ai-tool-unknown": {
+    "error": "Unknown AI tool.",
+    "cause": "",
+    "fix": "Use a registered tool.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "ai-tool-full-access-required": {
+    "error": "Unlock time-limited AI full access before running a mutating tool.",
+    "cause": "",
+    "fix": "Unlock full access.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "ai-tool-server-required": {
+    "error": "A server is required for this tool.",
+    "cause": "",
+    "fix": "Provide a serverId.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "ai-tool-owner-only": {
+    "error": "Only the owner can execute advanced AI tools.",
+    "cause": "",
+    "fix": "Sign in as owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "ai-tool-read-limit": {
+    "error": "AI text reads are limited to 512 KB files.",
+    "cause": "",
+    "fix": "Read a smaller file.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-tool-write-limit": {
+    "error": "AI writes require a path and are limited to 512 KB.",
+    "cause": "",
+    "fix": "Provide a path and smaller content.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-tool-console-empty": {
+    "error": "Console command is empty.",
+    "cause": "",
+    "fix": "Provide a command.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-tool-diagnostic-not-allowed": {
+    "error": "Terminal diagnostic command is not allowed: <cmd>",
+    "cause": "The command is not in the agent_terminal allowlist.",
+    "fix": "Use an allowlisted diagnostic.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-tool-diagnostic-arg-not-allowed": {
+    "error": "Terminal diagnostic argument is not allowed for <cmd>.",
+    "cause": "The argument failed the per-command regex or contained shell metacharacters.",
+    "fix": "Use a safe argument.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-tool-diagnostic-args-too-long": {
+    "error": "Terminal diagnostic argument list is too long.",
+    "cause": "",
+    "fix": "Use <= 32 arguments.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-tool-diagnostic-path-escape": {
+    "error": "Path escapes NexusPanel storage.",
+    "cause": "A path argument resolved outside the server root.",
+    "fix": "Use a path inside the server root.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-full-access-owner-only": {
+    "error": "Only the owner can unlock AI full access.",
+    "cause": "",
+    "fix": "Sign in as owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "ai-full-access-password": {
+    "error": "Owner password is required.",
+    "cause": "",
+    "fix": "Provide the owner password.",
+    "httpStatus": "401",
+    "exitCode": ""
+  },
+  "ai-command-queue-owner-only": {
+    "error": "Only the owner can queue host commands.",
+    "cause": "",
+    "fix": "Sign in as owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "ai-command-approve-owner-only": {
+    "error": "Only the owner can approve host commands.",
+    "cause": "",
+    "fix": "Sign in as owner.",
+    "httpStatus": "403",
+    "exitCode": ""
+  },
+  "ai-command-not-found": {
+    "error": "Queued command not found.",
+    "cause": "",
+    "fix": "Refresh the queue.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "ai-command-already-run": {
+    "error": "This command was already executed.",
+    "cause": "",
+    "fix": "Queue a new command.",
+    "httpStatus": "409",
+    "exitCode": ""
+  },
+  "ai-repair-web-host-blocked": {
+    "error": "Research source is not an allowed host.",
+    "cause": "repair_web only allows specific hosts.",
+    "fix": "Expected defense.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-repair-web-http-error": {
+    "error": "Research source returned HTTP <status>.",
+    "cause": "",
+    "fix": "Retry later.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-repair-web-private": {
+    "error": "Research source resolves to a private address.",
+    "cause": "",
+    "fix": "Expected defense.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-repair-episode-feedback": {
+    "error": "reward must be between -1 and 1.",
+    "cause": "",
+    "fix": "Send a valid reward.",
+    "httpStatus": "400",
+    "exitCode": ""
+  },
+  "ai-repair-episode-not-found": {
+    "error": "Repair episode not found.",
+    "cause": "",
+    "fix": "Refresh.",
+    "httpStatus": "404",
+    "exitCode": ""
+  },
+  "ai-advanced-install-failed": {
+    "error": "Advanced AI install failed: <error>",
+    "cause": "The @huggingface/transformers package or model download failed.",
+    "fix": "Check network and disk space.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ai-world-converter-install-failed": {
+    "error": "Chunker install failed: <error>",
+    "cause": "",
+    "fix": "Check network.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-toast-generic": {
+    "error": "",
+    "cause": "",
+    "fix": "Read the message.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-servers": {
+    "error": "No servers yet. Create one from Dashboard or Templates.",
+    "cause": "",
+    "fix": "Create a server.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-console": {
+    "error": "No servers yet. Create one above, then install software from the Software tab.",
+    "cause": "",
+    "fix": "Create a server.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-templates": {
+    "error": "No templates available.",
+    "cause": "",
+    "fix": "Import a Nexu template.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-software": {
+    "error": "No software available.",
+    "cause": "",
+    "fix": "Check the software catalog.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-plugins-locked": {
+    "error": "Plugin manager is locked until file access level 80.",
+    "cause": "",
+    "fix": "Owner grants plugins.manage.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-plugins-none": {
+    "error": "No plugins installed for this server yet. Search Modrinth above.",
+    "cause": "",
+    "fix": "Install a plugin.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-modrinth": {
+    "error": "Select Paper/Purpur for plugins or Fabric/Forge for mods.",
+    "cause": "",
+    "fix": "Choose compatible software.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-bedrock-packs": {
+    "error": "Bedrock Dedicated Server packs need behavior/resource pack registration. Use File Manager for now; PocketMine plugins are available after switching software.",
+    "cause": "",
+    "fix": "Upload packs manually.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-properties": {
+    "error": "Create a server to edit properties.",
+    "cause": "",
+    "fix": "Create a server.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-whitelist": {
+    "error": "Create a server to manage whitelist.",
+    "cause": "",
+    "fix": "Create a server.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-whitelist-none": {
+    "error": "No whitelisted players yet.",
+    "cause": "",
+    "fix": "Add a player.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-files": {
+    "error": "Create a server to browse files.",
+    "cause": "",
+    "fix": "Create a server.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-folder": {
+    "error": "Folder is empty. Create a file or paste config here.",
+    "cause": "",
+    "fix": "Create a file.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-preview": {
+    "error": "Safe inline preview is not available for this format. Download it to open with its native application.",
+    "cause": "",
+    "fix": "Download the file.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-backups": {
+    "error": "Create a server to manage backups.",
+    "cause": "",
+    "fix": "Create a server.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-backup-requests": {
+    "error": "No backup access requests.",
+    "cause": "",
+    "fix": "Informational.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-shared-backups": {
+    "error": "No shared backups approved for this server.",
+    "cause": "",
+    "fix": "Informational.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-optimizer-error": {
+    "error": "Error loading optimizer data.",
+    "cause": "",
+    "fix": "Check the API; retry.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-network": {
+    "error": "No network counters available on this OS.",
+    "cause": "/proc/net/dev missing (non-Linux).",
+    "fix": "Expected on non-Linux.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-admins": {
+    "error": "No admin users yet.",
+    "cause": "",
+    "fix": "Create an admin.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-fixed-loading": {
+    "error": "Loading fixed history...",
+    "cause": "",
+    "fix": "Wait.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-fixed-locked": {
+    "error": "Fixed history needs security access.",
+    "cause": "",
+    "fix": "Owner grants security.view.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-commands": {
+    "error": "No full access commands queued.",
+    "cause": "",
+    "fix": "Informational.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-fixed-none": {
+    "error": "No fixed events recorded in the last 24 hours.",
+    "cause": "",
+    "fix": "Informational.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-audit-locked": {
+    "error": "Security audit needs owner/admin access.",
+    "cause": "",
+    "fix": "Owner grants security.view.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-security-loading": {
+    "error": "Loading security status...",
+    "cause": "",
+    "fix": "Wait.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-health": {
+    "error": "Run a health check to verify panel folders, database, software, and Java.",
+    "cause": "",
+    "fix": "Run a health check.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-telemetry": {
+    "error": "No server telemetry available yet.",
+    "cause": "",
+    "fix": "Start a server.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-logins": {
+    "error": "No login events recorded yet.",
+    "cause": "",
+    "fix": "Informational.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-empty-state-command-search": {
+    "error": "No matching command.",
+    "cause": "",
+    "fix": "Broaden the search.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-terminal-removed": {
+    "error": "",
+    "cause": "",
+    "fix": "Use the console for server commands.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-upload-paused": {
+    "error": "Ready to resume exact chunks",
+    "cause": "",
+    "fix": "Resume the upload.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-upload-failed": {
+    "error": "Checksum mismatch; retry upload",
+    "cause": "",
+    "fix": "Re-upload.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-upload-waiting": {
+    "error": "Waiting for upload",
+    "cause": "",
+    "fix": "Start the upload.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-upload-active": {
+    "error": "Uploading",
+    "cause": "",
+    "fix": "Wait.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-upload-live": {
+    "error": "Uploading live",
+    "cause": "",
+    "fix": "Wait.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-privacy-shield": {
+    "error": "",
+    "cause": "",
+    "fix": "Toggle the privacy shield.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-theme-picker": {
+    "error": "",
+    "cause": "",
+    "fix": "Pick a theme.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-server-switcher": {
+    "error": "",
+    "cause": "",
+    "fix": "Pick a server.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-presence": {
+    "error": "",
+    "cause": "",
+    "fix": "Informational.",
+    "httpStatus": "",
+    "exitCode": ""
+  },
+  "ui-toast-hidden": {
+    "error": "",
+    "cause": "",
+    "fix": "Informational.",
+    "httpStatus": "",
+    "exitCode": ""
+  }
+}
