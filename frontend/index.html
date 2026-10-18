@@ -182,7 +182,6 @@
               <label>Port <input name="port" type="number" min="1024" max="65535"></label>
               <label id="serverOwnerConfigLabel" hidden>Assigned user <select name="ownerUserId"><option value="">Owner / unassigned</option></select></label>
               <label>Startup delay sec <input name="startupDelaySec" type="number" min="0" max="600" value="0"></label>
-              <label class="startup-flags-field">Java startup flags <textarea name="startupFlags" rows="3" placeholder="-Xms512M&#10;-XX:+UseG1GC"></textarea><small>One Java flag per line. NexusPanel keeps control of maximum memory and runtime paths.</small></label>
               <label class="switch"><input name="autoRestart" type="checkbox"><span></span>Auto restart</label>
               <label class="switch"><input name="autoStart" type="checkbox"><span></span>Auto start</label>
               <label class="switch"><input name="crashBackup" type="checkbox"><span></span>Crash backup</label>
@@ -219,7 +218,7 @@
               <button class="secondary" type="button" data-action="file-paste">Paste</button>
               <button class="secondary" type="button" data-action="file-new">New File</button>
               <button class="secondary" type="button" data-action="folder-new">New Folder</button>
-              <label class="file-search-label">Search files <input id="fileSearch" type="search" placeholder="Search this server..."></label>
+              <label class="file-search-label"><span>Search files</span><input id="fileSearch" type="search" placeholder="Search this server..."></label>
               <input id="fileUploadInput" type="file" multiple hidden>
               <code id="filePathLabel">/</code>
             </div>

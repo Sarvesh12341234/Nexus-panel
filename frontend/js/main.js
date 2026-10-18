@@ -1406,9 +1406,6 @@ function fillServerConfigForm(server, force = false) {
   form.cpuCores.title = state.user?.role === 'owner' ? 'Owner can change CPU allocation.' : 'Only the owner can change CPU allocation.';
   form.port.value = server.port;
   form.startupDelaySec.value = server.startupDelaySec || 0;
-  if (form.startupFlags) form.startupFlags.value = server.startupFlags || '';
-  const startupFlagsField = form.querySelector('.startup-flags-field');
-  if (startupFlagsField) startupFlagsField.hidden = server.type !== 'java';
   form.autoRestart.checked = Boolean(server.autoRestart);
   form.autoStart.checked = Boolean(server.autoStart);
   form.crashBackup.checked = Boolean(server.crashBackup);
@@ -2626,6 +2623,8 @@ function renderSettings() {
   const settings = state.settings || {};
   const update = settings.updateStatus || {};
   const isHost = settings.edition === 'host';
+  const server = activeServer();
+  const canManageServer = Boolean(server) && can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
   const canManageSettings = can(CAPABILITIES.SETTINGS_MANAGE, state.permissions.MANAGE_ADMINS);
   const selectedZone = settings.timeZone || 'UTC';
   const zoneOptions = timeZones.map((zone) => `<option value="${escapeHtml(zone)}" ${zone === selectedZone ? 'selected' : ''}>${escapeHtml(zone)}</option>`).join('');
@@ -2694,6 +2693,12 @@ function renderSettings() {
       </div>
       ${canManageSettings ? '<button class="save-wide" type="submit">Save Panel Settings</button>' : ''}
     </form>
+    ${server?.type === 'java' && canManageServer ? `
+    <form class="settings-group startup-settings" id="javaStartupFlagsForm" data-server-id="${Number(server.id)}">
+      <div><strong>Java startup options</strong><p class="muted">Server: ${escapeHtml(server.name)}. Add one JVM flag per line. NexusPanel controls the memory limit and Java runtime paths. Changes apply after the next restart.</p></div>
+      <label>Startup flags <textarea name="startupFlags" rows="4" placeholder="-Xms512M&#10;-XX:+UseG1GC">${escapeHtml(server.startupFlags || '')}</textarea></label>
+      <button type="submit">Save startup options</button>
+    </form>` : ''}
     ${canManageSettings ? `
     <div class="upload-panel">
       <span id="panelUpdateMessage">${escapeHtml(update.message || 'Updater idle')}</span>
@@ -4047,6 +4052,12 @@ elements.fileList.addEventListener('contextmenu', (event) => {
   showFileContextMenu(row, event.clientX, event.clientY);
 });
 
+elements.fileList.addEventListener('click', (event) => {
+  const row = event.target.closest('.file-row');
+  if (!row || event.target.closest('button, input, label, a, .file-open')) return;
+  showFileContextMenu(row, event.clientX, event.clientY);
+});
+
 document.querySelector('#fileSearch')?.addEventListener('input', (event) => {
   fileSearchQuery = event.target.value;
   window.clearTimeout(fileSearchTimer);
@@ -4200,6 +4211,19 @@ elements.whitelistForm.addEventListener('submit', async (event) => {
 });
 
 document.addEventListener('submit', async (event) => {
+  if (event.target.id === 'javaStartupFlagsForm') {
+    event.preventDefault();
+    const server = activeServer();
+    if (!server || String(server.id) !== event.target.dataset.serverId) return;
+    try {
+      await api(`/api/servers/${server.id}`, { method: 'PATCH', body: JSON.stringify({ startupFlags: event.target.elements.startupFlags.value }) });
+      showToast('Java startup options saved. Restart the server to apply them.');
+      await refresh();
+    } catch (error) {
+      showToast(error.message);
+    }
+    return;
+  }
   if (event.target.id !== 'settingsForm') return;
   event.preventDefault();
   try {
@@ -5598,8 +5622,7 @@ document.addEventListener('click', async (event) => {
       return;
     }
     if (action === 'file-show-context') {
-      const bounds = actionTarget.getBoundingClientRect();
-      showFileContextMenu(actionTarget, bounds.right, bounds.bottom);
+      showFileContextMenu(actionTarget, event.clientX, event.clientY);
       return;
     }
     if (action === 'file-open-context') {
