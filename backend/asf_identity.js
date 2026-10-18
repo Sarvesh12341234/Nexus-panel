@@ -110,8 +110,18 @@ function pathAncestors(target, stopAt = '/') {
   return [...new Set(result.filter((entry) => fs.existsSync(entry)))];
 }
 
-function grantTraversal(name, targets) {
-  const unique = [...new Set(targets.filter(Boolean).flatMap((target) => pathAncestors(target)))];
+function traversalPaths(targets, protectedRoot = '') {
+  const protectedPath = protectedRoot ? path.resolve(protectedRoot) : '';
+  return [...new Set(targets.filter(Boolean).flatMap((target) => pathAncestors(target)))]
+    .filter((entry) => {
+      if (!protectedPath) return true;
+      const relative = path.relative(protectedPath, path.resolve(entry));
+      return relative !== '' && (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative));
+    });
+}
+
+function grantTraversal(name, targets, protectedRoot = '') {
+  const unique = traversalPaths(targets, protectedRoot);
   if (!unique.length) return { ok: true };
   const result = run('setfacl', ['-m', `u:${name}:--x`, '--', ...unique], 20000);
   return result.status === 0
@@ -178,7 +188,7 @@ function launchExecutables(profile, nativeBinary = '') {
 function applyAcl(name, serverRoot, nativeBinary = '', extraExecutables = []) {
   const javaExecutables = javaRuntimeExecutables(serverRoot);
   const executableInputs = [...new Set([...extraExecutables, ...javaExecutables].filter(Boolean))];
-  const traversal = grantTraversal(name, [serversRoot, serverRoot, nativeBinary, ...executableInputs]);
+  const traversal = grantTraversal(name, [serversRoot, serverRoot, nativeBinary, ...executableInputs], serverRoot);
   if (!traversal.ok) return traversal;
 
   const access = run('setfacl', [
@@ -226,7 +236,7 @@ function applyAcl(name, serverRoot, nativeBinary = '', extraExecutables = []) {
     ...resolvedBinaries,
   ].filter((entry, index, values) => values.indexOf(entry) === index && fs.existsSync(entry));
 
-  const finalTraversal = grantTraversal(name, [serversRoot, serverRoot, nativeBinary, ...paths]);
+  const finalTraversal = grantTraversal(name, [serversRoot, serverRoot, nativeBinary, ...paths], serverRoot);
   if (!finalTraversal.ok) return finalTraversal;
 
   if (paths.length) {
@@ -383,4 +393,4 @@ function removeServerIdentity(serverId) {
   return { removed: true, name };
 }
 
-module.exports = { ensureServerIdentity, identityName, identitySupportStatus, removeServerIdentity };
+module.exports = { ensureServerIdentity, identityName, identitySupportStatus, removeServerIdentity, traversalPaths };
