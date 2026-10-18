@@ -1506,6 +1506,8 @@ function showFileContextMenu(file, x, y) {
   if (!menu) return;
   const openButton = menu.querySelector('[data-action="file-open-context"]');
   if (openButton) openButton.hidden = selectedFilePaths().length !== 1;
+  const trigger = row?.querySelector('.file-context-trigger');
+  if (trigger) trigger.setAttribute('aria-expanded', 'true');
   menu.hidden = false;
   const bounds = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - bounds.width - 8))}px`;
@@ -1515,6 +1517,7 @@ function showFileContextMenu(file, x, y) {
 function closeFileContextMenu() {
   const menu = document.querySelector('#fileContextMenu');
   if (menu) menu.hidden = true;
+  document.querySelectorAll('.file-context-trigger[aria-expanded="true"]').forEach((trigger) => trigger.setAttribute('aria-expanded', 'false'));
 }
 
 function findEditorText(direction = 1) {
@@ -2583,7 +2586,7 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
         <span class="file-main"><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === 'directory' ? 'Folder' : `${escapeHtml(fileTypeLabel(entry))} · ${formatBytes(entry.size)}`}</small></span>
       </button>
       <div class="file-meta"><code>${escapeHtml(entry.path)}</code><time>${entry.modifiedAt ? escapeHtml(formatPanelDate(entry.modifiedAt)) : ''}</time></div>
-      <button class="file-context-trigger" type="button" data-action="file-show-context" data-file-path="${escapeHtml(entry.path)}" aria-label="More actions for ${escapeHtml(entry.name)}">...</button>
+      <button class="file-context-trigger" type="button" data-action="file-show-context" data-file-path="${escapeHtml(entry.path)}" aria-label="More actions for ${escapeHtml(entry.name)}" aria-haspopup="menu" aria-expanded="false">...</button>
     </div>
   `).join('') || `<p class="empty-state">${escapeHtml(emptyText)}</p>`;
   applyFileManagerLayout();
@@ -4068,6 +4071,14 @@ elements.fileList.addEventListener('click', (event) => {
   const row = event.target.closest('.file-row');
   if (!row || event.target.closest('button, input, label, a, .file-open')) return;
   showFileContextMenu(row, event.clientX, event.clientY);
+});
+
+elements.fileList.addEventListener('click', (event) => {
+  const trigger = event.target.closest('.file-context-trigger');
+  if (!trigger) return;
+  event.preventDefault();
+  event.stopPropagation();
+  showFileContextMenu(trigger, event.clientX, event.clientY);
 });
 
 document.querySelector('#fileSearch')?.addEventListener('input', (event) => {

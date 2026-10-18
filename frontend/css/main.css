@@ -1318,6 +1318,10 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   display: none;
 }
 
+#view-files[data-file-layout] .file-context-menu[hidden] {
+  display: none;
+}
+
 .file-context-menu button {
   justify-content: flex-start;
   min-height: 38px;
