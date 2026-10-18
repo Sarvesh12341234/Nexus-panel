@@ -5786,8 +5786,13 @@ app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
   });
   const response = await fetch(`https://api.modrinth.com/v2/search?${params}`, {
     headers: { 'User-Agent': 'NexusPanel/2.0 (+https://github.com/Sarvesh12341234/Nexus-panel)' },
+    signal: AbortSignal.timeout(12000),
   });
-  if (!response.ok) throw new Error(`Modrinth search failed: ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`Modrinth search returned HTTP ${response.status}. Try again shortly.`);
+    error.statusCode = 502;
+    throw error;
+  }
   const data = await response.json();
   res.json({
     source: 'modrinth',
@@ -5842,8 +5847,13 @@ app.get('/api/modrinth/versions', requireAuth, asyncRoute(async (req, res) => {
 async function poggitReleases() {
   const response = await fetch('https://poggit.pmmp.io/releases.min.json', {
     headers: { 'User-Agent': 'NexusPanel/2.0 (+https://github.com/Sarvesh12341234/Nexus-panel)' },
+    signal: AbortSignal.timeout(12000),
   });
-  if (!response.ok) throw new Error(`Poggit search failed: ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`Poggit search returned HTTP ${response.status}. Try again shortly.`);
+    error.statusCode = 502;
+    throw error;
+  }
   return response.json();
 }
 

@@ -31,6 +31,7 @@ const state = {
   serverStatusSignature: '',
   playitTerminalTimer: null,
   pluginSearchSignature: '',
+  pluginMarketplaceRequestId: 0,
   pendingSoftwareSelection: null,
   viewScroll: {},
   shellScroll: { sidebarTop: 0, navTop: 0 },
@@ -2218,18 +2219,22 @@ async function loadPluginMarketplace({ featured = false } = {}) {
   const source = server.softwareKey === 'pocketmine' ? 'poggit' : 'modrinth';
   const query = featured ? '' : String(payload.query || '');
   const loader = source === 'modrinth' ? String(payload.loader || '') : '';
-  const gameVersion = source === 'modrinth' ? String(payload.gameVersion || '') : '';
+  const selectedGameVersion = source === 'modrinth' ? String(payload.gameVersion || '') : '';
+  const gameVersion = selectedGameVersion === 'Loading versions...' ? String(server.softwareVersion || '') : selectedGameVersion;
   const projectType = source === 'modrinth' ? String(payload.projectType || 'plugin') : '';
   const signature = `${source}:${server.id}:${query}:${loader}:${gameVersion}:${projectType}`;
   if (featured && state.pluginSearchSignature === signature && elements.modrinthGrid.children.length) return;
   state.pluginSearchSignature = signature;
+  const requestId = ++state.pluginMarketplaceRequestId;
   elements.modrinthGrid.innerHTML = '<p class="empty-state">Loading marketplace cards...</p>';
   const params = new URLSearchParams({ serverId: server.id, query });
   if (loader) params.set('loader', loader);
   if (gameVersion) params.set('version', gameVersion);
   if (projectType) params.set('projectType', projectType);
-  const data = await api(`/api/${source}/search?${params}`);
-  elements.modrinthGrid.innerHTML = data.hits.map((project) => `
+  try {
+    const data = await api(`/api/${source}/search?${params}`, { timeoutMs: 18000 });
+    if (requestId !== state.pluginMarketplaceRequestId || activeServer()?.id !== server.id) return;
+    elements.modrinthGrid.innerHTML = (data.hits || []).map((project) => `
     <article class="modrinth-card">
       <div class="status-row">
         <strong>${escapeHtml(project.title)}</strong>
@@ -2247,7 +2252,15 @@ async function loadPluginMarketplace({ featured = false } = {}) {
         data-download-url="${escapeHtml(project.downloadUrl || '')}"
         data-file-name="${escapeHtml(project.fileName || '')}" ${source === 'modrinth' ? 'disabled' : ''}>Install</button>
     </article>
-  `).join('') || `<p class="empty-state">${escapeHtml(data.message || `No ${source} items found. Try a broader search.`)}</p>`;
+    `).join('') || `<p class="empty-state">${escapeHtml(data.message || `No ${source} items found. Try a broader search.`)}</p>`;
+  } catch (error) {
+    if (requestId !== state.pluginMarketplaceRequestId || activeServer()?.id !== server.id) return;
+    elements.modrinthGrid.innerHTML = `
+    <p class="empty-state">Marketplace unavailable: ${escapeHtml(error.message)}</p>
+    <button class="secondary" type="button" data-action="retry-plugin-marketplace">Try again</button>
+    `;
+    console.error(`${source} marketplace request failed:`, error);
+  }
 }
 
 function appendConsoleImmediate(line) {
@@ -4744,6 +4757,11 @@ document.addEventListener('click', async (event) => {
         showToast(error.message);
         actionTarget.disabled = false;
       }
+      return;
+    }
+    if (action === 'retry-plugin-marketplace') {
+      state.pluginSearchSignature = '';
+      await loadPluginMarketplace();
       return;
     }
     if (action === 'delete-allocation') {
