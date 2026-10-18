@@ -5389,6 +5389,93 @@ function closeWakeWatcher(serverId) {
   });
 }
 
+function decodeMinecraftVarInt(buffer, offset = 0) {
+  let value = 0;
+  for (let index = 0; index < 5; index += 1) {
+    if (offset + index >= buffer.length) return null;
+    const byte = buffer[offset + index];
+    value |= (byte & 0x7f) << (index * 7);
+    if ((byte & 0x80) === 0) return { value: value >>> 0, bytes: index + 1 };
+  }
+  return null;
+}
+
+function encodeMinecraftVarInt(value) {
+  let remaining = Number(value) >>> 0;
+  const bytes = [];
+  do {
+    let byte = remaining & 0x7f;
+    remaining >>>= 7;
+    if (remaining) byte |= 0x80;
+    bytes.push(byte);
+  } while (remaining);
+  return Buffer.from(bytes);
+}
+
+function frameMinecraftPacket(packet) {
+  return Buffer.concat([encodeMinecraftVarInt(packet.length), packet]);
+}
+
+function minecraftString(value) {
+  const content = Buffer.from(String(value), 'utf8');
+  return Buffer.concat([encodeMinecraftVarInt(content.length), content]);
+}
+
+function parseWakeHandshake(packet) {
+  const packetId = decodeMinecraftVarInt(packet);
+  if (!packetId || packetId.value !== 0) return null;
+  let cursor = packetId.bytes;
+  const protocol = decodeMinecraftVarInt(packet, cursor);
+  if (!protocol) return null;
+  cursor += protocol.bytes;
+  const addressLength = decodeMinecraftVarInt(packet, cursor);
+  if (!addressLength || addressLength.value > 255) return null;
+  cursor += addressLength.bytes + addressLength.value;
+  if (cursor + 2 > packet.length) return null;
+  cursor += 2; // Server port.
+  const nextState = decodeMinecraftVarInt(packet, cursor);
+  if (!nextState || ![1, 2].includes(nextState.value)) return null;
+  return { protocol: protocol.value, nextState: nextState.value };
+}
+
+function wakeJavaStatusPacket(protocol) {
+  const response = {
+    version: { name: 'Starting server...', protocol },
+    players: { max: 20, online: 0, sample: [] },
+    description: { text: 'Starting server... Please reconnect in a moment.' },
+  };
+  return frameMinecraftPacket(Buffer.concat([
+    encodeMinecraftVarInt(0),
+    minecraftString(JSON.stringify(response)),
+  ]));
+}
+
+function wakeJavaDisconnectPacket() {
+  return frameMinecraftPacket(Buffer.concat([
+    encodeMinecraftVarInt(0),
+    minecraftString(JSON.stringify({ text: 'Starting server... Please reconnect in a moment.' })),
+  ]));
+}
+
+const raknetMagic = Buffer.from('00ffff00fefefefefdfdfdfd12345678', 'hex');
+const wakeBedrockGuid = crypto.randomBytes(8);
+
+function wakeBedrockPong(packet, server) {
+  if (packet.length < 33 || ![0x01, 0x02].includes(packet[0]) || !packet.subarray(9, 25).equals(raknetMagic)) return null;
+  const guid = wakeBedrockGuid.readBigUInt64BE().toString();
+  const maxPlayers = Math.max(1, Number(server.max_players) || 20);
+  const message = [
+    'MCPE', 'Starting server...', '0', 'Starting', '0', String(maxPlayers), guid,
+    'Please reconnect in a moment', 'Survival', '1', String(server.port), String(server.port), '',
+  ].join(';');
+  const encodedMessage = Buffer.from(message, 'utf8');
+  const length = Buffer.alloc(2);
+  length.writeUInt16BE(encodedMessage.length);
+  return Buffer.concat([
+    Buffer.from([0x1c]), packet.subarray(1, 9), wakeBedrockGuid, raknetMagic, length, encodedMessage,
+  ]);
+}
+
 function refreshWakeWatchers() {
   // Auto-start controls panel boot behavior; it must not disable wake-on-join
   // after an operator stops a server manually.
@@ -5426,7 +5513,14 @@ function refreshWakeWatchers() {
     };
     if (protocol === 'udp') {
       const socket = require('node:dgram').createSocket('udp4');
-      socket.once('message', () => { void start(); });
+      socket.once('message', (packet, remote) => {
+        const pong = wakeBedrockPong(packet, server);
+        if (!pong) {
+          void start();
+          return;
+        }
+        socket.send(pong, remote.port, remote.address, () => { void start(); });
+      });
       socket.on('error', (error) => {
         appendLog(server.id, `[NexusPanel] Wake UDP listener failed: ${error.message}`);
         closeWakeWatcher(server.id);
@@ -5435,8 +5529,54 @@ function refreshWakeWatchers() {
       wakeWatchers.set(server.id, { handle: socket, protocol });
     } else {
       const listener = require('node:net').createServer((socket) => {
-        socket.destroy();
-        void start();
+        let pending = Buffer.alloc(0);
+        let handshake = null;
+        let closing = false;
+        const closeAfterReply = (reply) => {
+          if (closing) return;
+          closing = true;
+          if (reply) socket.end(reply, () => socket.destroy());
+          else socket.destroy();
+        };
+        socket.setTimeout(3000, () => closeAfterReply());
+        socket.on('close', () => {
+          if (handshake) void start();
+        });
+        socket.on('error', () => {});
+        socket.on('data', (chunk) => {
+          if (closing) return;
+          pending = Buffer.concat([pending, chunk]);
+          if (pending.length > 8192) return closeAfterReply();
+          while (pending.length) {
+            const frameLength = decodeMinecraftVarInt(pending);
+            if (!frameLength) return;
+            if (frameLength.value > 8192) return closeAfterReply();
+            const frameStart = frameLength.bytes;
+            const frameEnd = frameStart + frameLength.value;
+            if (pending.length < frameEnd) return;
+            const packet = pending.subarray(frameStart, frameEnd);
+            pending = pending.subarray(frameEnd);
+            if (!handshake) {
+              handshake = parseWakeHandshake(packet);
+              if (!handshake) return closeAfterReply();
+              if (handshake.nextState === 2) return closeAfterReply(wakeJavaDisconnectPacket());
+              continue;
+            }
+            const packetId = decodeMinecraftVarInt(packet);
+            if (!packetId) continue;
+            if (packetId.value === 0) {
+              socket.write(wakeJavaStatusPacket(handshake.protocol));
+            } else if (packetId.value === 1) {
+              closeAfterReply(frameMinecraftPacket(Buffer.concat([
+                encodeMinecraftVarInt(1), packet.subarray(packetId.bytes),
+              ])));
+              return;
+            } else {
+              closeAfterReply();
+              return;
+            }
+          }
+        });
       });
       listener.on('error', (error) => {
         appendLog(server.id, `[NexusPanel] Wake TCP listener failed: ${error.message}`);
