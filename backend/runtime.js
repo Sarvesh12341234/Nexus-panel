@@ -263,6 +263,23 @@ function beginServerFileOperation(serverId) {
   };
 }
 
+function beginLiveServerConfigEdit(serverId) {
+  const id = Number(serverId);
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error('Invalid server ID.');
+  if (!processes.has(id) || startingServers.has(id)) {
+    throw new Error('Live config edits require the server to be running.');
+  }
+  fileOperations.set(id, (fileOperations.get(id) || 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const remaining = (fileOperations.get(id) || 1) - 1;
+    if (remaining > 0) fileOperations.set(id, remaining);
+    else fileOperations.delete(id);
+  };
+}
+
 function startServer(server, software, options = {}) {
   const serverId = Number(server.id);
   if (processes.has(serverId)) return { ok: true, message: 'Server already running.' };
@@ -794,6 +811,7 @@ function setExitHandler(handler) {
 
 module.exports = {
   appendLog,
+  beginLiveServerConfigEdit,
   beginServerFileOperation,
   consoleLogs,
   killServer,

@@ -6,6 +6,7 @@ const { beginServerFileOperation, startServer } = require('../backend/runtime');
 const { directoryTree, serverTreeAccessFindArgs, traversalPaths } = require('../backend/asf_identity');
 const { bundledJavaBinary } = require('../backend/java_runtime');
 const { diagnoseRuntime } = require('../backend/repair_knowledge');
+const { isLivePluginConfigPath } = require('../backend/server_file_access');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -29,6 +30,12 @@ assert.throws(
 assert.doesNotThrow(() => requireLaunchIsolation('linux', { preflightPassed: true }, { available: true }));
 assert.deepEqual(preflightTiers(true), ['maximum', 'compatible', 'core']);
 assert.deepEqual(preflightTiers(false), ['compatible', 'core']);
+assert.equal(isLivePluginConfigPath('plugins/LuckPerms/config.yml'), true);
+assert.equal(isLivePluginConfigPath('plugins/Geyser/config.json'), true);
+assert.equal(isLivePluginConfigPath('server.properties'), false);
+assert.equal(isLivePluginConfigPath('plugins/LuckPerms/LuckPerms.jar'), false);
+assert.equal(isLivePluginConfigPath('plugins/config.yml'), false);
+assert.equal(isLivePluginConfigPath('plugins/LuckPerms/../other/config.yml'), false);
 
 const syscallDiagnostics = diagnoseRuntime([
   'asf-test.service: Main process exited, code=killed, status=31/SYS',

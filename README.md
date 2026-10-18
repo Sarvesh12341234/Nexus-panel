@@ -49,9 +49,11 @@ tenant code as the panel service account. The legacy Windows SYSTEM startup task
 is removed by the Windows service installer; server starts are disabled on
 Windows until an equivalent per-server isolation boundary is available.
 
-The file manager is available only while a server is stopped. This prevents
-server-controlled processes from racing symlink/path validation against panel
-file operations.
+The file manager remains available while a server is running for browsing and
+downloading. Plugin configuration files under `plugins/<plugin>/` can also be
+edited live; whether changes apply immediately depends on the plugin, and many
+require a plugin reload or server restart. Uploads, deletes, moves, extraction,
+and other file changes require the server to be stopped.
 
 ## Per-server database provisioning
 

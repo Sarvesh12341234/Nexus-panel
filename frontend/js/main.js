@@ -2391,6 +2391,12 @@ async function renderFiles() {
     return null;
   });
   if (!data) return;
+  const serverRunning = server.status === 'online';
+  const liveNotice = document.querySelector('#fileLiveNotice');
+  if (liveNotice) liveNotice.hidden = !serverRunning;
+  for (const button of elements.fileList.closest('.tool-surface')?.querySelectorAll('[data-action="file-upload"], [data-action="file-cut-selected"], [data-action="file-paste"], [data-action="folder-new"], [data-action="file-unzip"], [data-action="file-archive"], [data-action="file-delete-selected"]') || []) {
+    button.disabled = serverRunning;
+  }
   if (elements.filePathLabel) elements.filePathLabel.textContent = `/${data.path || ''}`;
   if (data.type === 'file') {
     elements.fileList.innerHTML = '';
@@ -2400,6 +2406,10 @@ async function renderFiles() {
         elements.fileEditor.hidden = false;
         elements.fileEditor.path.value = data.path;
         elements.fileEditor.content.value = data.content;
+        const saveButton = elements.fileEditor.querySelector('[type="submit"]');
+        const deleteButton = elements.fileEditor.querySelector('[data-action="file-delete"]');
+        if (saveButton) saveButton.disabled = serverRunning && !data.liveEditable;
+        if (deleteButton) deleteButton.disabled = serverRunning;
       }
     } else {
       if (elements.fileEditor) elements.fileEditor.hidden = true;
@@ -3977,7 +3987,7 @@ elements.fileEditor.addEventListener('submit', async (event) => {
   const payload = formData(elements.fileEditor);
   try {
     await api(`/api/servers/${server.id}/files`, { method: 'PUT', body: JSON.stringify(payload) });
-    showToast('File saved.');
+    showToast(server.status === 'online' ? 'Plugin config saved. Reload the plugin or restart if needed.' : 'File saved.');
     await renderFiles();
   } catch (error) {
     showToast(error.message);
