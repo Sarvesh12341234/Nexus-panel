@@ -10,6 +10,7 @@ const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
+const { extractJavaRuntimeArchive } = require('./java_runtime_archive');
 const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
 const { audit: auditPermissions, repair: repairPermissions } = require('./permission_repair');
 const worldConverter = require('./world_converter');
@@ -3477,7 +3478,7 @@ async function installBundledJavaRuntime(root, serverId, major, onProgress) {
     onProgress(Math.max(7, Math.min(48, Math.round(progress * 0.48))), `Downloading bundled Java ${major} runtime`);
   });
   onProgress(52, `Extracting bundled Java ${major}`);
-  extractArchive(archivePath, runtimeDir);
+  extractJavaRuntimeArchive(archivePath, runtimeDir);
   const javaBinary = findFile(runtimeDir, 'java');
   if (!javaBinary) throw new Error(`Bundled Java ${major} extraction finished but java binary was not found.`);
   if (process.platform !== 'win32') await fs.promises.chmod(javaBinary, 0o755).catch(() => {});

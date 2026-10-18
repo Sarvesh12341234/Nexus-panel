@@ -18,7 +18,7 @@
     "update": "bash update/update.sh",
     "test": "npm run test:auth && npm run test:v3 && npm run test:security && npm run test:advanced && npm run test:exploit && npm run test:database && npm run test:asf && npm run test:update",
     "test:auth": "node tests/auth.test.js",
-    "test:v3": "node tests/v3.test.js && node tests/setup.test.js",
+    "test:v3": "node tests/v3.test.js && node tests/setup.test.js && node tests/java-runtime-archive.test.js",
     "test-auth": "npm run test:auth",
     "debug-users": "node scripts/debug-users.js",
     "reset-password": "node scripts/reset-password.js",

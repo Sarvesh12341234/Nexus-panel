@@ -8,6 +8,7 @@ outperforms Docker on speed, memory, and version compatibility.
 
 - Ubuntu / Debian / other systemd Linux (x86_64 or ARM64)
 - Node.js ≥ 22.5.0 and < 25.0.0 (Node.js 24 is recommended)
+- Python 3 for safe extraction of bundled Java runtimes
 - A C compiler for the ASF sandbox (`apt install -y build-essential`)
 - `acl` for per-server identities (`apt install -y acl`)
 
