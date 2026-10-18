@@ -187,6 +187,7 @@ function launchExecutables(profile, nativeBinary = '') {
 }
 
 function serverTreeAccessFindArgs(serverRoot) {
+  const runtimeRoot = path.join(serverRoot, 'runtime');
   return [
     serverRoot,
     '(',
@@ -199,7 +200,18 @@ function serverTreeAccessFindArgs(serverRoot) {
     '(',
     '!', '-readable', '-o',
     '(',
-    '!', '-perm', '/u=x', '-a', '!', '-writable',
+    '!', '-path', runtimeRoot,
+    '-a', '!', '-path', `${runtimeRoot}${path.sep}*`,
+    '-a', '!', '-name', '*.jar',
+    '-a', '!', '-name', '*.exe',
+    '-a', '!', '-name', '*.sh',
+    '-a', '!', '-name', '*.bin',
+    '-a', '!', '-perm', '/u=x',
+    '-a', '!', '-writable',
+    ')',
+    '-o',
+    '(',
+    '-perm', '/u=x', '-a', '!', '-executable',
     ')',
     ')',
     ')',

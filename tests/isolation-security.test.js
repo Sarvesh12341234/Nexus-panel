@@ -63,6 +63,8 @@ try {
   assert.equal(accessCheckArgs[0], serverRoot, 'recursive identity verification must scan from the server root');
   assert.ok(accessCheckArgs.includes('-type') && accessCheckArgs.includes('d') && accessCheckArgs.includes('f'));
   assert.ok(accessCheckArgs.includes('/u=x'), 'write checks must identify executables by the owner execute bit, not the ACL mask');
+  assert.ok(accessCheckArgs.includes(path.join(serverRoot, 'runtime')));
+  assert.ok(accessCheckArgs.includes(`${path.join(serverRoot, 'runtime')}${path.sep}*`), 'static runtime assets must not require write access');
 } finally {
   fs.rmSync(aclTestRoot, { recursive: true, force: true });
 }
