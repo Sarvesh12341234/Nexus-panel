@@ -71,7 +71,7 @@ async function writeBuffer(file, buffer) {
   }
 }
 
-async function createZip(root, relativePaths, outputPath) {
+async function createZip(root, relativePaths, outputPath, options = {}) {
   const requested = relativePaths.length ? relativePaths : [''];
   const entries = [];
   for (const item of requested) entries.push(...await collectEntries(root, item));
@@ -82,6 +82,11 @@ async function createZip(root, relativePaths, outputPath) {
   let offset = 0;
   let written = 0;
   let skipped = 0;
+  const totalEntries = entries.length;
+  const reportProgress = (progress) => {
+    try { options.onProgress?.({ ...progress, totalEntries }); } catch {}
+  };
+  reportProgress({ completedEntries: 0, percent: totalEntries ? 0 : 100, phase: 'scanning' });
 
   try {
     await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
@@ -139,6 +144,7 @@ async function createZip(root, relativePaths, outputPath) {
       central.push(header, name);
       offset += local.length + name.length + compressed.length;
       written += 1;
+      reportProgress({ completedEntries: written + skipped, percent: totalEntries ? Math.min(99, Math.floor(((written + skipped) / totalEntries) * 100)) : 100, phase: 'compressing' });
     }
 
     const centralSize = central.reduce((sum, chunk) => sum + chunk.length, 0);
@@ -157,6 +163,7 @@ async function createZip(root, relativePaths, outputPath) {
     await output.close();
     output = null;
     await fs.promises.rename(temporary, outputPath);
+    reportProgress({ completedEntries: totalEntries, percent: 100, phase: 'complete' });
     return { entries: written, skipped };
   } catch (error) {
     await output?.close().catch(() => {});

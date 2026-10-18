@@ -28,7 +28,9 @@ try {
 
 const dataDir = process.env.NEXUSPANEL_DATA_DIR
   ? path.resolve(process.env.NEXUSPANEL_DATA_DIR)
-  : path.join(__dirname, '..', 'data');
+  : process.env.NEXUSPANEL_DATA_ROOT
+    ? path.resolve(process.env.NEXUSPANEL_DATA_ROOT)
+    : path.join(__dirname, '..', 'data');
 try {
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o750 });
 } catch (error) {

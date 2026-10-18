@@ -12,7 +12,7 @@ const state = {
   loginEvents: [],
   health: null,
   metricHistory: {},
-  activeView: 'dashboard',
+  activeView: localStorage.getItem('nexusActiveView') || 'dashboard',
   activeServerId: null,
   refreshTimer: null,
   consoleFastTimer: null,
@@ -20,6 +20,8 @@ const state = {
   statusRefreshInFlight: false,
   uploadRefreshAt: 0,
   uploadRefreshInFlight: false,
+  sectionRefreshAt: 0,
+  sectionRefreshInFlight: false,
   consolePollAt: {},
   consoleInFlight: {},
   consoleMetricsAt: {},
@@ -1307,6 +1309,33 @@ async function apiText(path) {
   return body;
 }
 
+async function watchServerOperation(server, job, progressNode, onComplete = null, kind = 'files') {
+  if (!job?.id) throw new Error('The operation did not return a tracking id.');
+  while (true) {
+    const response = await api(`/api/servers/${server.id}/${kind === 'backup' ? 'backups/' : ''}operations/${encodeURIComponent(job.id)}`);
+    const current = response.job;
+    if (progressNode?.isConnected) {
+      progressNode.hidden = false;
+      const progress = progressNode.querySelector('progress');
+      if (progress) progress.value = Number(current.progress || 0);
+      const percent = progressNode.querySelector('[data-operation-percent]');
+      if (percent) percent.textContent = `${Number(current.progress || 0)}%`;
+      const message = progressNode.querySelector('[data-operation-message]');
+      if (message) message.textContent = current.message || 'Working…';
+    }
+    if (current.status === 'failed') throw new Error(current.message || 'Operation failed.');
+    if (current.status === 'complete') {
+      await onComplete?.(current.result);
+      return current.result;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+  }
+}
+
+function operationProgressMarkup(id) {
+  return `<div class="operation-progress" id="${id}" hidden><div><progress max="100" value="0"></progress><strong data-operation-percent>0%</strong></div><small data-operation-message>Starting…</small></div>`;
+}
+
 function enableDeveloperShortcutGuard() {
   // Developer tools are intentionally not blocked; this keeps browser debugging and support workflows functional.
 }
@@ -1675,6 +1704,7 @@ function renderStats() {
   }
   const maxCores = Math.max(1, Number(state.settings?.maxCpuCores || navigator.hardwareConcurrency || 1));
   if (elements.serverForm?.cpuCores) elements.serverForm.cpuCores.max = String(maxCores);
+  if (elements.serverConfigForm?.cpuCores) elements.serverConfigForm.cpuCores.max = String(maxCores);
   if (elements.ownerAssignLabel && elements.ownerUserSelect) {
     const owner = state.user?.role === 'owner';
     elements.ownerAssignLabel.hidden = !owner;
@@ -1690,6 +1720,7 @@ function renderView() {
     button.hidden = !canView(button.dataset.view);
   });
   if (!canView(state.activeView)) state.activeView = firstAllowedView();
+  localStorage.setItem('nexusActiveView', state.activeView);
   document.querySelectorAll('.view-section').forEach((section) => {
     section.hidden = section.id !== `view-${state.activeView}`;
   });
@@ -2455,6 +2486,14 @@ async function renderFiles() {
   applyFileManagerLayout();
 }
 
+async function refreshPluginRows() {
+  const server = activeServer();
+  if (!server || !can(CAPABILITIES.PLUGINS_MANAGE, state.permissions.MANAGE_FILES)) return;
+  const data = await api(`/api/servers/${server.id}/plugins`);
+  state.plugins = state.plugins.filter((plugin) => plugin.serverId !== server.id).concat(data.plugins || []);
+  if (state.activeView === 'plugins' && activeServer()?.id === server.id) renderPlugins();
+}
+
 function fileTypeIcon(entry) {
   if (entry.type === 'directory') return '📁';
   return { pdf: 'PDF', document: 'DOC', spreadsheet: 'XLS', presentation: 'PPT', image: 'IMG', audio: 'AUD', video: 'VID', archive: 'ZIP', text: 'TXT' }[entry.kind] || 'FILE';
@@ -2819,6 +2858,7 @@ function renderBackups() {
 
     elements.backupPanel.innerHTML = `
       <div class="section-head"><div><p class="eyebrow">Backups</p><h2>${escapeHtml(server.name)}</h2></div><button type="button" data-action="manual-backup">Manual backup</button></div>
+      ${operationProgressMarkup('backupOperationProgress')}
       <form class="backup-settings" id="backupSettingsForm">
         <label class="switch"><input name="scheduledBackups" type="checkbox" ${server.scheduledBackups ? 'checked' : ''}><span></span>Auto backup</label>
         <label>Every <input name="backupIntervalValue" type="number" min="1" max="5256000" value="${backupValue}"></label>
@@ -3099,7 +3139,7 @@ async function renderTebex() {
         <label>Webhook signing secret <input name="webhookSecret" type="password" autocomplete="off" placeholder="Tebex → Developers → Webhooks → endpoint" required minlength="8" maxlength="256"></label>
         <button type="submit">Auto-configure Tebex</button>
       </form>
-      <p class="muted">Use the Game Server secret for Tebex API access and the separate Webhook signing secret shown in your Tebex webhook endpoint. The panel syncs packages, generates rank commands, and writes the plugin config automatically.</p>
+      <p class="muted">This connects the panel to the Tebex Game Server API and payment webhook. It does not install or configure the official game plugin. Install the current Tebex plugin, set its secret with <code>tebex.secret YOUR_SECRET</code>, and configure delivery commands in your Tebex store. Panel package commands are for its own audit view.</p>
     `}
     ${tebex.configured && !tebex.webhookConfigured ? `
       <form class="settings-form" id="tebexWebhookSecretForm">
@@ -3528,6 +3568,7 @@ function setView(view) {
   const shellScroll = currentShellScroll();
   state.shellScroll = shellScroll;
   state.activeView = view;
+  localStorage.setItem('nexusActiveView', view);
   if (view === 'console') {
     consoleStickToBottom = true;
     const server = activeServer();
@@ -3742,6 +3783,25 @@ function startRefreshLoop() {
         state.uploadRefreshInFlight = false;
       });
     }
+    const formFieldActive = document.activeElement?.matches?.('input, textarea, select');
+    const sectionInterval = state.activeView === 'files' ? 1400 : 2500;
+    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !formFieldActive) {
+      state.sectionRefreshAt = now;
+      state.sectionRefreshInFlight = true;
+      const view = state.activeView;
+      const serverId = activeServer()?.id;
+      Promise.resolve().then(async () => {
+        if (view === 'files') await renderFiles();
+        else if (view === 'plugins') await refreshPluginRows();
+        else if (view === 'backups') renderBackups();
+        else if (view === 'properties') await renderProperties();
+        else if (view === 'whitelist') await renderWhitelist();
+        else if (view === 'databases') await renderDatabases();
+        else if (view === 'allocations') await renderAllocations();
+        else if (view === 'admins') renderAdmins();
+        if (view !== state.activeView || serverId !== activeServer()?.id) return;
+      }).catch(() => {}).finally(() => { state.sectionRefreshInFlight = false; });
+    }
   }, 500);
 }
 
@@ -3914,14 +3974,9 @@ elements.commandForm.addEventListener('submit', async (event) => {
   if (!server) return showToast('Create a server first.');
   const payload = formData(elements.commandForm);
   try {
-    const command = String(payload.command || '').trim().replace(/^\//, '');
-    if (command) appendConsoleImmediate(`[${new Date().toISOString()}] > ${command}`);
-    const result = await api(`/api/servers/${server.id}/command`, { method: 'POST', body: JSON.stringify(payload) });
+    await api(`/api/servers/${server.id}/command`, { method: 'POST', body: JSON.stringify(payload) });
     elements.commandForm.reset();
-    if (result.line) {
-      appendConsoleImmediate(result.line);
-      state.consolePollAt[server.id] = 0;
-    }
+    state.consolePollAt[server.id] = 0;
     await renderConsole({ force: true });
   } catch (error) {
     showToast(error.message);
@@ -5017,35 +5072,44 @@ document.addEventListener('click', async (event) => {
     }
     if (action === 'network-speed-test') {
       actionTarget.disabled = true;
+      let timeout = null;
       try {
         showToast('Running quick panel speed test...');
-        const downloadSize = 512 * 1024;
+        const downloadSize = 8 * 1024 * 1024;
         const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 3500);
-        const downloadStart = performance.now();
-        const downloadBuffer = await fetch(`/api/network/download-test?size=${downloadSize}&t=${Date.now()}`, { credentials: 'same-origin', signal: controller.signal }).then((res) => {
-          if (!res.ok) throw new Error('Download speed test failed.');
-          return res.arrayBuffer();
-        });
-        const downloadSeconds = Math.max(0.001, (performance.now() - downloadStart) / 1000);
-        const uploadBuffer = new Uint8Array(256 * 1024).fill(90);
-        const uploadStart = performance.now();
-        const uploadResult = await fetch('/api/network/upload-test', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/octet-stream', 'X-NexusPanel-Request': '1' },
-          body: uploadBuffer,
-          signal: controller.signal,
-        });
+        timeout = window.setTimeout(() => controller.abort(), 30000);
+        const downloadRates = [];
+        const uploadRates = [];
+        const uploadBuffer = new Uint8Array(4 * 1024 * 1024);
+        for (let offset = 0; offset < uploadBuffer.length; offset += 65536) crypto.getRandomValues(uploadBuffer.subarray(offset, Math.min(offset + 65536, uploadBuffer.length)));
+        for (let sample = 0; sample < 3; sample += 1) {
+          const downloadStart = performance.now();
+          const downloadResponse = await fetch(`/api/network/download-test?size=${downloadSize}&t=${Date.now()}-${sample}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+          if (!downloadResponse.ok) throw new Error('Download speed test failed.');
+          const downloadBuffer = await downloadResponse.arrayBuffer();
+          downloadRates.push(downloadBuffer.byteLength / Math.max(0.001, (performance.now() - downloadStart) / 1000));
+          const uploadStart = performance.now();
+          const uploadResult = await fetch(`/api/network/upload-test?t=${Date.now()}-${sample}`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: { 'Content-Type': 'application/octet-stream', 'X-NexusPanel-Request': '1' },
+            body: uploadBuffer,
+            signal: controller.signal,
+          });
+          const uploadData = await uploadResult.json().catch(() => ({}));
+          if (!uploadResult.ok || uploadData.bytes !== uploadBuffer.byteLength) throw new Error('Upload speed test failed.');
+          uploadRates.push(uploadBuffer.byteLength / Math.max(0.001, (performance.now() - uploadStart) / 1000));
+        }
         window.clearTimeout(timeout);
-        if (!uploadResult.ok) throw new Error('Upload speed test failed.');
-        const uploadSeconds = Math.max(0.001, (performance.now() - uploadStart) / 1000);
+        const median = (values) => values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
         await renderNetwork({
-          downloadBytesPerSec: downloadBuffer.byteLength / downloadSeconds,
-          uploadBytesPerSec: uploadBuffer.byteLength / uploadSeconds,
+          downloadBytesPerSec: median(downloadRates),
+          uploadBytesPerSec: median(uploadRates),
         });
         showToast('Network speed updated.');
       } finally {
+        window.clearTimeout(timeout);
         actionTarget.disabled = false;
       }
       return;
@@ -5195,10 +5259,17 @@ document.addEventListener('click', async (event) => {
     if (action === 'manual-backup') {
       const server = activeServer();
       if (!server) return;
-      showToast('Creating backup...');
-      await api(`/api/servers/${server.id}/backups`, { method: 'POST' });
-      showToast('Backup created.');
-      renderBackups();
+      actionTarget.disabled = true;
+      try {
+        const { job } = await api(`/api/servers/${server.id}/backups`, { method: 'POST' });
+        showToast('Creating backup…');
+        await watchServerOperation(server, job, document.querySelector('#backupOperationProgress'), async () => {
+          showToast('Backup created.');
+          renderBackups();
+        }, 'backup');
+      } finally {
+        actionTarget.disabled = false;
+      }
       return;
     }
     if (action === 'backup-code-show') {
@@ -5606,15 +5677,21 @@ document.addEventListener('click', async (event) => {
       showToast(`Extracting ${archives.length} archive(s)...`);
       const payload = { paths: archives, destination: filePath, mode: 'fail' };
       try {
-        await api(`/api/servers/${server.id}/files/extract`, { method: 'POST', body: JSON.stringify(payload) });
+        const { job } = await api(`/api/servers/${server.id}/files/extract`, { method: 'POST', body: JSON.stringify(payload) });
+        await watchServerOperation(server, job, document.querySelector('#fileOperationProgress'), async () => {
+          showToast('Archive extraction complete.');
+          await renderFiles();
+        });
       } catch (error) {
         if (!/replace/i.test(error.message)) throw error;
         const replace = confirm(`${error.message}\n\nOK = Replace all duplicates\nCancel = Skip existing duplicates`);
         payload.mode = replace ? 'replace' : 'skip';
-        await api(`/api/servers/${server.id}/files/extract`, { method: 'POST', body: JSON.stringify(payload) });
+        const { job } = await api(`/api/servers/${server.id}/files/extract`, { method: 'POST', body: JSON.stringify(payload) });
+        await watchServerOperation(server, job, document.querySelector('#fileOperationProgress'), async () => {
+          showToast('Archive extraction complete.');
+          await renderFiles();
+        });
       }
-      showToast('Archive extraction complete.');
-      await renderFiles();
       return;
     }
 

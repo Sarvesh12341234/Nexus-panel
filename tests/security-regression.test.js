@@ -49,6 +49,7 @@ assert(tebex.includes('encryptSecret'), 'webstore secret must be encrypted at re
 assert(tebex.includes('aes-256-gcm'), 'webstore secret cipher must be AES-256-GCM');
 assert(tebex.includes('createHmac(\'sha256\''), 'Tebex webhook signature must use the documented HMAC algorithm');
 assert(tebex.includes('webhook_secret'), 'Tebex webhook signing secret must be stored separately from the game-server API secret');
+assert(index.includes("return res.status(200).json({ id: result.id })"), 'Tebex validation webhook must echo its validation id');
 
 // --- Login failures must render inside the visible unauthenticated view ---
 const indexHtml = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'index.html'), 'utf8');

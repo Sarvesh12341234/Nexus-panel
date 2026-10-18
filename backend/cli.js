@@ -17,8 +17,6 @@ const {
   status,
   stopService,
 } = require('./service');
-const { getUserCount } = require('./db');
-const { createUser } = require('./auth');
 const { doctor: platformDoctor } = require('./platform');
 
 function run(command, args, options = {}) {
@@ -60,6 +58,7 @@ Service: ${serviceName}`);
 }
 
 function setupUrl() {
+  const { getUserCount } = loadCliDatabase();
   const dataDir = path.join(__dirname, '..', 'data');
   const tokenPath = path.join(dataDir, 'setup_token');
   if (getUserCount() > 0) throw new Error('Initial setup is already complete.');
@@ -75,11 +74,13 @@ function setupUrl() {
 
 
 async function ensureOwnerForCli() {
+  const { getUserCount } = loadCliDatabase();
   if (getUserCount() > 0) return;
   const envEmail = String(process.env.NEXUSPANEL_OWNER_EMAIL || '').trim();
   const envPassword = String(process.env.NEXUSPANEL_OWNER_PASSWORD || '');
   const envName = String(process.env.NEXUSPANEL_OWNER_NAME || 'Owner').trim() || 'Owner';
   if (envEmail && envPassword) {
+    const { createUser } = require('./auth');
     createUser({ email: envEmail, name: envName, password: envPassword, role: 'owner', accessLevel: 100 });
     console.log(`Owner account created from NEXUSPANEL_OWNER_EMAIL: ${envEmail}`);
     return;
@@ -100,12 +101,28 @@ async function ensureOwnerForCli() {
     const name = (await rl.question('Owner account name [Owner]: ')).trim() || 'Owner';
     const email = (await rl.question('Owner email: ')).trim();
     const password = await rl.question('Owner password (12+ chars): ');
+    const { createUser } = require('./auth');
     createUser({ email, name, password, role: 'owner', accessLevel: 100 });
     console.log('Owner account created. Starting NexusPanel...');
   } finally {
     rl.close();
     if (ttyHandle) ttyHandle.destroy();
   }
+}
+
+function loadCliDatabase() {
+  // Match the service's systemd EnvironmentFile before importing db/auth.
+  // Otherwise setup/start commands can point at a new empty database and
+  // create a second owner while the running panel uses the existing database.
+  const environmentFile = process.env.NEXUSPANEL_ENV_FILE || '/etc/nexuspanel/database.env';
+  if (process.platform === 'linux' && fs.existsSync(environmentFile)) {
+    for (const line of fs.readFileSync(environmentFile, 'utf8').split(/\r?\n/)) {
+      const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+      if (!match || Object.prototype.hasOwnProperty.call(process.env, match[1])) continue;
+      process.env[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2');
+    }
+  }
+  return require('./db');
 }
 
 // Helper function to format dates with timezone
@@ -131,6 +148,7 @@ async function main() {
 
   // Handle user list command
   if (command === 'users' || command === 'list-users') {
+    loadCliDatabase();
     const { db } = require('./db');
     console.log('\n=== NexusPanel User Database ===\n');
 

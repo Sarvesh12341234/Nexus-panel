@@ -988,6 +988,40 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
+#settingsForm {
+  padding: clamp(1rem, 2.4vw, 2rem);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--panel-2), transparent 4%), var(--panel));
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .16);
+  align-items: start;
+}
+
+#settingsForm > label:not(.switch) {
+  min-height: 76px;
+  align-content: start;
+}
+
+#settingsForm > .settings-group {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: .35rem 0;
+}
+
+#settingsForm > .save-wide { grid-column: 1 / -1; }
+
+.operation-progress {
+  margin: .75rem 0 1rem;
+  padding: .85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+
+.operation-progress > div { display: flex; align-items: center; gap: .8rem; }
+.operation-progress progress { flex: 1; width: 100%; height: 12px; accent-color: var(--green); }
+.operation-progress small { display: block; margin-top: .35rem; color: var(--muted); }
+
 /* The submit button spans its own full row so it never sits squeezed in a
    half-filled grid cell next to an empty gap. */
 .settings-form > button[type="submit"],

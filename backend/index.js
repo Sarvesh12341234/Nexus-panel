@@ -67,6 +67,8 @@ const tunnelProcesses = new Map();
 const passwordResetRequests = new Map();
 const keyedOperations = new Map();
 const repairJobs = new Map();
+const fileOperationJobs = new Map();
+const backupProgressJobs = new Map();
 const crashHistory = new Map();
 const crashRestartTimers = new Map();
 const autoBackupInFlight = new Set();
@@ -1505,6 +1507,45 @@ function pluginRows(serverId = null) {
   }));
 }
 
+function reconcilePluginFiles(serverId) {
+  const rows = db.prepare('SELECT id, relative_path FROM plugins WHERE server_id = ?').all(Number(serverId));
+  const remove = db.prepare('DELETE FROM plugins WHERE id = ?');
+  for (const row of rows) {
+    const target = safeServerFile(getServerOr404(serverId), row.relative_path);
+    const stats = fs.lstatSync(target.absolute, { throwIfNoEntry: false });
+    if (!stats || !stats.isFile() || stats.isSymbolicLink()) remove.run(row.id);
+  }
+  return pluginRows(Number(serverId));
+}
+
+function startProgressJob(store, serverId, type, run) {
+  const id = crypto.randomUUID();
+  const job = { id, serverId: Number(serverId), type, status: 'running', progress: 0, message: 'Starting…', createdAt: Date.now(), updatedAt: Date.now() };
+  store.set(id, job);
+  setImmediate(async () => {
+    try {
+      job.result = await run((progress) => {
+        job.progress = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+        job.message = String(progress.message || progress.phase || 'Working…').slice(0, 180);
+        job.updatedAt = Date.now();
+      });
+      job.status = 'complete';
+      job.progress = 100;
+      job.message = 'Complete';
+    } catch (error) {
+      job.status = 'failed';
+      job.message = String(error.message || 'Operation failed.').slice(0, 300);
+    }
+    job.updatedAt = Date.now();
+    setTimeout(() => store.delete(id), 10 * 60 * 1000).unref?.();
+  });
+  return job;
+}
+
+function progressJobPayload(job) {
+  return { id: job.id, serverId: job.serverId, type: job.type, status: job.status, progress: job.progress, message: job.message, updatedAt: job.updatedAt, result: job.status === 'complete' ? job.result : undefined };
+}
+
 function getServerOr404(id, user = null) {
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(Number(id));
   if (!target) throw new Error('Server not found.');
@@ -2152,8 +2193,8 @@ function reloadWhitelistIfRunning(server, software) {
   }
 }
 
-async function createServerBackup(server, reason = 'manual') {
-  return withKeyedOperation(`backup:${server.id}`, () => createServerBackupUnlocked(server, reason));
+async function createServerBackup(server, reason = 'manual', onProgress = null) {
+  return withKeyedOperation(`backup:${server.id}`, () => createServerBackupUnlocked(server, reason, onProgress));
 }
 
 function assertHostServerQuota(ownerUserId) {
@@ -2303,7 +2344,7 @@ async function holdBedrockWorldForBackup(server) {
   }
 }
 
-async function createServerBackupUnlocked(server, reason = 'manual') {
+async function createServerBackupUnlocked(server, reason = 'manual', onProgress = null) {
   const root = ensureServerDirs(server);
   const backupsDir = assertInside(backupsRoot, path.join(backupsRoot, String(server.id)));
   await fs.promises.mkdir(backupsDir, { recursive: true });
@@ -2326,7 +2367,11 @@ async function createServerBackupUnlocked(server, reason = 'manual') {
   const heldBedrockWorld = await holdBedrockWorldForBackup(server);
   let archiveResult;
   try {
-    archiveResult = await createZip(root, entries, archivePath);
+    archiveResult = await createZip(root, entries, archivePath, {
+      onProgress: ({ completedEntries, totalEntries, percent, phase }) => {
+        try { onProgress?.({ percent, message: `${phase === 'complete' ? 'Finalizing' : 'Archiving'} ${completedEntries}/${totalEntries} files` }); } catch {}
+      },
+    });
   } finally {
     if (heldBedrockWorld) {
       try {
@@ -5050,6 +5095,10 @@ app.post('/api/tebex/webhook/:serverId', (req, res) => {
   if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Webhook body must be raw bytes.' });
   try {
     const result = tebex.ingestWebhook(serverId, req.body, req.headers['x-signature'] || req.headers['x-tebex-signature']);
+    if (result.ignored && result.reason === 'validation.webhook') {
+      if (!result.id) return res.status(400).json({ error: 'Validation webhook is missing its id.' });
+      return res.status(200).json({ id: result.id });
+    }
     if (result.ok && !result.ignored) {
       appendLog(serverId, `[NexusPanel] Tebex payment received: ${result.event.username || 'unknown player'} — ${result.event.packageName} (${(result.event.priceCents / 100).toFixed(2)} ${result.event.currency}).`);
     }
@@ -5727,7 +5776,7 @@ app.get('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANAG
   const id = Number(req.params.id);
   const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
   if (!target) return res.status(404).json({ error: 'Server not found.' });
-  res.json({ plugins: pluginRows(id) });
+  res.json({ plugins: reconcilePluginFiles(id) });
 });
 
 app.post('/api/servers/:id/plugins', requirePermission(capabilities.PLUGINS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
@@ -6573,10 +6622,27 @@ app.delete('/api/servers/:id/backups/share-requests/:requestId', requirePermissi
 
 app.post('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
-  const backup = await createServerBackup(server, 'manual');
-  logFixed({ serverId: server.id, category: 'backup', title: 'Manual backup created', detail: backup.name, source: 'backup' });
-  res.status(201).json({ backup, backups: await backupRows(server) });
+  const job = startProgressJob(backupProgressJobs, server.id, 'backup', async (report) => {
+    const backup = await createServerBackup(server, 'manual', report);
+    logFixed({ serverId: server.id, category: 'backup', title: 'Manual backup created', detail: backup.name, source: 'backup' });
+    return { backup, backups: await backupRows(server) };
+  });
+  res.status(202).json({ job: progressJobPayload(job) });
 }));
+
+app.get('/api/servers/:id/operations/:jobId', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  const job = fileOperationJobs.get(String(req.params.jobId)) || backupProgressJobs.get(String(req.params.jobId));
+  if (!job || job.serverId !== Number(server.id)) return res.status(404).json({ error: 'Operation not found.' });
+  res.json({ job: progressJobPayload(job) });
+});
+
+app.get('/api/servers/:id/backups/operations/:jobId', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  const job = backupProgressJobs.get(String(req.params.jobId));
+  if (!job || job.serverId !== Number(server.id)) return res.status(404).json({ error: 'Backup operation not found.' });
+  res.json({ job: progressJobPayload(job) });
+});
 
 app.delete('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
@@ -6973,6 +7039,7 @@ app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_
   const requested = Array.isArray(req.body.paths) ? req.body.paths : [req.body.path || ''];
   const mode = ['replace', 'skip', 'fail'].includes(req.body.mode) ? req.body.mode : 'fail';
   const extracted = [];
+  const requestedEntries = [];
   await safeTimelinePoint(server, req, 'Before archive extract', `Captured state before extracting ${requested.length} archive(s).`);
   for (const relative of requested) {
     const source = safeServerFile(server, relative);
@@ -7003,10 +7070,49 @@ app.post('/api/servers/:id/files/extract', requirePermission(capabilities.FILES_
         });
       }
     }
-    extractArchiveInto(source.absolute, destinationDir.absolute, { mode });
     extracted.push(source.relative);
+    requestedEntries.push({ source, entries });
   }
-  res.json({ ok: true, paths: extracted, destination: destinationDir.relative });
+  const worker = path.join(__dirname, 'file_operation_worker.js');
+  const job = startProgressJob(fileOperationJobs, server.id, 'extract', async (report) => {
+    const totalEntries = requestedEntries.reduce((sum, item) => sum + item.entries.length, 0);
+    const expected = requestedEntries.flatMap((item) => item.entries.map((entry) => path.resolve(destinationDir.absolute, ...entry.replaceAll('\\', '/').split('/'))));
+    const child = spawn(process.execPath, [worker], {
+      cwd: path.join(__dirname, '..'),
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: {
+        PATH: process.env.PATH || '',
+        SystemRoot: process.env.SystemRoot || '',
+        WINDIR: process.env.WINDIR || '',
+        TEMP: process.env.TEMP || '',
+        TMP: process.env.TMP || '',
+        NEXUSPANEL_WORKER_ARCHIVES: JSON.stringify(requestedEntries.map((item) => item.source.absolute)),
+        NEXUSPANEL_WORKER_DESTINATION: destinationDir.absolute,
+        NEXUSPANEL_WORKER_MODE: mode,
+      },
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-4000); });
+    let error;
+    const finish = new Promise((resolve) => child.once('error', (cause) => { error = cause; resolve(); }).once('exit', (code) => { if (code !== 0) error = new Error(stderr.trim() || `Archive extraction exited with code ${code}.`); resolve(); }));
+    const timer = setInterval(() => {
+      let completed = 0;
+      for (const filename of expected) {
+        try {
+          const stats = fs.statSync(filename);
+          if (mode === 'skip' || stats.mtimeMs >= job.createdAt - 1000) completed += 1;
+        } catch {}
+      }
+      report({ percent: totalEntries ? Math.min(99, Math.floor(completed / totalEntries * 100)) : 0, message: `Extracting ${completed}/${totalEntries} files` });
+    }, 250);
+    await finish;
+    clearInterval(timer);
+    if (error) throw error;
+    report({ percent: 100, message: `Extracted ${extracted.length} archive(s)` });
+    return { ok: true, paths: extracted, destination: destinationDir.relative };
+  });
+  res.status(202).json({ job: progressJobPayload(job) });
 }));
 
 app.post('/api/servers/:id/files/archive', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {

@@ -97,6 +97,7 @@ RestartSec=3
 Environment=NODE_ENV=production
 Environment=NEXUSPANEL_SERVICE=1
 EnvironmentFile=-/etc/nexuspanel/database.env
+${process.env.NEXUSPANEL_DATA_DIR ? `Environment=NEXUSPANEL_DATA_DIR=${process.env.NEXUSPANEL_DATA_DIR}\n` : ''}${process.env.NEXUSPANEL_DATA_ROOT ? `Environment=NEXUSPANEL_DATA_ROOT=${process.env.NEXUSPANEL_DATA_ROOT}\n` : ''}
 Environment=NEXUSPANEL_EDITION=${edition}
 Environment=PORT=${Number(process.env.PORT || 3000)}
 Environment=NEXUSPANEL_BACKUP_ROOT=/var/lib/nexuspanel/backups
