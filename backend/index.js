@@ -3066,12 +3066,12 @@ async function quarantineIncompatibleBedrockPacks(server, root, logs) {
   return { actions, warnings };
 }
 
-async function runServerRepair(server, software, { applyOptimizations = false } = {}) {
+async function runServerRepair(server, software, { applyOptimizations = false, logs } = {}) {
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const actions = [];
   const warnings = [];
   const checks = [];
-  const diagnostics = diagnoseRuntime(consoleLogs(server.id));
+  const diagnostics = diagnoseRuntime(logs || consoleLogs(server.id));
   const knowledge = knowledgeStatus();
   const agentAnalysis = await analyzeServerWithAgent(server, software, diagnostics);
   const repairContext = await advancedRepairContext(server, software, root).catch((error) => ({ error: error.message }));
@@ -7304,7 +7304,7 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
       });
   let proactiveReport = null;
   if (!learnedRecovery && !targetedPropertyHeal) {
-    proactiveReport = await runServerRepair(current, software)
+    proactiveReport = await runServerRepair(current, software, { logs: runLogs })
       .then((report) => {
         appendLog(current.id, `[NexusPanel] Proactive crash repair completed: ${report.summary}`);
         (report.concreteActions || []).forEach((action) => appendLog(current.id, `[NexusPanel] Repair action: ${action}`));

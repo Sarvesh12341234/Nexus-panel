@@ -1,5 +1,6 @@
 const RULES = [
   ['java-heap', 'memory', 'critical', ['outofmemoryerror', 'java heap space', 'gc overhead limit', 'unable to create new native thread'], 'Java exhausted its usable memory.', ['Lower memory-heavy settings or plugins.', 'Verify the panel RAM cap and host free memory.', 'Inspect heap growth before increasing RAM.']],
+  ['syscall-filter', 'security', 'critical', ['status=31\\/sys', 'signal(?:=|\\s+)sigsys', 'bad system call', 'seccomp.*(?:denied|killed|violation)'], 'The system-call sandbox terminated the server process.', ['Use the compatible systemd isolation tier when the native ASF runtime is unavailable.', 'Inspect the systemd unit and kernel journal for the blocked syscall.', 'Do not increase Java memory unless separate out-of-memory evidence exists.']],
   ['native-memory', 'memory', 'critical', ['native memory allocation.*failed', 'os::commit_memory.*failed', 'there is insufficient memory', 'cannot allocate memory'], 'The process or VPS exhausted native memory.', ['Stop competing processes.', 'Keep host memory reserve available.', 'Inspect swap and cgroup MemoryMax.']],
   ['oom-kill', 'memory', 'critical', ['killed process.*java', 'oom-kill', 'memory cgroup out of memory', 'exit(?:ed)? code=137'], 'Linux terminated the server for exceeding memory.', ['Check journalctl and dmesg OOM records.', 'Lower the panel memory cap.', 'Add swap only as a safety buffer.']],
   ['bad-java-version', 'runtime', 'critical', ['unsupportedclassversionerror', 'class file version \\d+', 'only recognizes class file versions', 'java version.*not supported', 'requires java \\d+', 'vps is running java \\d+'], 'The selected Java runtime is incompatible.', ['Install or select the Java major version required by the server.', 'Use the bundled per-server runtime when the host package manager is behind.', 'Verify PATH used by the systemd service.']],
@@ -99,8 +100,10 @@ function diagnoseRuntime(lines, { limit = 12 } = {}) {
   const text = (Array.isArray(lines) ? lines : [lines]).join('\n').slice(-180000);
   const preJavaExecFailure = /(?:status=203\/EXEC|failed at step exec|unable to locate executable.*permission denied)/i.test(text);
   const hasJvmMemoryEvidence = /(?:outofmemoryerror|java heap space|gc overhead limit|oom-kill|memory cgroup out of memory|exit(?:ed)? code=137|os::commit_memory.*failed)/i.test(text);
+  const syscallFilterTermination = /(?:status=31\/sys|signal(?:=|\s+)sigsys|bad system call|seccomp.*(?:denied|killed|violation))/i.test(text);
   return RULES.map(([id, category, severity, patterns, summary, techniques]) => {
     if (preJavaExecFailure && !hasJvmMemoryEvidence && ['java-heap', 'native-memory', 'oom-kill', 'metaspace', 'gc-thrash'].includes(id)) return null;
+    if (syscallFilterTermination && !hasJvmMemoryEvidence && ['java-heap', 'native-memory', 'oom-kill', 'metaspace', 'gc-thrash'].includes(id)) return null;
     const matched = patterns.filter((pattern) => new RegExp(pattern, 'i').test(text));
     if (!matched.length) return null;
     return { id, category, severity, summary, techniques, matchedSignals: matched.length };

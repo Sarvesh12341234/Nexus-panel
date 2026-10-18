@@ -1,10 +1,11 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { requireLaunchIsolation } = require('../backend/asf');
+const { preflightTiers, requireLaunchIsolation } = require('../backend/asf');
 const { beginServerFileOperation, startServer } = require('../backend/runtime');
 const { directoryTree, mutableServerFiles, traversalPaths } = require('../backend/asf_identity');
 const { bundledJavaBinary } = require('../backend/java_runtime');
+const { diagnoseRuntime } = require('../backend/repair_knowledge');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -26,6 +27,14 @@ assert.throws(
   /preflight did not pass/,
 );
 assert.doesNotThrow(() => requireLaunchIsolation('linux', { preflightPassed: true }, { available: true }));
+assert.deepEqual(preflightTiers(true), ['maximum', 'compatible', 'core']);
+assert.deepEqual(preflightTiers(false), ['compatible', 'core']);
+
+const syscallDiagnostics = diagnoseRuntime([
+  'asf-test.service: Main process exited, code=killed, status=31/SYS',
+]);
+assert.ok(syscallDiagnostics.some((diagnostic) => diagnostic.id === 'syscall-filter'));
+assert.ok(!syscallDiagnostics.some((diagnostic) => diagnostic.id === 'java-heap'));
 
 const aclTestRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-acl-traversal-test-'));
 try {

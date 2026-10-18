@@ -192,6 +192,10 @@ function propertyArgs(properties) {
   return properties.flatMap((property) => ['--property', property]);
 }
 
+function preflightTiers(nativeAvailable) {
+  return nativeAvailable ? ['maximum', 'compatible', 'core'] : ['compatible', 'core'];
+}
+
 function requireLaunchIsolation(platform, status, identity) {
   if (platform !== 'linux') {
     throw new Error('Server launch is disabled: NexusPanel has no per-server OS isolation on this platform.');
@@ -283,7 +287,7 @@ function kernelStatus({ refresh = false } = {}) {
   let selected = '';
   const failures = [];
   try {
-    for (const tier of ['maximum', 'compatible', 'core']) {
+    for (const tier of preflightTiers(native.available)) {
       const unit = `asf-preflight-${process.pid}-${tier}-${Date.now().toString(36)}`;
       const payloadCommand = fs.existsSync('/usr/bin/java') ? '/usr/bin/java' : '/bin/true';
       const payloadArgs = payloadCommand.endsWith('/java') ? ['-version'] : [];
@@ -409,4 +413,5 @@ module.exports = {
   writeProfile,
   nativeStatus,
   kernelStatus,
+  preflightTiers,
 };
