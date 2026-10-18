@@ -24,7 +24,9 @@ let exitHandler = null;
 let asfUnitSnapshot = { expiresAt: 0, units: new Map() };
 const MAX_LOG_LINES = 600;
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
-const STOP_GRACE_PERIOD_MS = 20000;
+// Give Minecraft a short window to flush worlds and player data, then force
+// the owning systemd cgroup down so a hung JVM cannot keep its port locked.
+const STOP_GRACE_PERIOD_MS = 8000;
 const logRoot = path.join(externalDataRoot, 'logs');
 fs.mkdirSync(logRoot, { recursive: true });
 
@@ -151,15 +153,15 @@ function invalidateAsfUnitSnapshot() {
 function stopRecoveredAsfUnit(serverId, unit, force = false) {
   const args = force
     ? ['kill', '--kill-whom=all', '--signal=SIGKILL', unit]
-    : ['stop', unit];
-  const result = spawnSync('systemctl', args, { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    : ['kill', '--kill-whom=all', '--signal=SIGTERM', unit];
+  const result = spawnSync('systemctl', args, { encoding: 'utf8', windowsHide: true, timeout: 5000 });
   invalidateAsfUnitSnapshot();
   if (result.error || result.status !== 0) {
     const detail = String(result.stderr || result.error?.message || '').trim();
     throw new Error(detail || `systemctl ${args[0]} failed for ${unit}.`);
   }
-  appendLog(serverId, `[NexusPanel] ${force ? 'Killed' : 'Stopped'} recovered server unit ${unit}.`);
-  return { ok: true, message: force ? 'Recovered server process killed.' : 'Recovered server stopped.' };
+  appendLog(serverId, `[NexusPanel] ${force ? 'Force-killed' : 'Graceful stop signal sent to'} recovered server unit ${unit}.`);
+  return { ok: true, message: force ? 'Recovered server process killed.' : 'Stop signal sent to recovered server.' };
 }
 
 function runtimeStatus(serverId) {
@@ -809,12 +811,14 @@ function forceStopServer(serverId, child, signal = 'SIGKILL') {
   if (child.asfUnit && process.platform === 'linux') {
     const result = spawnSync('systemctl', [
       'kill', '--kill-whom=all', `--signal=${signal}`, child.asfUnit,
-    ], { encoding: 'utf8', timeout: 5000 });
-    if (result.status === 0) return true;
-    const detail = String(result.stderr || result.error?.message || '').trim();
-    if (!/not loaded|not active|could not be found/i.test(detail)) {
-      appendLog(serverId, `[NexusPanel] Could not signal the server systemd unit: ${detail || `systemctl exited with status ${result.status ?? 'unknown'}`}`);
+    ], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    if (!result.error && result.status === 0) {
+      invalidateAsfUnitSnapshot();
+      return true;
     }
+    const detail = String(result.stderr || result.error?.message || '').trim();
+    appendLog(serverId, `[NexusPanel] Could not signal the server systemd unit ${child.asfUnit}: ${detail || `systemctl exited with status ${result.status ?? 'unknown'}`}`);
+    return false;
   }
   if (process.platform === 'win32') {
     terminateProcessTree(child);
@@ -901,7 +905,7 @@ function stopServer(serverId) {
   }
   scheduleStopEscalation(id, child);
   appendLog(id, '[NexusPanel] Sent graceful stop.');
-  return { ok: true, message: 'Stop command sent; any process that does not exit within 20 seconds will be terminated.' };
+  return { ok: true, message: 'Stop command sent. The server gets 8 seconds to save before force-stop.' };
 }
 
 function killServer(serverId) {
@@ -914,13 +918,23 @@ function killServer(serverId) {
   }
   intentionalStops.add(id);
   if (child.asfUnit && process.platform === 'linux') {
-    forceStopServer(id, child);
-  } else if (process.platform === 'win32') {
+    const killed = forceStopServer(id, child);
+    if (!killed) throw new Error(`Could not kill server systemd unit ${child.asfUnit}; check that NexusPanel can run systemctl kill.`);
+    const timer = stopEscalationTimers.get(id);
+    if (timer) clearTimeout(timer);
+    stopEscalationTimers.delete(id);
+    appendLog(id, '[NexusPanel] Force-kill signal sent to the server systemd unit.');
+    return { ok: true, message: 'Force-kill signal sent to the server process group.' };
+  }
+  if (process.platform === 'win32') {
     terminateProcessTree(child);
     appendLog(id, '[NexusPanel] Kill requested.');
     return { ok: true, message: 'Kill requested.' };
   }
-  child.kill('SIGKILL');
+  if (!child.kill('SIGKILL')) throw new Error('The server process could not be signaled.');
+  const timer = stopEscalationTimers.get(id);
+  if (timer) clearTimeout(timer);
+  stopEscalationTimers.delete(id);
   appendLog(id, '[NexusPanel] Kill requested.');
   return { ok: true, message: 'Kill requested.' };
 }

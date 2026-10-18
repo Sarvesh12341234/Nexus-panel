@@ -5240,13 +5240,16 @@ document.addEventListener('click', async (event) => {
       animateCommandButton(actionTarget);
       const op = action.replace('-server', '');
       const previousStatus = server.status;
-      server.status = op === 'stop' || op === 'kill' ? 'offline' : 'online';
-      syncConsoleActionButtons(server, server.status);
-      renderStats();
-      updateLiveServerDom();
+      if (op === 'start' || op === 'restart') {
+        server.status = 'online';
+        syncConsoleActionButtons(server, server.status);
+        renderStats();
+        updateLiveServerDom();
+      }
       showToast(`${op} requested.`);
       try {
-        await api(`/api/servers/${server.id}/${op}`, { method: 'POST' });
+        const response = await api(`/api/servers/${server.id}/${op}`, { method: 'POST' });
+        if (op === 'stop' || op === 'kill') showToast(response.message || `${op} signal sent.`);
       } catch (error) {
         if (error.message.includes('EULA') && confirm('Minecraft Java requires accepting the EULA before starting. Agree and continue?')) {
           await api(`/api/servers/${server.id}/eula`, { method: 'POST' });
