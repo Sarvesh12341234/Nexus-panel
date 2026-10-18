@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const REGISTRY_PATH = path.join(__dirname, '..', 'ai', 'needle2', 'known-issues.json');
+const REPAIR_TOOLS = require('../ai/needle2/repair-tools.json');
 const DEFAULT_MODEL_PATH = path.join(__dirname, '..', 'data', 'needle2', 'nexuspanel-needle2.cact');
 const WORKER_PATH = path.join(__dirname, 'needle2_worker.py');
 const MAX_WORKERS = Math.max(1, Math.min(32, Number(process.env.NEXUSPANEL_NEEDLE2_MAX_WORKERS) || 8));
@@ -150,7 +151,7 @@ async function getReadyWorker(serverId) {
   });
 }
 
-async function classify(serverId, input) {
+async function requestWorkerResult(serverId, input) {
   if (!enabled()) return null;
   const id = Number(serverId);
   const text = redact(input);
@@ -180,9 +181,17 @@ async function classify(serverId, input) {
     });
   });
 
-  if (!result || typeof result.id !== 'string' || !registry[result.id]) return null;
+  if (!result || typeof result !== 'object') return null;
   const evidence = typeof result.evidence === 'string' ? result.evidence.trim() : '';
   if (!evidence || evidence.length > 700 || !text.toLowerCase().includes(evidence.toLowerCase())) return null;
+  return { result, text, evidence };
+}
+
+async function classify(serverId, input) {
+  const response = await requestWorkerResult(serverId, input);
+  if (!response) return null;
+  const { result, evidence } = response;
+  if (result.kind !== 'issue' || typeof result.id !== 'string' || !registry[result.id]) return null;
   const issue = registry[result.id];
   return {
     issueId: result.id,
@@ -193,6 +202,25 @@ async function classify(serverId, input) {
     source: 'needle2-local-advisory',
     verified: false,
     executable: false,
+  };
+}
+
+async function suggestRepairTool(serverId, input) {
+  const response = await requestWorkerResult(serverId, input);
+  if (!response) return null;
+  const { result, evidence } = response;
+  if (result.kind !== 'repair-tool' || typeof result.tool !== 'string' || typeof result.issueId !== 'string') return null;
+  const issue = registry[result.issueId];
+  const allowed = REPAIR_TOOLS.issueMap[result.issueId];
+  if (!issue || !allowed || allowed !== result.tool || issue.repairTool !== result.tool) return null;
+  return {
+    tool: result.tool,
+    issueId: result.issueId,
+    evidence,
+    cause: String(issue.cause || '').slice(0, 1200),
+    fix: String(issue.fix || '').slice(0, 1200),
+    source: 'needle2-local-tool-request',
+    verified: false,
   };
 }
 
@@ -213,4 +241,4 @@ process.once('exit', () => {
   }
 });
 
-module.exports = { classify, enabled, status };
+module.exports = { classify, suggestRepairTool, enabled, status };

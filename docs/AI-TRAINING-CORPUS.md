@@ -1079,9 +1079,10 @@ ASF = **Advanced Sandbox Fabric**. Linux-only. Replaces NexusMark.
   fix: "Reinstall the bundled runtime."
 
 - id: java-runtime-missing
+  error: "The bundled Java runtime for this server is missing."
   reason: "java-runtime-missing"
   cause: The bundled java binary does not exist.
-  fix: "Reinstall software."
+  fix: "Restore the server-scoped bundled Java runtime with Repair & Diagnose."
 
 - id: java-heap-capped
   log: "Java heap capped at <n> MB with <m> MB reserved for threads, code cache, buffers, and kernel-accounted memory."
@@ -2408,6 +2409,332 @@ ASF = **Advanced Sandbox Fabric**. Linux-only. Replaces NexusMark.
 ---
 
 ## 20. Training record schema
+
+### Additional Minecraft and runtime triage records
+
+These records describe safe diagnostics and suggestions. They do not authorize
+the model to install software, disable plugins, alter a world, or start a
+server. A suspected plugin conflict should be checked on an offline copy or
+staging server before changing production.
+
+```yaml
+- id: minecraft-no-server-jar
+  trigger: "Starting a new Java Minecraft server before choosing software"
+  error: "Unable to access jarfile server.jar"
+  symptom: "The server root has no server JAR, so the Java process exits before Minecraft starts."
+  cause: "No Minecraft software build has been installed, or the configured JAR name does not match the installed file."
+  fix: "Recommend choosing and installing a compatible build (Vanilla, Paper, Purpur, Fabric, Forge, or another supported catalog option) in the panel Software section. If a JAR already exists, verify its configured filename and server root before reinstalling."
+
+- id: minecraft-software-install-incomplete
+  trigger: "A Minecraft software download or install was interrupted"
+  error: "Server JAR is missing or the downloaded JAR is zero bytes / truncated."
+  symptom: "The configured server JAR is absent, empty, or fails archive validation after software installation."
+  cause: "The software download did not finish, or disk/network failure left a partial artifact."
+  fix: "Check free disk space and the software install log, remove only the identified partial download, then retry the selected software build from the panel catalog. Do not delete the world or unrelated server files."
+
+- id: minecraft-server-main-class-missing
+  trigger: "Launching a JAR that is not a Minecraft server build"
+  error: "no main manifest attribute, in server.jar"
+  symptom: "Java opens the configured JAR but it has no server entry point."
+  cause: "A plugin, proxy, client, or unrelated JAR was selected as the server executable."
+  fix: "Install a server distribution from the panel Software catalog, or select the correct server JAR. Do not rename an arbitrary JAR to server.jar."
+
+- id: minecraft-eula-not-accepted
+  trigger: "First Minecraft startup stops at EULA acceptance"
+  error: "You need to agree to the EULA in order to run the server"
+  symptom: "The server exits and eula.txt contains eula=false."
+  cause: "Minecraft requires the operator to review and accept its EULA before startup."
+  fix: "Show the panel EULA acceptance control and require the operator to make that choice. Do not accept the EULA automatically."
+
+- id: minecraft-plugin-isolate-safely
+  trigger: "A Paper or Purpur startup log names a plugin in the first exception or enable failure"
+  error: "Error occurred while enabling ExamplePlugin; plugin disabled"
+  symptom: "The server reports a plugin-specific exception during load or enable."
+  cause: "The named plugin may be incompatible, misconfigured, missing a dependency, or conflicting with another plugin."
+  fix: "Identify the first plugin exception and full caused-by stack. Check the plugin's server/API version and declared dependencies. Suggest disabling only the named plugin on an offline backup or staging copy, then compare a controlled boot. Never remove or disable plugins and restart the live server automatically."
+
+- id: minecraft-plugin-java-incompatibility
+  trigger: "A plugin was built for a newer Java runtime than the server uses"
+  error: "UnsupportedClassVersionError while loading plugin"
+  symptom: "The stack trace names a plugin class and says the runtime recognizes an older class-file version."
+  cause: "The plugin requires a newer Java major version, or the server is using an incompatible plugin build."
+  fix: "Compare the plugin's documented Java requirement with the selected server runtime. Recommend selecting a compatible Java runtime or plugin build, then verify on a staging copy."
+
+- id: minecraft-plugin-missing-dependency
+  trigger: "A plugin fails because its required plugin is absent"
+  error: "Unknown/missing dependency PluginDependency required by ExamplePlugin"
+  symptom: "The server names a required plugin or library that it cannot find."
+  cause: "A required dependency is not installed, is disabled, or its plugin name/version does not satisfy the declaration."
+  fix: "Show the exact missing dependency and recommend its compatible official release. Verify loader, server version, and dependency ordering; do not download from an untrusted mirror."
+
+- id: minecraft-plugin-api-mismatch
+  trigger: "A plugin fails its server API compatibility check"
+  error: "Unsupported API version / legacy plugin loading is disabled"
+  symptom: "The server refuses to load a plugin due to its declared API version."
+  cause: "The plugin build targets an API/server version not supported by this server."
+  fix: "Recommend a plugin release compatible with the current server version, using the project owner's official download page. Avoid editing plugin metadata to bypass compatibility checks."
+
+- id: minecraft-world-corruption-startup
+  trigger: "The server crashes while opening a world or region file"
+  error: "Failed to read chunk / region file is corrupt / failed to load level.dat"
+  symptom: "Startup log identifies world metadata, a region, or a chunk as unreadable."
+  cause: "World data may be damaged, or storage returned an I/O error."
+  fix: "Keep the server stopped to avoid further writes. Check disk and filesystem health, preserve a copy of the world, and recommend restoring a verified backup or using a game-specific offline repair tool. Never regenerate or overwrite the only world automatically."
+
+- id: minecraft-bind-port-conflict
+  trigger: "Minecraft cannot bind its configured game port"
+  error: "FAILED TO BIND TO PORT / Address already in use"
+  symptom: "The server reports that its configured TCP or UDP port is already occupied."
+  cause: "Another server process or service owns the port."
+  fix: "Identify the owning process and server allocation first. Stop only a confirmed stale process or assign a free port; preserve other live servers."
+
+- id: nexuspanel-asf-wrapper-failed
+  trigger: "The isolated server process exits before Java or Minecraft logs begin"
+  error: "Nexus-Mark native runtime failed / process exited code=200 / ASF wrapper error"
+  symptom: "Supervisor or wrapper reports a sandbox error before game startup output."
+  cause: "The ASF isolation wrapper, host kernel feature, per-server identity, or ACL setup failed before launching the game runtime."
+  fix: "Inspect the panel server log, transient systemd unit journal, and ASF self-test for the same server. Repair the specific host preflight/identity problem. Do not bypass isolation or launch tenant code as root. Retry only after the supported isolation path passes preflight."
+
+- id: nexuspanel-server-runtime-failed
+  trigger: "NexusPanel reports a server runtime launch failure"
+  error: "Failed to start server process / spawn failed / exit before server ready"
+  symptom: "The runtime supervisor could not launch or keep the configured game process alive."
+  cause: "Possible executable, working-directory, permission, Java, startup-flag, isolation, or game configuration error; the supervisor message alone does not identify which."
+  fix: "Use the first runtime/supervisor error and process exit status to classify the failure. Check the configured executable, server root, runtime selection, and startup flags. Do not infer a Java memory problem without JVM/OOM evidence, and do not enter a restart loop."
+
+- id: minecraft-startup-flags-invalid
+  trigger: "A custom Java startup flag prevents process launch"
+  error: "Unrecognized VM option / Could not create the Java Virtual Machine"
+  symptom: "Java exits immediately while parsing a custom startup option."
+  cause: "A flag is invalid for the selected Java major version, malformed, or conflicts with a panel-managed memory/system property."
+  fix: "Show the exact rejected flag and recommend removing or correcting that flag in Settings > Startup. Keep panel-managed heap and isolation options under panel control; do not silently discard all user flags."
+
+- id: minecraft-plugin-crash-loop
+  trigger: "A plugin exception repeats after every automatic server restart"
+  error: "Server restart loop after plugin enable failure"
+  symptom: "The same plugin stack trace appears on each startup and the supervisor keeps restarting the process."
+  cause: "A persistent plugin/configuration failure is being retried by a restart policy."
+  fix: "Stop or pause the restart loop, preserve the logs, and isolate the named plugin on an offline copy or staging server. Resume production only after a verified fix; never auto-delete plugin data."
+
+- id: bedrock-binary-permission
+  trigger: "Official Bedrock Dedicated Server is installed on Linux but will not execute"
+  error: "Permission denied: bedrock_server"
+  symptom: "The installed Bedrock binary exists but the operating system refuses to execute it."
+  cause: "The executable bit or a parent directory permission was lost during extraction, or the server identity cannot traverse the path."
+  fix: "Verify the binary and parent-directory permissions for the dedicated server identity. Restore execute permission only on the official server binary; do not chmod the full server tree or run it as root."
+
+- id: bedrock-platform-architecture
+  trigger: "Installing official Bedrock Dedicated Server on an unsupported operating system or CPU architecture"
+  error: "Exec format error: bedrock_server"
+  symptom: "Linux cannot execute the downloaded Bedrock server binary."
+  cause: "The selected official package does not match the VPS OS or CPU architecture, or it is an incomplete download."
+  fix: "Check the VPS architecture and supported BDS package platform, then reinstall a matching official build. Do not try to run an x64 binary on ARM through an unsafe compatibility workaround."
+
+- id: bedrock-native-library-missing
+  trigger: "Official Bedrock Dedicated Server fails during dynamic linking"
+  error: "error while loading shared libraries: lib*.so: cannot open shared object file"
+  symptom: "The BDS executable is present but exits before opening the world because a named Linux shared library is missing."
+  cause: "The host is missing a runtime library required by that Bedrock build."
+  fix: "Identify the exact missing library and install its supported distribution package (commonly libstdc++6, libgcc-s1, or libc6). Confirm the host distribution and architecture before installing packages."
+
+- id: bedrock-udp-firewall
+  trigger: "Bedrock server starts but Bedrock clients cannot connect"
+  error: "RakNet timeout / UDP port unreachable / no Bedrock response"
+  symptom: "The Bedrock process is running, but clients time out on its configured game port."
+  cause: "Bedrock uses UDP; the server allocation, host firewall, provider firewall, or external route may block that UDP port."
+  fix: "Verify the configured Bedrock port and open that UDP port in both host and provider firewalls. Confirm the process is listening and test from outside the VPS. A successful TCP probe does not prove UDP works."
+
+- id: bedrock-pack-engine-version
+  trigger: "A Bedrock resource or behavior pack is rejected during startup"
+  error: "Pack requires a newer engine version / min_engine_version is too high"
+  symptom: "The Bedrock log reports the pack's required engine version exceeds the server's accepted version."
+  cause: "The pack targets a newer Bedrock engine than the installed BDS build supports."
+  fix: "Match the pack release to the installed BDS version or update BDS from the supported software catalog. Preserve the world and pack before making changes; only quarantine an incompatible pack while the server is offline."
+
+- id: bedrock-pack-manifest-invalid-startup
+  trigger: "Bedrock cannot load an installed content pack"
+  error: "manifest.json invalid / missing header UUID / pack manifest parse error"
+  symptom: "The server identifies a malformed or missing pack manifest."
+  cause: "The pack archive may be incomplete, its manifest JSON is invalid, or required UUID/version fields are absent."
+  fix: "Validate the named manifest and compare it with the pack's official release. Restore a valid copy or disable only that pack on an offline copy; do not rewrite UUIDs referenced by a live world."
+
+- id: bedrock-allowlist-rejected
+  trigger: "A Bedrock player is rejected while allowlisting is enabled"
+  error: "Player is not whitelisted / allowlist check failed"
+  symptom: "A player cannot join even though an operator expects the name to be allowed."
+  cause: "The allowlist may be enabled without the player's current XUID entry, or the allowlist file may not have reloaded."
+  fix: "Check the player's Bedrock identity/XUID in the panel allowlist, confirm allowlist is enabled intentionally, and use the server-supported reload or a controlled restart. Do not disable the allowlist as an automatic fix."
+
+- id: bedrock-pocketmine-runtime
+  trigger: "PocketMine-MP fails before it starts accepting connections"
+  error: "PocketMine PHP runtime missing / invalid PHAR / required extension unavailable"
+  symptom: "PocketMine startup exits while loading its bundled PHP runtime or PHAR."
+  cause: "The managed PHP runtime, extension set, or PocketMine PHAR is missing, incomplete, or incompatible."
+  fix: "Use the panel's PocketMine software installer to restore its bundled runtime and official PHAR. Inspect the exact missing extension and install log; do not substitute an arbitrary system PHP binary."
+
+- id: bedrock-plugin-unsupported-software
+  trigger: "Trying to install a Java plugin or a Bedrock plugin on official BDS"
+  error: "Plugin installation is unsupported for this software / use PocketMine for Bedrock plugins"
+  symptom: "The selected software does not provide a compatible plugin loader."
+  cause: "Official Bedrock Dedicated Server supports behavior/resource packs, not PocketMine .phar plugins or Java .jar plugins."
+  fix: "For official BDS, install compatible behavior/resource packs. If plugin APIs are required, select PocketMine-MP and confirm its feature differences; PocketMine is not full vanilla BDS parity."
+
+- id: panel-api-request-failed
+  trigger: "A panel section fails to load or an action returns an API error"
+  error: "Request failed / API returned HTTP 500 / Cannot GET or POST /api/..."
+  symptom: "The UI shows an error while fetching or changing panel data."
+  cause: "The route may be missing, the request method/payload may disagree with the backend, or a backend exception occurred."
+  fix: "Capture the exact method, path, HTTP status, and first backend stack trace. Compare the frontend request with the registered route and return a structured error. Never expose credentials or session tokens in logs."
+
+- id: panel-live-view-stale
+  trigger: "Files or plugin state changes on the server but the panel still shows old rows"
+  error: "File manager or plugin list is stale until page refresh"
+  symptom: "An upload, extraction, archive, install, or delete completes but the visible list does not update."
+  cause: "The mutation completed without invalidating or refreshing the corresponding live view state."
+  fix: "After the operation succeeds, refresh the affected server-scoped listing or consume its live event, then reconcile with the filesystem as source of truth. Do not require a full-page reload or report success before the filesystem operation completes."
+
+- id: panel-live-progress-disappears
+  trigger: "A long archive, extraction, or backup operation runs in the panel"
+  error: "Progress disappears after one second / percentage never updates"
+  symptom: "The UI hides progress before the server-side operation completes or only shows a brief initial state."
+  cause: "Progress lifecycle is tied to a short request/timeout instead of a persistent operation ID and terminal event."
+  fix: "Track operation state by server and operation ID, report completed bytes or files where available, poll or stream updates, and dismiss only after success/failure reaches a terminal state. Do not invent percent precision when total work is unknown."
+
+- id: panel-console-command-duplicated
+  trigger: "One console message is sent but the game receives it twice"
+  error: "Console command duplicated / command appears twice in server log"
+  symptom: "A single submit produces duplicate console output or duplicate game action."
+  cause: "The frontend may submit through both form and key handlers, or a reconnect/retry may replay a non-idempotent command."
+  fix: "Trace one submit from UI event to backend write, guard against duplicate in-flight request IDs, and do not automatically replay console commands after reconnect. Preserve legitimate server output instead of deleting repeated-looking log lines."
+
+- id: panel-section-refresh-route-lost
+  trigger: "Refreshing a non-dashboard panel section returns to Dashboard"
+  error: "Panel route resets to dashboard after browser refresh"
+  symptom: "The selected settings, Tebex, or other section is lost on reload."
+  cause: "The selected section is held only in transient UI state and is not restored from the URL or validated persisted navigation state."
+  fix: "Encode the current section in the URL/history state, validate it against available sections and permissions at startup, then restore it after refresh. Do not bypass role/capability checks."
+
+- id: panel-console-session-duplicated
+  trigger: "Console output duplicates after reconnecting the panel live stream"
+  error: "Duplicate console lines after reconnect / WebSocket or event stream reconnect"
+  symptom: "Lines already shown before reconnect appear again."
+  cause: "The client resumes without a last-seen event cursor or the backend replays overlapping log buffers."
+  fix: "Use monotonically increasing event IDs or timestamps with a stable cursor and deduplicate transport replay by event ID. Do not deduplicate separate identical messages emitted by the game."
+
+- id: panel-database-connection-failed
+  trigger: "NexusPanel cannot open its configured database during startup"
+  error: "SQLITE_CANTOPEN / unable to open database file / database initialization failed"
+  symptom: "Panel startup or API requests fail before normal database-backed features load."
+  cause: "The configured DB path is unavailable, parent directory is not writable by the service identity, disk is full, or the database file is invalid."
+  fix: "Check the configured data root, service-user access, free disk space, and startup journal. Preserve the database and its WAL files before recovery; do not delete or recreate the production DB as a first step."
+
+- id: panel-database-migration-failed
+  trigger: "A panel update fails while applying a database schema migration"
+  error: "Database migration failed / no such column / migration transaction rolled back"
+  symptom: "The panel logs a migration error at startup or a route fails due to schema mismatch."
+  cause: "The database schema does not match the running code, or a migration failed partway through."
+  fix: "Stop duplicate panel instances, preserve a verified DB snapshot, and inspect the exact migration and schema version. Apply a supported forward migration or restore a matching backup; never drop user/server tables to silence the error."
+
+- id: panel-session-cookie-invalid
+  trigger: "A valid panel user is repeatedly returned to login after restart"
+  error: "Session invalid / CSRF token mismatch / signed cookie verification failed"
+  symptom: "The browser loses authentication after a panel restart or rejects state-changing requests."
+  cause: "Cookie signing secret changed, cookies are stale, proxy HTTPS settings are inconsistent, or the request lacks the required CSRF header."
+  fix: "Check persistent cookie-secret configuration, proxy trust and HTTPS cookie settings, browser cookie scope, and CSRF header wiring. Keep the signing secret stable across restarts; do not reset or delete owner accounts to repair sessions."
+
+- id: panel-upload-session-expired
+  trigger: "A large chunked upload is resumed after the server lost its upload state"
+  error: "Upload session not found / committed ranges missing / checksum mismatch"
+  symptom: "A resumed upload fails or progress jumps backward after reconnect or panel restart."
+  cause: "The upload session or committed chunk manifest expired, was not persisted, or conflicts with the actual temporary file."
+  fix: "Compare the session ID, committed byte ranges, file size, and chunk hashes. Resume only from verified committed chunks; otherwise create a fresh upload and remove only its abandoned temporary artifact after confirming it is not active."
+
+- id: panel-plugin-inventory-stale
+  trigger: "A plugin is deleted from the file manager but remains in the plugin UI"
+  error: "Plugin list still shows deleted plugin / installed state out of sync"
+  symptom: "The plugin catalog reports a plugin as installed after its file was removed."
+  cause: "The plugin view is using stale cached metadata instead of reconciling with the server's active plugin directory."
+  fix: "Rescan the correct plugins or mods directory after file mutations and derive installed state from matching files. Keep catalog search metadata separate from installed-file state; do not delete another plugin's data directory automatically."
+
+- id: panel-service-restart-data-missing
+  trigger: "Panel accounts or server records disappear after restarting NexusPanel"
+  error: "Users/servers missing after restart / panel appears to run first-time setup again"
+  symptom: "The restarted panel opens an empty setup state or cannot see previously stored accounts."
+  cause: "The service is using a different or ephemeral data root, wrong working directory, or a newly initialized database."
+  fix: "Inspect the service environment and resolved database path, then compare it with the existing production DB and backups. Restore the original configured data root; never initialize over or delete the old database until its contents are verified."
+
+- id: panel-permission-denied-route
+  trigger: "A limited panel user can see a section but its operation returns forbidden, or can call an operation they should not access"
+  error: "403 Forbidden / capability denied / permission map mismatch"
+  symptom: "Navigation visibility and backend authorization disagree."
+  cause: "The UI and API use different capability keys, or the route lacks the expected backend authorization check."
+  fix: "Use one capability definition for navigation and endpoint authorization, with backend enforcement authoritative. Verify both allowed and denied cases using a limited account; do not solve a 403 by disabling authorization."
+
+- id: panel-service-start-limit
+  trigger: "NexusPanel repeatedly crashes and systemd stops retrying it"
+  error: "Start request repeated too quickly / start-limit-hit"
+  symptom: "The panel service remains failed after several rapid startup attempts."
+  cause: "A persistent startup error caused a restart loop and systemd rate limiting."
+  fix: "Inspect the first failure in journalctl, correct the underlying issue, and only then clear the start limit and start once. Avoid increasing restart frequency or looping blindly."
+
+- id: process-port-held
+  trigger: "Minecraft or Bedrock cannot bind because another OS process is listening on the game port"
+  error: "Address already in use / bind failed / EADDRINUSE"
+  symptom: "The game process reports its TCP or UDP port is occupied, although the panel may not show another server allocation using it."
+  cause: "A running or stale game process, proxy, or other host service owns the socket. A panel allocation collision and an OS-level listener are separate conditions."
+  fix: "Inspect the protocol and listener with an OS socket tool (Linux: ss -ltnup; Windows: Get-NetTCPConnection), identify its owning PID/service, and map it to a server before stopping anything. Stop only a confirmed stale process or assign a free compatible port. Never kill an unknown process."
+
+- id: world-session-lock-active
+  trigger: "Minecraft says the world/session is already in use while a server process may still be running"
+  error: "session.lock / World is already in use / Failed to lock level"
+  symptom: "A second launch cannot open a world because its session lock is held."
+  cause: "Another active process may be writing the same world, or an old lock file may remain after an unclean shutdown."
+  fix: "First check the panel runtime status and OS process list for every process using that server root. If any process is active, stop it gracefully and do not delete the lock. Only when no process can access the world, preserve a backup and remove a confirmed stale session lock before one controlled start. Never run two servers against the same world."
+
+- id: duplicate-server-process
+  trigger: "NexusPanel says a server is already running but the status appears offline, or a second start is refused"
+  error: "Server process already exists / another instance is running / PID still active"
+  symptom: "The tracked process and visible server status disagree, or a second process may be starting against the same root."
+  cause: "The runtime may have a stale PID record, a live child that lost its panel connection, or a duplicate external launch."
+  fix: "Compare the tracked PID with the OS process command line, server root, and transient systemd unit. Reattach/reconcile a valid live process; clear stale tracking only after verifying the process is gone. Do not launch a second writer or kill a PID based only on a stale status label."
+
+- id: server-file-busy
+  trigger: "A server file cannot be moved, replaced, or deleted because a process holds it open"
+  error: "EBUSY / resource busy / sharing violation / file is in use by another process"
+  symptom: "A file manager operation fails while a server or backup task may still be using the file."
+  cause: "The active game process, archive/backup worker, or another host process has an open handle; some filesystems also report transient busy errors during writes."
+  fix: "Identify the operation and owning process, wait for active writes or stop the server cleanly, then retry. For world/database files, take an offline verified backup before repair. Do not force-delete an open world, LevelDB, SQLite, or backup file."
+
+- id: support-config-json-missing
+  trigger: "A required Minecraft support JSON file is missing or malformed"
+  error: "whitelist.json / allowlist.json / permissions.json not found or JSON parse failed"
+  symptom: "The server cannot load a support list/config file, or its JSON is invalid."
+  cause: "A first install omitted the default file, or an interrupted edit left malformed JSON."
+  fix: "For a missing file, create the documented empty-list default. For malformed content, first preserve the original in config-recovery, then rebuild only that known support file. Never reset a valid list."
+
+- id: bedrock-missing-pack-reference
+  trigger: "A Bedrock world refers to a behavior/resource pack that is not installed"
+  error: "Pack UUID not found / missing behavior or resource pack / pack stack missing"
+  symptom: "The world pack reference JSON names a pack UUID/version absent from installed pack manifests."
+  cause: "The pack was removed or moved, or its manifest no longer matches the world reference."
+  fix: "Only while the server is offline, back up the world's reference JSON and compare UUID/version values to installed manifests. Remove only references proven missing; retain and restore any pack required by the world. Never delete world data."
+
+- id: archive-incomplete
+  trigger: "An archive or transfer stopped before completion"
+  error: "Unexpected end of archive / truncated ZIP / stale .download or .uploading file"
+  symptom: "Extraction or archive validation fails, or an old partial transfer remains in the server root."
+  cause: "A transfer was interrupted, or a partial artifact was left after a failed operation."
+  fix: "Check that no upload/archive job is active and that the partial file is older than the active-operation window. Remove only confirmed stale partial artifacts, then retry or resume from verified chunks. Never remove a valid archive or backup."
+
+- id: server-root-readonly
+  trigger: "The server's isolated service identity cannot write to its own server root"
+  error: "Server root not writable / write test failed / permission denied under server root"
+  symptom: "The runtime cannot create logs, configuration, or world files in the configured server directory."
+  cause: "Ownership or ACLs for the dedicated server identity are incorrect, or the filesystem is read-only."
+  fix: "Run the scoped permission auditor and repair only the affected server-root paths for that server identity. If the mount is read-only or storage has I/O errors, stop and repair the host filesystem instead of changing permissions. Never use chmod 777 or widen access to other tenants."
+```
+
+### Training record schema
 
 Every record in this corpus follows this schema. Use it to generate SFT pairs.
 

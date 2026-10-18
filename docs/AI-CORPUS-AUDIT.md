@@ -7,8 +7,9 @@ Reviewed against the current NexusPanel 1.0.3 checkout on 2026-10-19.
 - `AI-TRAINING-CORPUS.md` calls itself a complete, current inventory, but it is
   labeled NexusPanel 6.0.0 and was generated on 2026-10-12. The repository
   package is 1.0.3.
-- The corpus contains 407 `id` record entries, while its summary says 362. Of
-  those, 282 contain enough symptom/error text to seed the current classifier.
+- The corpus now contains 452 unique `id` records; 364 have enough
+  symptom/error text to seed the current classifier. The historical summary
+  remains stale and should not be treated as a live count.
 - Its file-layout appendix names AI modules that are absent from `backend/`,
   and its AI route table lists routes that the current code explicitly says
   were removed in 1.0.0.
@@ -22,12 +23,19 @@ Reviewed against the current NexusPanel 1.0.3 checkout on 2026-10-19.
 
 ## How this model uses it
 
-The prepared set has 645 examples: two issue-ID classification prompts for
-each of 282 evidence-bearing records, plus 81 off-topic examples. Runtime
-results are checked against the generated ID registry and shown as unverified
-advice only. They never trigger a repair, command, file write, server restart,
-or API mutation. Current deterministic diagnostics and their existing bounded
-repair path remain authoritative.
+The current prepared set has 1,356 examples, including 170 off-topic examples
+and 42 targets for registered repair-tool requests across eight bounded tools.
+Recent records cover panel API/live UI, console duplication and reconnect, database, session, upload,
+plugin inventory, service restart, permissions, Bedrock Dedicated Server and
+PocketMine failures, and locks. The tool allowlist covers only existing bounded
+repair routines. A request must match exact supplied evidence and a current
+deterministic diagnostic (or a verified missing executable); it must also pass
+server-state checks in the backend. Recursive permission rewriting is not
+exposed because it needs narrower per-server ACL handling. Needle cannot issue
+shell commands, choose arbitrary paths, delete worlds/locks, kill processes,
+or restart a server.
+Current deterministic diagnostics and their bounded repair path remain the
+fallback and source of truth.
 
 Before treating the corpus as a production troubleshooting source, update it
 from live backend routes and error-producing code, reconcile its counts, then

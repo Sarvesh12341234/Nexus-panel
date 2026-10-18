@@ -3115,7 +3115,130 @@ async function quarantineIncompatibleBedrockPacks(server, root, logs) {
   return { actions, warnings };
 }
 
-async function runServerRepair(server, software, { applyOptimizations = false, logs } = {}) {
+const REPAIR_TOOL_DIAGNOSTICS = {
+  repair_server_properties: ['properties-path', 'properties-syntax', 'properties-value', 'properties-encoding'],
+  repair_missing_executable: ['jar-corrupt'],
+  install_bundled_java_runtime: ['java-missing', 'bad-java-version'],
+  rebuild_support_configs: ['support-config-missing'],
+  repair_bedrock_pack_references: ['bedrock-missing-pack-reference'],
+  quarantine_identified_plugin: ['plugin-exception', 'plugin-archive-corrupt', 'plugin-dependency', 'duplicate-plugin', 'plugin-api-version', 'loader-mismatch', 'mod-resolution', 'mixin', 'datapack'],
+  cleanup_stale_transfers: ['archive-incomplete'],
+  quarantine_incompatible_bedrock_pack: ['bedrock-pack-version'],
+};
+
+async function cleanupStaleTransferFiles(server, root) {
+  if (runtimeStatus(server.id) !== 'offline') return 0;
+  const activeServerOperation = [...keyedOperations.keys()].some((key) =>
+    key !== `repair:${server.id}`
+      && (key.includes(`:${server.id}:`) || key.endsWith(`:${server.id}`)));
+  if (activeServerOperation) return 0;
+  const resumableUploads = new Set(db.prepare(`
+    SELECT relative_path FROM upload_sessions WHERE server_id = ? AND status != 'complete'
+  `).all(server.id).map((row) => path.resolve(root, `${row.relative_path}.uploading`)));
+  const queue = [root];
+  const staleTransfers = [];
+  let scanned = 0;
+  while (queue.length && scanned < 10000) {
+    const directory = queue.shift();
+    const entries = await fs.promises.readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      scanned += 1;
+      const absolute = assertInside(root, path.join(directory, entry.name));
+      if (entry.isDirectory()) {
+        if (!['backups', 'archives', 'runtime'].includes(entry.name.toLowerCase())) queue.push(absolute);
+      } else if (/\.(?:download|uploading)$/i.test(entry.name)) {
+        const stats = await fs.promises.stat(absolute).catch(() => null);
+        if (
+          stats
+          && Date.now() - stats.mtimeMs > 60 * 60 * 1000
+          && !(entry.name.endsWith('.uploading') && resumableUploads.has(path.resolve(absolute)))
+        ) staleTransfers.push(absolute);
+      }
+      if (scanned >= 10000) break;
+    }
+  }
+  for (const file of staleTransfers) await fs.promises.rm(file, { force: true });
+  return staleTransfers.length;
+}
+
+async function executeRequestedRepairTool(request, context) {
+  const { server, software, root, diagnostics, logs } = context;
+  const actions = [];
+  const warnings = [];
+  const allowedDiagnostics = REPAIR_TOOL_DIAGNOSTICS[request?.tool];
+  const missingExecutableVerified = request?.tool === 'repair_missing_executable'
+    && software
+    && software.edition === server.type
+    && !executableCandidates(server, software).some((candidate) => fs.existsSync(candidate));
+  if (!allowedDiagnostics || (!missingExecutableVerified && !diagnostics.some((item) => allowedDiagnostics.includes(item.id)))) {
+    return { actions, warnings: ['AI repair tool request did not match an active deterministic diagnostic.'] };
+  }
+  if (runtimeStatus(server.id) !== 'offline') {
+    return { actions, warnings: ['AI repair tool request skipped because the server is not confirmed offline.'] };
+  }
+
+  try {
+    switch (request.tool) {
+      case 'repair_server_properties': {
+        const result = await repairPropertiesFile(server);
+        if (result.repaired) actions.push(`AI tool repaired server.properties (${result.issues.join(' ') || 'created missing file'}).`);
+        break;
+      }
+      case 'repair_missing_executable': {
+        if (!software || software.edition !== server.type) throw new Error('The selected server software does not match this server edition.');
+        const result = await repairMissingExecutable(server, software);
+        if (result.repaired) actions.push(result.message);
+        else warnings.push('Executable repair was not needed because the selected executable already exists.');
+        break;
+      }
+      case 'install_bundled_java_runtime': {
+        if (software?.edition !== 'java' || server.type !== 'java') throw new Error('Bundled Java repair is Java-server-only.');
+        const major = requiredJavaMajorForMinecraftVersion(server.software_version || 'latest');
+        const binary = await installBundledJavaRuntime(root, server.id, major, () => {});
+        actions.push(`Installed bundled Java ${major} runtime at ${displayPath(binary)}.`);
+        break;
+      }
+      case 'rebuild_support_configs': {
+        const result = await repairMissingSupportConfigs(server, root);
+        actions.push(...result.actions);
+        warnings.push(...result.warnings);
+        break;
+      }
+      case 'repair_bedrock_pack_references': {
+        if (server.type !== 'bedrock') throw new Error('Pack-reference repair is Bedrock-only.');
+        const result = await repairBedrockPackReferences(server, root);
+        actions.push(...result.actions);
+        warnings.push(...result.warnings);
+        break;
+      }
+      case 'quarantine_identified_plugin': {
+        const result = await applyAdvancedAgentActions(server, software, root, diagnostics, context.repairContext, logs);
+        actions.push(...result.actions);
+        warnings.push(...result.warnings);
+        break;
+      }
+      case 'cleanup_stale_transfers': {
+        const count = await cleanupStaleTransferFiles(server, root);
+        if (count) actions.push(`Removed ${count} confirmed stale partial transfer(s).`);
+        break;
+      }
+      case 'quarantine_incompatible_bedrock_pack': {
+        if (server.type !== 'bedrock') throw new Error('Pack quarantine is Bedrock-only.');
+        const result = await quarantineIncompatibleBedrockPacks(server, root, logs);
+        actions.push(...result.actions);
+        warnings.push(...result.warnings);
+        break;
+      }
+      default:
+        warnings.push('AI requested an unregistered repair tool; no action was taken.');
+    }
+  } catch (error) {
+    warnings.push(`AI repair tool ${request.tool} failed safely: ${error.message}`);
+  }
+  return { actions, warnings };
+}
+
+async function runServerRepair(server, software, { applyOptimizations = false, allowModelTools = false, logs } = {}) {
   const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const actions = [];
   const warnings = [];
@@ -3133,6 +3256,27 @@ async function runServerRepair(server, software, { applyOptimizations = false, l
   };
   const terminalTelemetry = await collectAgentTerminalTelemetry(server);
   agentAnalysis.terminalTelemetry = terminalTelemetry;
+  const missingSelectedExecutable = Boolean(
+    software?.edition === server.type
+      && !executableCandidates(server, software).some((candidate) => fs.existsSync(candidate)),
+  );
+  if (allowModelTools && (diagnostics.length || missingSelectedExecutable)) {
+    const repairCandidates = diagnostics.map((item) =>
+      `issueId: ${item.id}; evidence: ${item.summary}`);
+    if (missingSelectedExecutable) {
+      repairCandidates.push('issueId: server-not-installed; evidence: Install server software before starting.');
+    }
+    const modelRequest = await needle2Agent.suggestRepairTool(server.id, [
+      'Use request_repair_tool for a confirmed issue if a registered repair matches. Use the exact issueId and evidence labels below. If none matches, make no request.',
+      ...repairCandidates,
+    ].join('\n')).catch(() => null);
+    if (modelRequest) {
+      agentAnalysis.requestedRepairTool = { tool: modelRequest.tool, issueId: modelRequest.issueId, evidence: modelRequest.evidence };
+      const result = await executeRequestedRepairTool(modelRequest, { server, software, root, diagnostics, logs: logs || consoleLogs(server.id), repairContext });
+      actions.push(...result.actions);
+      warnings.push(...result.warnings);
+    }
+  }
   if (terminalTelemetry.enabled) {
     logFixed({
       serverId: server.id,
@@ -3226,26 +3370,8 @@ async function runServerRepair(server, software, { applyOptimizations = false, l
     });
   }
 
-  const queue = [root];
-  const staleTransfers = [];
-  let scanned = 0;
-  while (queue.length && scanned < 10000) {
-    const directory = queue.shift();
-    const entries = await fs.promises.readdir(directory, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      scanned += 1;
-      const absolute = assertInside(root, path.join(directory, entry.name));
-      if (entry.isDirectory()) {
-        if (!['backups', 'archives'].includes(entry.name.toLowerCase())) queue.push(absolute);
-      } else if (/\.(?:download|uploading)$/i.test(entry.name)) {
-        const stats = await fs.promises.stat(absolute).catch(() => null);
-        if (stats && Date.now() - stats.mtimeMs > 60 * 60 * 1000) staleTransfers.push(absolute);
-      }
-      if (scanned >= 10000) break;
-    }
-  }
-  for (const file of staleTransfers) await fs.promises.rm(file, { force: true });
-  actions.push(`Removed ${staleTransfers.length} stale partial transfer(s).`);
+  const staleTransferCount = await cleanupStaleTransferFiles(server, root);
+  actions.push(`Removed ${staleTransferCount} stale partial transfer(s).`);
   checks.push({ name: 'Path boundary', ok: true, detail: displayPath(root) });
   const vpsReadiness = await inspectVpsRepairReadiness(server, root);
   vpsReadiness.actions.forEach((item) => actions.push(item));
@@ -3312,7 +3438,10 @@ async function runServerRepair(server, software, { applyOptimizations = false, l
     agent: publicAgentAnalysis(agentAnalysis),
     summary,
     concreteActions,
-    shouldRestart: !criticalWorldCrash || concreteActions.length > 0,
+    // A generic repair action (for example rebuilding a config file) does not
+    // prove a Bedrock world database crash is fixed. Keep auto-restart blocked
+    // until the world has been explicitly recovered and verified.
+    shouldRestart: !criticalWorldCrash,
   };
 }
 
@@ -6416,7 +6545,7 @@ app.post('/api/servers/:id/fix', requirePermission(capabilities.SERVER_MANAGE, p
     job.message = 'Inspecting runtime, files, logs, and isolation policy...';
     withKeyedOperation(`repair:${server.id}`, async () => {
       await safeTimelinePoint(server, { user: { id: actorUserId } }, 'Before Repair & Diagnose', 'Captured configuration before repair workflow.');
-      const report = await runServerRepair(server, software, { applyOptimizations: true });
+      const report = await runServerRepair(server, software, { applyOptimizations: true, allowModelTools: true });
       const learned = learnRepairPlaybook(server, report);
       appendLog(server.id, `[NexusPanel] Repair & Diagnose checks completed: ${report.summary} Start the server and keep it online for 60 seconds before the repair is trusted.`);
       if (learned) appendLog(server.id, `[NexusPanel] Repair playbook ${learned.signature} recorded as an untrusted candidate; it will not be replayed until stable runtime validates it.`);
@@ -7755,7 +7884,7 @@ setExitHandler(async ({ server, software, code, signal, intentional, uptimeMs = 
       });
   let proactiveReport = null;
   if (!learnedRecovery && !targetedPropertyHeal) {
-    proactiveReport = await runServerRepair(current, software, { logs: runLogs })
+    proactiveReport = await runServerRepair(current, software, { allowModelTools: true, logs: runLogs })
       .then((report) => {
         appendLog(current.id, `[NexusPanel] Proactive crash repair completed: ${report.summary}`);
         (report.concreteActions || []).forEach((action) => appendLog(current.id, `[NexusPanel] Repair action: ${action}`));

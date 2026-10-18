@@ -14,6 +14,7 @@ CORPUS = ROOT / "docs" / "AI-TRAINING-CORPUS.md"
 OUT_DIR = ROOT / "data" / "needle2"
 TRAINING_FILE = OUT_DIR / "repair-train.jsonl"
 REGISTRY_FILE = ROOT / "ai" / "needle2" / "known-issues.json"
+REPAIR_TOOLS_FILE = ROOT / "ai" / "needle2" / "repair-tools.json"
 NEGATIVE_QUERIES = [
     "What is the weather in Paris today?",
     "Write a poem about a redstone castle.",
@@ -73,11 +74,11 @@ def read_records(markdown: str) -> list[dict[str, str]]:
 
 def evidence_for(record: dict[str, str]) -> str:
     parts = []
-    for key in ("error", "stderr", "message", "symptom", "trigger", "behaviour", "behavior"):
+    for key in ("error", "stderr", "message", "log", "symptom", "trigger", "recovery_reason", "behaviour", "behavior"):
         value = record.get(key, "").strip()
         if value and value.lower() not in {part.lower() for part in parts}:
             parts.append(value)
-    return " | ".join(parts)[:320]
+    return " | ".join(parts)[:64]
 
 
 def make_example(query: str, issue_id: str, evidence: str, tools: list[dict]) -> dict:
@@ -86,14 +87,29 @@ def make_example(query: str, issue_id: str, evidence: str, tools: list[dict]) ->
         "tools": tools,
         "answers": [{
             "name": "lookup_documented_issue",
-            "arguments": {"id": issue_id, "evidence": evidence[:320]},
+            "arguments": {"id": issue_id, "evidence": evidence[:64]},
         }],
-        "reasoning": f"The supplied NexusPanel error text matches documented issue {issue_id}; preserve the evidence verbatim.",
     }
+
+
+def make_repair_example(query: str, issue_id: str, tool_name: str, evidence: str, tools: list[dict]) -> dict:
+    return {
+        "query": f"Repair issue {issue_id} if safe. Evidence: {query}",
+        "tools": tools,
+        "answers": [{
+            "name": "request_repair_tool",
+            "arguments": {"tool": tool_name, "issueId": issue_id, "evidence": evidence[:64]},
+        }],
+    }
+
+
+def query_variants(record: dict[str, str], evidence: str) -> list[str]:
+    return [evidence, f"NexusPanel error: {evidence}"]
 
 
 def main() -> int:
     markdown = CORPUS.read_text(encoding="utf-8-sig")
+    repair_contract = json.loads(REPAIR_TOOLS_FILE.read_text(encoding="utf-8"))
     records = read_records(markdown)
     usable = [(record, evidence_for(record)) for record in records]
     usable = [(record, evidence) for record, evidence in usable if evidence]
@@ -103,35 +119,58 @@ def main() -> int:
 
     registry = {}
     for record, _ in usable:
-        registry[record["id"]] = {
+        issue = {
             "error": record.get("error", "") or record.get("stderr", "") or record.get("message", ""),
             "cause": record.get("cause", ""),
             "fix": record.get("fix", ""),
             "httpStatus": record.get("http_status", ""),
             "exitCode": record.get("exit_code", ""),
         }
+        repair_tool = repair_contract.get("issueMap", {}).get(record["id"])
+        if repair_tool:
+            issue["repairTool"] = repair_tool
+        registry[record["id"]] = issue
 
-    tools = [{
+    # Needle's local trainer truncates from the right. Keep both function names
+    # present in every prompt so the model learns when to classify and when to
+    # request a repair. Compact schemas keep all labels within 256 tokens;
+    # runtime still supplies the full schemas and validates requests in Node.
+    lookup_tool = {
         "name": "lookup_documented_issue",
-        "description": "Identify one NexusPanel issue by its stable documentation ID. This is read-only triage; it cannot execute repairs, commands, or API operations. Return only an ID evidenced by the supplied error text.",
         "parameters": {
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Exact issue ID from the NexusPanel training corpus."},
-                "evidence": {"type": "string", "description": "Short exact excerpt from the supplied log or symptom."},
+                "id": {"type": "string"},
+                "evidence": {"type": "string"},
             },
             "required": ["id", "evidence"],
         },
-    }]
+    }
+    repair_request_schema = {
+        "name": repair_contract["tool"]["name"],
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string"},
+                "issueId": {"type": "string"},
+                "evidence": {"type": "string"},
+            },
+            "required": ["tool", "issueId", "evidence"],
+        },
+    }
 
     examples = []
     for record, evidence in usable:
         issue_id = record["id"]
-        examples.append(make_example(evidence, issue_id, evidence, tools))
-        examples.append(make_example(f"NexusPanel problem: {evidence} How should I diagnose this?", issue_id, evidence, tools))
+        for query in query_variants(record, evidence):
+            training_tools = [lookup_tool, repair_request_schema]
+            examples.append(make_example(query, issue_id, evidence, training_tools))
+            repair_tool = repair_contract.get("issueMap", {}).get(issue_id)
+            if repair_tool:
+                examples.append(make_repair_example(query, issue_id, repair_tool, evidence, training_tools))
     negative_count = max(1, (len(examples) + 6) // 7)
     for index in range(negative_count):
-        examples.append({"query": NEGATIVE_QUERIES[index % len(NEGATIVE_QUERIES)], "tools": tools, "answers": []})
+        examples.append({"query": NEGATIVE_QUERIES[index % len(NEGATIVE_QUERIES)], "tools": [lookup_tool, repair_request_schema], "answers": []})
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,41 @@
+{
+  "tool": {
+    "name": "request_repair_tool",
+    "description": "Request one registered, server-scoped NexusPanel repair. The backend validates the issue, exact evidence, server state, permissions, and safety conditions before dispatch. Never request a tool without matching log evidence.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": [
+            "repair_server_properties",
+            "repair_missing_executable",
+            "install_bundled_java_runtime",
+            "rebuild_support_configs",
+            "repair_bedrock_pack_references",
+            "quarantine_identified_plugin",
+            "cleanup_stale_transfers",
+            "quarantine_incompatible_bedrock_pack"
+          ]
+        },
+        "issueId": { "type": "string", "description": "Exact documented issue ID linked to this tool." },
+        "evidence": { "type": "string", "description": "Short exact excerpt from the supplied logs or verified panel state." }
+      },
+      "required": ["tool", "issueId", "evidence"]
+    }
+  },
+  "issueMap": {
+    "server-not-installed": "repair_missing_executable",
+    "java-missing": "install_bundled_java_runtime",
+    "java-too-old": "install_bundled_java_runtime",
+    "java-runtime-missing": "install_bundled_java_runtime",
+    "server-properties-unreadable": "repair_server_properties",
+    "server-properties-recovery": "repair_server_properties",
+    "support-config-json-missing": "rebuild_support_configs",
+    "bedrock-missing-pack-reference": "repair_bedrock_pack_references",
+    "archive-incomplete": "cleanup_stale_transfers",
+    "minecraft-plugin-isolate-safely": "quarantine_identified_plugin",
+    "minecraft-plugin-crash-loop": "quarantine_identified_plugin",
+    "bedrock-pack-engine-version": "quarantine_incompatible_bedrock_pack"
+  }
+}

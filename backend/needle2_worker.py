@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import sys
 
 
+REPAIR_CONTRACT = json.loads((Path(__file__).resolve().parents[1] / "ai" / "needle2" / "repair-tools.json").read_text(encoding="utf-8"))
 TOOLS = [{
     "name": "lookup_documented_issue",
     "description": "Identify one NexusPanel issue by its stable documentation ID. This tool only classifies supplied text. It cannot execute repairs, commands, or API operations.",
@@ -18,7 +20,7 @@ TOOLS = [{
         },
         "required": ["id", "evidence"],
     },
-}]
+}, REPAIR_CONTRACT["tool"]]
 
 
 def main() -> int:
@@ -42,9 +44,18 @@ def main() -> int:
             response = agent.complete(text)
             calls = response.get("function_calls", []) if isinstance(response, dict) else []
             result = None
-            if calls and calls[0].get("name") == "lookup_documented_issue":
-                args = calls[0].get("arguments", {})
-                result = {"id": args.get("id"), "evidence": args.get("evidence")}
+            if calls:
+                call = calls[0]
+                args = call.get("arguments", {})
+                if call.get("name") == "lookup_documented_issue":
+                    result = {"kind": "issue", "id": args.get("id"), "evidence": args.get("evidence")}
+                elif call.get("name") == "request_repair_tool":
+                    result = {
+                        "kind": "repair-tool",
+                        "tool": args.get("tool"),
+                        "issueId": args.get("issueId"),
+                        "evidence": args.get("evidence"),
+                    }
             print(json.dumps({"requestId": request_id, "result": result}), flush=True)
         except Exception as exc:
             print(json.dumps({"requestId": request.get("requestId", 0), "error": type(exc).__name__}), flush=True)
