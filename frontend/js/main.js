@@ -137,6 +137,7 @@ const layoutEditor = {
   controlSnapshot: null,
 };
 let lastCreateSoftwareKey = '';
+let createSoftwareVersionRequest = 0;
 const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024;
 const UPLOAD_PARALLELISM = 3;
 const timeZones = [...new Set([
@@ -2419,9 +2420,6 @@ async function renderFiles() {
   const serverRunning = server.status === 'online';
   const liveNotice = document.querySelector('#fileLiveNotice');
   if (liveNotice) liveNotice.hidden = !serverRunning;
-  for (const button of elements.fileList.closest('.tool-surface')?.querySelectorAll('[data-action="file-upload"], [data-action="file-cut-selected"], [data-action="file-paste"], [data-action="folder-new"], [data-action="file-unzip"], [data-action="file-archive"], [data-action="file-delete-selected"]') || []) {
-    button.disabled = serverRunning;
-  }
   if (elements.filePathLabel) elements.filePathLabel.textContent = `/${data.path || ''}`;
   if (data.type === 'file') {
     elements.fileList.innerHTML = '';
@@ -2433,8 +2431,8 @@ async function renderFiles() {
         elements.fileEditor.content.value = data.content;
         const saveButton = elements.fileEditor.querySelector('[type="submit"]');
         const deleteButton = elements.fileEditor.querySelector('[data-action="file-delete"]');
-        if (saveButton) saveButton.disabled = serverRunning && !data.liveEditable;
-        if (deleteButton) deleteButton.disabled = serverRunning;
+        if (saveButton) saveButton.disabled = false;
+        if (deleteButton) deleteButton.disabled = false;
       }
     } else {
       if (elements.fileEditor) elements.fileEditor.hidden = true;
@@ -3350,10 +3348,12 @@ function renderSoftwareChoices() {
 async function hydrateCreateVersionSelect() {
   const key = elements.softwareSelect.value;
   if (!key || key === lastCreateSoftwareKey) return;
+  const request = ++createSoftwareVersionRequest;
   lastCreateSoftwareKey = key;
   const versions = await getSoftwareVersions(key);
+  if (request !== createSoftwareVersionRequest || elements.softwareSelect.value !== key) return;
   elements.softwareVersionSelect.innerHTML = versions.length
-    ? versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('')
+    ? versions.map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('')
     : '<option value="latest">Latest compatible</option>';
 }
 
@@ -3380,10 +3380,13 @@ async function hydrateSoftwareVersionSelects() {
       ? state.pendingSoftwareSelection.softwareVersion
       : (select.dataset.currentVersion || select.value);
     const versions = await getSoftwareVersions(key);
-    select.innerHTML = versions.length
-      ? versions.slice(0, 80).map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('')
+    const availableVersions = selected && !versions.includes(selected)
+      ? [selected, ...versions]
+      : versions;
+    select.innerHTML = availableVersions.length
+      ? availableVersions.map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('')
       : '<option value="latest">Latest compatible</option>';
-    select.value = versions.includes(selected) ? selected : (versions[0] || 'manual');
+    select.value = availableVersions.includes(selected) ? selected : (availableVersions[0] || 'manual');
   }));
   state.pendingSoftwareSelection = null;
 }
@@ -3979,7 +3982,7 @@ elements.fileEditor.addEventListener('submit', async (event) => {
   const payload = formData(elements.fileEditor);
   try {
     await api(`/api/servers/${server.id}/files`, { method: 'PUT', body: JSON.stringify(payload) });
-    showToast(server.status === 'online' ? 'Plugin config saved. Reload the plugin or restart if needed.' : 'File saved.');
+    showToast(server.status === 'online' ? 'File saved. Reload the affected plugin or restart the server if needed.' : 'File saved.');
     await renderFiles();
   } catch (error) {
     showToast(error.message);

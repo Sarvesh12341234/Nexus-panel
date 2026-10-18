@@ -254,23 +254,19 @@ function beginServerFileOperation(serverId) {
   if (processes.has(id) || startingServers.has(id)) {
     throw new Error('Stop the server before using the file manager.');
   }
-  fileOperations.set(id, (fileOperations.get(id) || 0) + 1);
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    const remaining = (fileOperations.get(id) || 1) - 1;
-    if (remaining > 0) fileOperations.set(id, remaining);
-    else fileOperations.delete(id);
-  };
+  return trackServerFileOperation(id);
 }
 
-function beginLiveServerConfigEdit(serverId) {
+function beginLiveServerFileOperation(serverId) {
   const id = Number(serverId);
   if (!Number.isSafeInteger(id) || id < 1) throw new Error('Invalid server ID.');
   if (!processes.has(id) || startingServers.has(id)) {
-    throw new Error('Live config edits require the server to be running.');
+    throw new Error('Live file operations require the server to be running.');
   }
+  return trackServerFileOperation(id);
+}
+
+function trackServerFileOperation(id) {
   fileOperations.set(id, (fileOperations.get(id) || 0) + 1);
   let released = false;
   return () => {
@@ -868,7 +864,7 @@ function setExitHandler(handler) {
 
 module.exports = {
   appendLog,
-  beginLiveServerConfigEdit,
+  beginLiveServerFileOperation,
   beginServerFileOperation,
   consoleLogs,
   killServer,

@@ -23,8 +23,7 @@ const { clearSoftwareVersionCache, defaultSoftware, findSoftware, installedJavaM
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { kernelStatus, nativeStatus, profileForServer, writeProfile } = require('./asf');
 const { removeServerIdentity } = require('./asf_identity');
-const { appendLog, beginLiveServerConfigEdit, beginServerFileOperation, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer, subscribeConsole } = require('./runtime');
-const { isLivePluginConfigPath } = require('./server_file_access');
+const { appendLog, beginLiveServerFileOperation, beginServerFileOperation, consoleLogs, killServer, restartServer, runtimeDetails, runtimeStatus, sendCommand, setExitHandler, startServer, stopServer, subscribeConsole } = require('./runtime');
 const { archiveCollisions, archiveEntries, archiveFormat, copyDirectoryContents, extractArchive, extractArchiveInto, findFile, isZipFile } = require('./zip_utils');
 const { hostCpuCount, hostCpuPercent, hostMemoryStats } = require('./system_info');
 const { processTreeMetrics } = require('./process_metrics');
@@ -6646,13 +6645,7 @@ app.use('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
   try {
     const server = getServerOr404(req.params.id, req.user);
     if (runtimeStatus(server.id) === 'online') {
-      if (req.method === 'PUT' && isLivePluginConfigPath(req.body?.path)) {
-        release = beginLiveServerConfigEdit(server.id);
-      } else {
-        return res.status(409).json({
-          error: 'The server is running. You can edit plugin config files under plugins/<plugin>/, but stop it before other file changes.',
-        });
-      }
+      release = beginLiveServerFileOperation(server.id);
     } else {
       release = beginServerFileOperation(server.id);
     }
@@ -6703,7 +6696,6 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
     path: target.relative,
     type: 'file',
     size: stats.size,
-    liveEditable: isLivePluginConfigPath(target.relative),
     ...descriptor,
   });
   res.json({
@@ -6711,7 +6703,6 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
     type: 'file',
     content: await fs.promises.readFile(target.absolute, 'utf8'),
     size: stats.size,
-    liveEditable: isLivePluginConfigPath(target.relative),
     ...descriptor,
   });
 }));
