@@ -18,9 +18,11 @@ const pendingLogWrites = new Map();
 const logWriteChains = new Map();
 const fileOperations = new Map();
 const startingServers = new Set();
+const stopEscalationTimers = new Map();
 let exitHandler = null;
 const MAX_LOG_LINES = 600;
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
+const STOP_GRACE_PERIOD_MS = 20000;
 const logRoot = path.join(externalDataRoot, 'logs');
 fs.mkdirSync(logRoot, { recursive: true });
 
@@ -474,12 +476,18 @@ function launchServer(server, software, options = {}) {
   child.on('error', (error) => {
     if (child.nexusGuardTimer) clearInterval(child.nexusGuardTimer);
     if (child.nexusThrottleTimer) clearTimeout(child.nexusThrottleTimer);
+    const stopTimer = stopEscalationTimers.get(serverId);
+    if (stopTimer) clearTimeout(stopTimer);
+    stopEscalationTimers.delete(serverId);
     appendLog(serverId, `[NexusPanel] Failed to start: ${error.message}`);
     processes.delete(serverId);
   });
   child.on('exit', (code, signal) => {
     if (child.nexusGuardTimer) clearInterval(child.nexusGuardTimer);
     if (child.nexusThrottleTimer) clearTimeout(child.nexusThrottleTimer);
+    const stopTimer = stopEscalationTimers.get(serverId);
+    if (stopTimer) clearTimeout(stopTimer);
+    stopEscalationTimers.delete(serverId);
     const intentional = intentionalStops.delete(serverId);
     const uptimeMs = Date.now() - child.startedAt;
     appendLog(serverId, `[NexusPanel] Process exited code=${code ?? 'none'} signal=${signal ?? 'none'}`);
@@ -503,6 +511,10 @@ function launchServer(server, software, options = {}) {
       } catch (error) {
         appendLog(serverId, `[NexusPanel] Could not collect supervisor diagnostics: ${error.message}`);
       }
+    }
+
+    if (intentional && wrapped.unit && process.platform === 'linux') {
+      forceStopServer(serverId, child);
     }
 
     // If the ASF kernel wrapper dies almost immediately, retry exactly once
@@ -747,13 +759,51 @@ function terminateProcessTree(child) {
   child.kill('SIGTERM');
 }
 
+function forceStopServer(serverId, child, signal = 'SIGKILL') {
+  if (child.asfUnit && process.platform === 'linux') {
+    const result = spawnSync('systemctl', [
+      'kill', '--kill-whom=all', `--signal=${signal}`, child.asfUnit,
+    ], { encoding: 'utf8', timeout: 5000 });
+    if (result.status === 0) return true;
+    const detail = String(result.stderr || result.error?.message || '').trim();
+    if (!/not loaded|not active|could not be found/i.test(detail)) {
+      appendLog(serverId, `[NexusPanel] Could not signal the server systemd unit: ${detail || `systemctl exited with status ${result.status ?? 'unknown'}`}`);
+    }
+  }
+  if (process.platform === 'win32') {
+    terminateProcessTree(child);
+    return true;
+  }
+  child.kill(signal);
+  return true;
+}
+
+function scheduleStopEscalation(serverId, child) {
+  const id = Number(serverId);
+  if (stopEscalationTimers.has(id)) return;
+  const timer = setTimeout(() => {
+    stopEscalationTimers.delete(id);
+    if (processes.get(id) !== child) return;
+    appendLog(id, `[NexusPanel] Graceful shutdown exceeded ${Math.round(STOP_GRACE_PERIOD_MS / 1000)} seconds; terminating the server process group to release its ports.`);
+    forceStopServer(id, child);
+  }, STOP_GRACE_PERIOD_MS);
+  timer.unref();
+  stopEscalationTimers.set(id, timer);
+}
+
 function restartServer(server, software) {
   const serverId = Number(server.id);
   const child = processes.get(serverId);
   if (!child) return startServer(server, software);
   appendLog(serverId, '[NexusPanel] Restart requested.');
   intentionalStops.add(serverId);
-  child.stdin.write(`${child.stopCommand || 'stop'}\n`);
+  try {
+    child.stdin.write(`${child.stopCommand || 'stop'}\n`);
+  } catch (error) {
+    appendLog(serverId, `[NexusPanel] Graceful restart stop command failed: ${error.message}`);
+    forceStopServer(serverId, child);
+  }
+  scheduleStopEscalation(serverId, child);
   const timer = setInterval(() => {
     if (!processes.has(serverId)) {
       clearInterval(timer);
@@ -783,9 +833,16 @@ function stopServer(serverId) {
   const child = processes.get(id);
   if (!child) return { ok: true, message: 'Server is already offline.' };
   intentionalStops.add(id);
-  child.stdin.write(`${child.stopCommand || 'stop'}\n`);
+  try {
+    child.stdin.write(`${child.stopCommand || 'stop'}\n`);
+  } catch (error) {
+    appendLog(id, `[NexusPanel] Graceful stop command failed: ${error.message}`);
+    forceStopServer(id, child);
+    return { ok: true, message: 'Graceful stop failed; process termination requested.' };
+  }
+  scheduleStopEscalation(id, child);
   appendLog(id, '[NexusPanel] Sent graceful stop.');
-  return { ok: true, message: 'Stop command sent.' };
+  return { ok: true, message: 'Stop command sent; any process that does not exit within 20 seconds will be terminated.' };
 }
 
 function killServer(serverId) {
@@ -794,13 +851,13 @@ function killServer(serverId) {
   if (!child) return { ok: true, message: 'Server is already offline.' };
   intentionalStops.add(id);
   if (child.asfUnit && process.platform === 'linux') {
-    spawnSync('systemctl', ['kill', child.asfUnit], { stdio: 'ignore', timeout: 5000 });
+    forceStopServer(id, child);
   } else if (process.platform === 'win32') {
     terminateProcessTree(child);
     appendLog(id, '[NexusPanel] Kill requested.');
     return { ok: true, message: 'Kill requested.' };
   }
-  child.kill('SIGTERM');
+  child.kill('SIGKILL');
   appendLog(id, '[NexusPanel] Kill requested.');
   return { ok: true, message: 'Kill requested.' };
 }

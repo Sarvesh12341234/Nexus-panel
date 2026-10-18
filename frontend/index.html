@@ -277,7 +277,8 @@
           <form class="modrinth-form surface" id="modrinthForm">
             <label>Search marketplace <input name="query" placeholder="LuckPerms, Geyser, ViaVersion"></label>
             <label>Type <select name="projectType"><option value="plugin">Plugin</option><option value="mod">Mod</option></select></label>
-            <label>Loader <select name="loader"><option value="paper">Paper/Spigot</option><option value="purpur">Purpur</option><option value="fabric">Fabric</option><option value="forge">Forge</option><option value="">Any loader</option></select></label>
+            <label>Minecraft version <select name="gameVersion" id="pluginGameVersion"><option value="">Loading versions...</option></select></label>
+            <label>Loader <select name="loader"><option value="paper">Paper</option><option value="purpur">Purpur</option><option value="spigot">Spigot</option><option value="bukkit">Bukkit</option><option value="fabric">Fabric</option><option value="forge">Forge</option><option value="">Any loader</option></select></label>
             <button type="submit">Search</button>
           </form>
           <div class="modrinth-grid" id="modrinthGrid"></div>

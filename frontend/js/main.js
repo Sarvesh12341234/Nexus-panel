@@ -1973,6 +1973,20 @@ function renderPlugins() {
   const projectTypeSelect = elements.modrinthForm.querySelector('[name="projectType"]');
   const loaderSelect = elements.modrinthForm.querySelector('[name="loader"]');
   const queryInput = elements.modrinthForm.querySelector('input[name="query"]');
+  const gameVersionSelect = elements.modrinthForm.querySelector('[name="gameVersion"]');
+  if (gameVersionSelect && ['paper', 'purpur', 'fabric', 'forge'].includes(server.softwareKey)) {
+    const previousServerId = gameVersionSelect.dataset.serverId;
+    const selectedVersion = previousServerId === String(server.id)
+      ? gameVersionSelect.value
+      : server.softwareVersion;
+    gameVersionSelect.dataset.serverId = String(server.id);
+    getSoftwareVersions(server.softwareKey).then((versions) => {
+      if (activeServer()?.id !== server.id || !gameVersionSelect.isConnected) return;
+      const options = [...new Set([selectedVersion, ...versions].filter(Boolean))];
+      gameVersionSelect.innerHTML = options.map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`).join('');
+      gameVersionSelect.value = options.includes(selectedVersion) ? selectedVersion : (versions[0] || 'latest');
+    }).catch((error) => showToast(`Could not load Minecraft versions: ${error.message}`));
+  }
 
   if (server.softwareKey === 'bedrock-vanilla') {
     if (queryInput) queryInput.placeholder = 'Bedrock packs: upload .mcpack or .mcaddon';
@@ -1987,12 +2001,18 @@ function renderPlugins() {
   } else if (['fabric', 'forge'].includes(server.softwareKey)) {
     const loaderName = server.softwareKey === 'fabric' ? 'Fabric' : 'Forge';
     if (projectTypeSelect) { projectTypeSelect.innerHTML = '<option value="mod">Mod</option>'; projectTypeSelect.disabled = true; }
-    if (loaderSelect) { loaderSelect.innerHTML = `<option value="${server.softwareKey}">${loaderName}</option>`; loaderSelect.disabled = true; }
+    if (loaderSelect) { loaderSelect.innerHTML = `<option value="${server.softwareKey}">${loaderName}</option>`; loaderSelect.value = server.softwareKey; loaderSelect.disabled = true; }
     if (queryInput) queryInput.placeholder = 'Search Modrinth mods: Lithium, FerriteCore, Create';
     loadPluginMarketplace({ featured: true }).catch(() => {});
   } else if (['paper', 'purpur'].includes(server.softwareKey)) {
     if (projectTypeSelect) { projectTypeSelect.innerHTML = '<option value="plugin">Plugin</option>'; projectTypeSelect.disabled = true; }
-    if (loaderSelect) { loaderSelect.innerHTML = '<option value="paper">Paper / Purpur / Spigot</option>'; loaderSelect.disabled = true; }
+    if (loaderSelect) {
+      const loaderOptions = [['paper', 'Paper'], ['purpur', 'Purpur'], ['spigot', 'Spigot'], ['bukkit', 'Bukkit']];
+      const selectedLoader = loaderOptions.some(([value]) => value === loaderSelect.value) ? loaderSelect.value : 'paper';
+      loaderSelect.innerHTML = loaderOptions.map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+      loaderSelect.value = selectedLoader;
+      loaderSelect.disabled = false;
+    }
     if (queryInput) queryInput.placeholder = 'Search Modrinth plugins: Geyser, LuckPerms, ViaVersion';
     loadPluginMarketplace({ featured: true }).catch(() => {});
   } else {
@@ -2209,13 +2229,15 @@ async function loadPluginMarketplace({ featured = false } = {}) {
   const source = server.softwareKey === 'pocketmine' ? 'poggit' : 'modrinth';
   const query = featured ? '' : String(payload.query || '');
   const loader = source === 'modrinth' ? String(payload.loader || '') : '';
+  const gameVersion = source === 'modrinth' ? String(payload.gameVersion || '') : '';
   const projectType = source === 'modrinth' ? String(payload.projectType || 'plugin') : '';
-  const signature = `${source}:${server.id}:${query}:${loader}:${projectType}`;
+  const signature = `${source}:${server.id}:${query}:${loader}:${gameVersion}:${projectType}`;
   if (featured && state.pluginSearchSignature === signature && elements.modrinthGrid.children.length) return;
   state.pluginSearchSignature = signature;
   elements.modrinthGrid.innerHTML = '<p class="empty-state">Loading marketplace cards...</p>';
   const params = new URLSearchParams({ serverId: server.id, query });
   if (loader) params.set('loader', loader);
+  if (gameVersion) params.set('version', gameVersion);
   if (projectType) params.set('projectType', projectType);
   const data = await api(`/api/${source}/search?${params}`);
   elements.modrinthGrid.innerHTML = data.hits.map((project) => `
@@ -2228,12 +2250,13 @@ async function loadPluginMarketplace({ featured = false } = {}) {
       ${project.iconUrl ? `<img class="plugin-icon" src="${escapeHtml(project.iconUrl)}" alt="">` : ''}
       <div class="template-tags">${(project.categories || []).slice(0, 5).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>
       <div class="install-track" hidden><span style="width:0%"></span></div>
+      ${source === 'modrinth' ? '<button class="secondary" type="button" data-action="load-modrinth-versions">Choose release</button><label class="release-picker" hidden>Release <select data-release-id></select></label>' : ''}
       <button type="button"
         data-action="${source === 'poggit' ? 'install-poggit' : 'install-modrinth'}"
         data-project-id="${escapeHtml(project.projectId || '')}"
         data-project-name="${escapeHtml(project.title)}"
         data-download-url="${escapeHtml(project.downloadUrl || '')}"
-        data-file-name="${escapeHtml(project.fileName || '')}">Install</button>
+        data-file-name="${escapeHtml(project.fileName || '')}" ${source === 'modrinth' ? 'disabled' : ''}>Install</button>
     </article>
   `).join('') || `<p class="empty-state">${escapeHtml(data.message || `No ${source} items found. Try a broader search.`)}</p>`;
 }
@@ -5301,11 +5324,50 @@ document.addEventListener('click', async (event) => {
       if (fill) fill.style.width = '35%';
       await api(`/api/servers/${server.id}/modrinth/install`, {
         method: 'POST',
-        body: JSON.stringify({ projectId: actionTarget.dataset.projectId, name: actionTarget.dataset.projectName }),
+        body: JSON.stringify({
+          projectId: actionTarget.dataset.projectId,
+          name: actionTarget.dataset.projectName,
+          versionId: card?.querySelector('[data-release-id]')?.value,
+          loader: elements.modrinthForm.querySelector('[name="loader"]')?.value,
+          gameVersion: elements.modrinthForm.querySelector('[name="gameVersion"]')?.value,
+        }),
       });
       if (fill) fill.style.width = '100%';
       showToast(`Modrinth ${['fabric', 'forge'].includes(server.softwareKey) ? 'mod' : 'plugin'} installed. Restart server to load it.`);
       await refresh();
+      return;
+    }
+    if (action === 'load-modrinth-versions') {
+      const server = activeServer();
+      const card = actionTarget.closest('.modrinth-card');
+      const releasePicker = card?.querySelector('.release-picker');
+      const releaseSelect = card?.querySelector('[data-release-id]');
+      const installButton = card?.querySelector('[data-action="install-modrinth"]');
+      if (!server || !card || !releasePicker || !releaseSelect || !installButton) return;
+      actionTarget.disabled = true;
+      actionTarget.textContent = 'Loading releases...';
+      const query = new URLSearchParams({
+        serverId: String(server.id),
+        projectId: actionTarget.parentElement?.querySelector('[data-project-id]')?.dataset.projectId || '',
+        loader: elements.modrinthForm.querySelector('[name="loader"]')?.value || '',
+        gameVersion: elements.modrinthForm.querySelector('[name="gameVersion"]')?.value || '',
+      });
+      try {
+        const data = await api(`/api/modrinth/versions?${query}`);
+        if (!data.versions?.length) throw new Error('No releases match this loader and Minecraft version.');
+        releaseSelect.innerHTML = data.versions.map((version) => {
+          const games = (version.gameVersions || []).join(', ');
+          const label = `${version.versionNumber}${games ? ` - ${games}` : ''}`;
+          return `<option value="${escapeHtml(version.id)}">${escapeHtml(label)}</option>`;
+        }).join('');
+        releasePicker.hidden = false;
+        installButton.disabled = false;
+        actionTarget.hidden = true;
+      } catch (error) {
+        actionTarget.disabled = false;
+        actionTarget.textContent = 'Choose release';
+        throw error;
+      }
       return;
     }
     if (action === 'install-poggit') {

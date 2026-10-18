@@ -13,6 +13,7 @@ const { createZip } = require('./archive');
 const { extractJavaRuntimeArchive } = require('./java_runtime_archive');
 const { bundledJavaBinary } = require('./java_runtime');
 const { backupDatabase, db, getUserCount, verifyDatabase } = require('./db');
+const { backupIntervalMinutesFrom, backupScheduleAnchor, nextScheduledBackupAt } = require('./backup_schedule');
 const { audit: auditPermissions, repair: repairPermissions } = require('./permission_repair');
 const worldConverter = require('./world_converter');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
@@ -592,12 +593,6 @@ async function replayLearnedRepair(server, software, crash) {
   }
   appendLog(server.id, `[NexusPanel] Learned recovery completed: ${report.summary}`);
   return report;
-}
-
-function backupIntervalMinutesFrom(server) {
-  const minutes = Number(server.backup_interval_minutes || 0);
-  if (Number.isFinite(minutes) && minutes > 0) return Math.round(minutes);
-  return Math.max(1, Number(server.backup_interval_hours || 24)) * 60;
 }
 
 function parseBackupIntervalMinutes(body, fallbackMinutes = 1440) {
@@ -4813,7 +4808,7 @@ app.get('/api/servers/:id', requireAuth, (req, res) => {
     backup_interval_hours: hours,
     backup_interval_minutes: mins,
     backup_interval_formatted: hours > 0 && mins > 0 ? `${hours}h ${mins}m` : hours > 0 ? `${hours} hour${hours > 1 ? 's' : ''}` : `${mins} minute${mins > 1 ? 's' : ''}`,
-    next_backup_at: server.last_backup_at ? new Date(server.last_backup_at + (minutes * 60 * 1000)).toISOString() : null
+    next_backup_at: server.scheduled_backups ? new Date(nextScheduledBackupAt(server)).toISOString() : null
   });
 });
 
@@ -5726,10 +5721,11 @@ app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
       : String(req.query.loader || '').trim().toLowerCase();
   const projectType = modded ? 'mod' : 'plugin';
   const version = String(req.query.version || server?.software_version || '').trim();
+  const selectedLoader = String(req.query.loader || '').trim().toLowerCase();
   const query = String(req.query.query || '').trim();
   const facets = [[`project_type:${projectType}`], ['server_side:required', 'server_side:optional']];
-  if (loader) facets.push([`categories:${loader}`]);
-  if (version && !['latest', 'manual'].includes(version) && req.query.strictVersion === '1') facets.push([`versions:${version}`]);
+  if (loader) facets.push([`categories:${selectedLoader || loader}`]);
+  if (version && !['latest', 'manual'].includes(version)) facets.push([`versions:${version}`]);
 
   const params = new URLSearchParams({
     query,
@@ -5756,6 +5752,38 @@ app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
       iconUrl: project.icon_url,
       categories: project.categories,
       versions: project.versions,
+    })),
+  });
+}));
+
+app.get('/api/modrinth/versions', requireAuth, asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.query.serverId, req.user);
+  const software = findSoftware(server.software_key) || defaultSoftware(server.type);
+  if (!['paper', 'purpur', 'fabric', 'forge'].includes(software.key)) {
+    return res.status(400).json({ error: 'Modrinth versions are unavailable for this server software.' });
+  }
+  const projectId = String(req.query.projectId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(projectId)) return res.status(400).json({ error: 'Invalid Modrinth project id.' });
+  const modded = ['fabric', 'forge'].includes(software.key);
+  const allowedLoaders = modded ? [software.key] : ['paper', 'spigot', 'bukkit', 'purpur'];
+  const loader = String(req.query.loader || (modded ? software.key : 'paper')).trim().toLowerCase();
+  if (!allowedLoaders.includes(loader)) return res.status(400).json({ error: 'Selected loader is incompatible with this server.' });
+  const gameVersion = String(req.query.gameVersion || server.software_version || '').trim();
+  const params = new URLSearchParams({ loaders: JSON.stringify([loader]) });
+  if (gameVersion && !['latest', 'manual'].includes(gameVersion)) params.set('game_versions', JSON.stringify([gameVersion]));
+  const response = await fetch(`https://api.modrinth.com/v2/project/${encodeURIComponent(projectId)}/version?${params}`, {
+    headers: { 'User-Agent': 'NexusPanel/1.0' },
+  });
+  if (!response.ok) throw new Error(`Modrinth versions failed: ${response.status}`);
+  const versions = await response.json();
+  res.json({
+    versions: versions.map((version) => ({
+      id: version.id,
+      name: version.name || version.version_number,
+      versionNumber: version.version_number,
+      gameVersions: version.game_versions || [],
+      datePublished: version.date_published || '',
+      files: (version.files || []).map((file) => ({ filename: file.filename, primary: Boolean(file.primary) })),
     })),
   });
 }));
@@ -5813,8 +5841,15 @@ app.post('/api/servers/:id/modrinth/install', requirePermission(capabilities.PLU
 
   const projectId = String(req.body.projectId || '').trim();
   if (!projectId) return res.status(400).json({ error: 'Modrinth project id is required.' });
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(projectId)) return res.status(400).json({ error: 'Invalid Modrinth project id.' });
   const gameVersion = String(req.body.gameVersion || server.software_version || '').trim();
-  const loaders = [['paper', 'purpur'].includes(software.key) ? 'paper' : software.key];
+  const modded = ['fabric', 'forge'].includes(software.key);
+  const allowedLoaders = modded ? [software.key] : ['paper', 'spigot', 'bukkit', 'purpur'];
+  const loader = String(req.body.loader || (modded ? software.key : 'paper')).trim().toLowerCase();
+  if (!allowedLoaders.includes(loader)) return res.status(400).json({ error: 'Selected loader is incompatible with this server.' });
+  const versionId = String(req.body.versionId || '').trim();
+  if (versionId && !/^[A-Za-z0-9_-]{1,64}$/.test(versionId)) return res.status(400).json({ error: 'Invalid Modrinth version id.' });
+  const loaders = [loader];
   const params = new URLSearchParams({ loaders: JSON.stringify(loaders) });
   if (gameVersion && !['latest', 'manual'].includes(gameVersion)) params.set('game_versions', JSON.stringify([gameVersion]));
 
@@ -5823,7 +5858,8 @@ app.post('/api/servers/:id/modrinth/install', requirePermission(capabilities.PLU
   });
   if (!versionResponse.ok) throw new Error(`Modrinth versions failed: ${versionResponse.status}`);
   const versions = await versionResponse.json();
-  const selected = versions[0];
+  const selected = versionId ? versions.find((version) => version.id === versionId) : versions[0];
+  if (versionId && !selected) return res.status(400).json({ error: 'That plugin release is not compatible with the selected loader and Minecraft version.' });
   const file = selected?.files?.find((item) => item.primary) || selected?.files?.[0];
   if (!file?.url || !file?.filename) throw new Error('No compatible Modrinth file found.');
 
@@ -5834,7 +5870,7 @@ app.post('/api/servers/:id/modrinth/install', requirePermission(capabilities.PLU
     INSERT INTO plugins (server_id, name, kind, file_name, relative_path, enabled)
     VALUES (?, ?, 'jar-plugin', ?, ?, 1)
   `).run(server.id, name, file.filename, target.relativePath);
-  appendLog(server.id, `[NexusPanel] Installed Modrinth ${['fabric', 'forge'].includes(software.key) ? 'mod' : 'plugin'} ${name}. Restart server to load it.`);
+  appendLog(server.id, `[NexusPanel] Installed Modrinth ${modded ? 'mod' : 'plugin'} ${name} (${selected.version_number}). Restart server to load it.`);
 
   res.status(201).json({
     plugin: pluginRows(server.id).find((plugin) => plugin.id === result.lastInsertRowid),
@@ -6312,10 +6348,7 @@ app.get('/api/servers/:id/backups', requirePermission(capabilities.BACKUPS_MANAG
     });
   }
   const backups = await backupRows(server);
-  const intervalMs = backupIntervalMinutesFrom(server) * 60 * 1000;
-  const nextBackupAt = server.scheduled_backups
-    ? Number(server.last_backup_at || 0) > 0 ? Number(server.last_backup_at) + intervalMs : Date.now()
-    : 0;
+  const nextBackupAt = nextScheduledBackupAt(server);
   const offlineBackupAt = lastOfflineBackupAt(server.id);
   res.json({
     backups,
@@ -6526,9 +6559,13 @@ app.put('/api/servers/:id/backups/settings', requirePermission(capabilities.BACK
   const server = getServerOr404(req.params.id, req.user);
   const intervalMinutes = parseBackupIntervalMinutes(req.body, backupIntervalMinutesFrom(server));
   const intervalHours = Math.max(1, Math.round(intervalMinutes / 60));
+  const scheduledBackups = toBool(req.body.scheduledBackups, Boolean(server.scheduled_backups));
+  const scheduleChanged = scheduledBackups !== Boolean(server.scheduled_backups)
+    || intervalMinutes !== backupIntervalMinutesFrom(server);
+  const scheduleUpdatedAt = scheduleChanged ? Date.now() : Number(server.backup_schedule_updated_at || 0);
   const retention = clampNumber(req.body.backupRetention, 1, 50, server.backup_retention || 4);
-  db.prepare('UPDATE servers SET scheduled_backups = ?, backup_interval_hours = ?, backup_interval_minutes = ?, backup_retention = ? WHERE id = ?')
-    .run(toBool(req.body.scheduledBackups, Boolean(server.scheduled_backups)), intervalHours, intervalMinutes, retention, server.id);
+  db.prepare('UPDATE servers SET scheduled_backups = ?, backup_interval_hours = ?, backup_interval_minutes = ?, backup_schedule_updated_at = ?, backup_retention = ? WHERE id = ?')
+    .run(scheduledBackups, intervalHours, intervalMinutes, scheduleUpdatedAt, retention, server.id);
   res.json({ server: serverPayload(db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id)) });
 });
 
@@ -7001,7 +7038,7 @@ async function runAutoBackups() {
       continue;
     }
     const intervalMs = backupIntervalMinutesFrom(server) * 60 * 1000;
-    if (now - Number(server.last_backup_at || 0) < intervalMs || autoBackupInFlight.has(server.id)) continue;
+    if (now - backupScheduleAnchor(server) < intervalMs || autoBackupInFlight.has(server.id)) continue;
     autoBackupInFlight.add(server.id);
     createServerBackup(server, 'auto')
       .catch((error) => appendLog(server.id, `[NexusPanel] Auto backup failed: ${error.message}`))
