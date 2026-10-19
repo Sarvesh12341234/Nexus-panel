@@ -3253,3 +3253,88 @@ body[data-privacy-shield="true"] input {
     width: 100%;
   }
 }
+
+/* Optional Pterodactyl-style horizontal section navigation. */
+body[data-nav-layout="top"] .panel-shell {
+  display: block;
+  min-height: 100vh;
+}
+
+body[data-nav-layout="top"] .sidebar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: auto;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(150px, 210px);
+  grid-template-rows: auto;
+  align-items: center;
+  gap: .75rem 1rem;
+  padding: .65rem clamp(12px, 2vw, 28px);
+  border-right: 0;
+  border-bottom: 1px solid var(--line);
+  overflow: visible;
+  background: color-mix(in srgb, var(--sidebar) 96%, transparent);
+  backdrop-filter: blur(18px);
+}
+
+body[data-nav-layout="top"] .sidebar > .brand { min-width: max-content; }
+body[data-nav-layout="top"] .sidebar > .nav-list {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  gap: .35rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  align-content: center;
+  padding: 2px 0 5px;
+}
+
+body[data-nav-layout="top"] .sidebar > .nav-list .nav-item {
+  flex: 0 0 auto;
+  width: auto;
+  min-height: 40px;
+  padding: .6rem .8rem;
+  text-align: center;
+  white-space: nowrap;
+}
+
+body[data-nav-layout="top"] .server-switcher {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: .5rem;
+  padding: 0;
+  border: 0;
+}
+
+body[data-nav-layout="top"] .server-switcher > .eyebrow,
+body[data-nav-layout="top"] .server-switcher > .server-list { display: none; }
+body[data-nav-layout="top"] .server-switcher .compact-select { min-width: 0; width: 100%; }
+body[data-nav-layout="top"] .server-switcher select { min-width: 0; text-overflow: ellipsis; }
+body[data-nav-layout="top"] .workspace { min-width: 0; }
+body[data-nav-layout="top"] .layout-picker { min-width: 150px; }
+
+@media (max-width: 760px) {
+  body[data-nav-layout="top"] .sidebar {
+    grid-template-columns: minmax(0, 1fr) minmax(115px, 160px);
+    gap: .5rem .75rem;
+    padding: .6rem 12px;
+  }
+  body[data-nav-layout="top"] .sidebar > .brand { grid-column: 1; }
+  body[data-nav-layout="top"] .sidebar > .nav-list {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin: 0 -4px;
+  }
+  body[data-nav-layout="top"] .sidebar > .nav-list .nav-item {
+    min-height: 42px;
+    padding: .6rem .75rem;
+  }
+  body[data-nav-layout="top"] .server-switcher {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}

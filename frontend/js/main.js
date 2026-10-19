@@ -42,6 +42,7 @@ const state = {
 const elements = {
   accountBox: document.querySelector('#accountBox'),
   themeSelect: document.querySelector('#themeSelect'),
+  layoutSelect: document.querySelector('#layoutSelect'),
   authView: document.querySelector('#authView'),
   dashboardView: document.querySelector('#dashboardView'),
   loginForm: document.querySelector('#loginForm'),
@@ -1219,24 +1220,34 @@ function showToast(message) {
 ensureFileControls();
 
 function initThemes() {
-  if (!elements.themeSelect) return;
-  const plain = themes.filter((theme) => theme.mode === 'plain');
-  const picture = themes.filter((theme) => theme.mode === 'picture');
-  const advanced = themes.filter((theme) => theme.mode === 'advanced');
-  elements.themeSelect.innerHTML = `
-    <optgroup label="Plain themes">${plain.map((theme) => `<option value="${theme.key}">${theme.name}</option>`).join('')}</optgroup>
-    <optgroup label="Picture themes">${picture.map((theme) => `<option value="${theme.key}">${theme.name}</option>`).join('')}</optgroup>
-    <optgroup label="Advanced themes">${advanced.map((theme) => `<option value="${theme.key}">${theme.name}</option>`).join('')}</optgroup>
-  `;
-  const saved = localStorage.getItem('nexusTheme') || 'nexus';
-  applyTheme(saved);
-  elements.themeSelect.value = saved;
+  if (elements.themeSelect) {
+    const plain = themes.filter((theme) => theme.mode === 'plain');
+    const picture = themes.filter((theme) => theme.mode === 'picture');
+    const advanced = themes.filter((theme) => theme.mode === 'advanced');
+    elements.themeSelect.innerHTML = `
+      <optgroup label="Plain themes">${plain.map((theme) => `<option value="${theme.key}">${theme.name}</option>`).join('')}</optgroup>
+      <optgroup label="Picture themes">${picture.map((theme) => `<option value="${theme.key}">${theme.name}</option>`).join('')}</optgroup>
+      <optgroup label="Advanced themes">${advanced.map((theme) => `<option value="${theme.key}">${theme.name}</option>`).join('')}</optgroup>
+    `;
+    const savedTheme = localStorage.getItem('nexusTheme') || 'nexus';
+    applyTheme(savedTheme);
+    elements.themeSelect.value = themes.some((theme) => theme.key === savedTheme) ? savedTheme : 'nexus';
+  }
+  const savedLayout = localStorage.getItem('nexusLayout') === 'top' ? 'top' : 'sidebar';
+  applyNavigationLayout(savedLayout);
+  if (elements.layoutSelect) elements.layoutSelect.value = savedLayout;
 }
 
 function applyTheme(key) {
   const theme = themes.find((item) => item.key === key) || themes[0];
   document.body.dataset.theme = theme.key;
   document.body.dataset.themeMode = theme.mode;
+}
+
+function applyNavigationLayout(layout) {
+  const selected = layout === 'top' ? 'top' : 'sidebar';
+  document.body.dataset.navLayout = selected;
+  if (elements.layoutSelect) elements.layoutSelect.value = selected;
 }
 
 const apiInFlight = new Map();
@@ -1832,9 +1843,14 @@ function renderView() {
   document.querySelectorAll('.view-section').forEach((section) => {
     section.hidden = section.id !== `view-${state.activeView}`;
   });
+  let activeNavigationButton = null;
   document.querySelectorAll('.nav-item').forEach((button) => {
     button.classList.toggle('is-active', button.dataset.view === state.activeView);
+    if (button.dataset.view === state.activeView) activeNavigationButton = button;
   });
+  if (document.body.dataset.navLayout === 'top') {
+    activeNavigationButton?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
   const [eyebrow, title] = viewTitles[state.activeView] || viewTitles.dashboard;
   if (elements.viewEyebrow) elements.viewEyebrow.textContent = eyebrow;
   if (elements.viewTitle) elements.viewTitle.textContent = title;
@@ -4184,6 +4200,13 @@ if (elements.themeSelect) {
   elements.themeSelect.addEventListener('change', () => {
     applyTheme(elements.themeSelect.value);
     localStorage.setItem('nexusTheme', elements.themeSelect.value);
+  });
+}
+
+if (elements.layoutSelect) {
+  elements.layoutSelect.addEventListener('change', () => {
+    applyNavigationLayout(elements.layoutSelect.value);
+    localStorage.setItem('nexusLayout', elements.layoutSelect.value === 'top' ? 'top' : 'sidebar');
   });
 }
 
