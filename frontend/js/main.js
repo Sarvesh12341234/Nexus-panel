@@ -2564,6 +2564,23 @@ async function renderFiles() {
   const server = activeServer();
   const renderToken = ++fileRenderToken;
   if (!elements.fileList) return;
+  const editor = elements.fileEditor;
+  if (editor && !editor.hidden && editor.dataset.dirty === '1') {
+    const editedPath = editor.elements.path.value;
+    const sameFile = server
+      && editor.dataset.serverId === String(server.id)
+      && !fileSearchQuery.trim()
+      && filePath === editedPath;
+    if (sameFile) return;
+    if (!confirm(`Discard unsaved changes to ${editedPath || 'this file'}?`)) {
+      filePath = editedPath;
+      fileSearchQuery = '';
+      const search = document.querySelector('#fileSearch');
+      if (search) search.value = '';
+      return;
+    }
+    editor.dataset.dirty = '0';
+  }
   if (!server) {
     elements.fileList.innerHTML = '<p class="empty-state">Create a server to browse files.</p>';
     return;
@@ -2605,6 +2622,13 @@ async function renderFiles() {
         elements.fileEditor.hidden = false;
         elements.fileEditor.path.value = data.path;
         elements.fileEditor.content.value = data.content;
+        elements.fileEditor.dataset.dirty = '0';
+        elements.fileEditor.dataset.serverId = String(server.id);
+        const editorStatus = document.querySelector('#fileEditorStatus');
+        if (editorStatus) {
+          editorStatus.textContent = 'Saved';
+          editorStatus.classList.remove('is-unsaved');
+        }
         const saveButton = elements.fileEditor.querySelector('[type="submit"]');
         const deleteButton = elements.fileEditor.querySelector('[data-action="file-delete"]');
         if (saveButton) saveButton.disabled = false;
@@ -4246,6 +4270,22 @@ if (elements.serverConfigForm) {
   });
 }
 
+elements.fileEditor.content.addEventListener('input', () => {
+  elements.fileEditor.dataset.dirty = '1';
+  const status = document.querySelector('#fileEditorStatus');
+  if (status) {
+    status.textContent = 'Unsaved changes';
+    status.classList.add('is-unsaved');
+  }
+});
+
+window.addEventListener('beforeunload', (event) => {
+  if (elements.fileEditor && !elements.fileEditor.hidden && elements.fileEditor.dataset.dirty === '1') {
+    event.preventDefault();
+    event.returnValue = '';
+  }
+});
+
 elements.fileEditor.addEventListener('submit', async (event) => {
   event.preventDefault();
   const server = activeServer();
@@ -4253,6 +4293,13 @@ elements.fileEditor.addEventListener('submit', async (event) => {
   const payload = formData(elements.fileEditor);
   try {
     await api(`/api/servers/${server.id}/files`, { method: 'PUT', body: JSON.stringify(payload) });
+    const saved = elements.fileEditor.content.value === payload.content;
+    if (saved) elements.fileEditor.dataset.dirty = '0';
+    const status = document.querySelector('#fileEditorStatus');
+    if (status) {
+      status.textContent = saved ? 'Saved' : 'New edits are still unsaved';
+      status.classList.toggle('is-unsaved', !saved);
+    }
     showToast(server.status === 'online' ? 'File saved. Reload the affected plugin or restart the server if needed.' : 'File saved.');
   } catch (error) {
     showToast(error.message);

@@ -1129,6 +1129,16 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   gap: 0.85rem;
 }
 
+#fileEditorStatus {
+  min-height: 1.2em;
+  color: var(--muted);
+}
+
+#fileEditorStatus.is-unsaved {
+  color: var(--yellow);
+  font-weight: 700;
+}
+
 .file-list {
   max-height: 62vh;
   overflow: auto;
