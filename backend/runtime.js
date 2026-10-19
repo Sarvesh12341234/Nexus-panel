@@ -884,7 +884,7 @@ function sendCommand(serverId, command) {
   const child = processes.get(id);
   if (!child) {
     const recoveredUnit = activeAsfUnit(id);
-    if (recoveredUnit) throw new Error('The server survived a NexusPanel restart. Stop and start it from the panel to restore its live console.');
+    if (recoveredUnit) throw new Error('The server is still running, but the panel lost its console input pipe when it restarted. Stop it, then start it from the panel to reconnect the console.');
     throw new Error('Server is not running.');
   }
   const clean = String(command || '').trim().replace(/^\//, '');

@@ -1529,6 +1529,9 @@ function showFileContextMenu(file, x, y) {
   fileContextType = row?.querySelector('.file-pick')?.dataset.fileType || '';
   const menu = document.querySelector('#fileContextMenu');
   if (!menu) return;
+  // Keep fixed viewport coordinates independent from transformed/scrolling file view containers.
+  if (menu.parentElement !== document.body) document.body.append(menu);
+  menu.dataset.layout = document.querySelector('#view-files')?.dataset.fileLayout || 'default';
   const openButton = menu.querySelector('[data-action="file-open-context"]');
   if (openButton) openButton.hidden = selectedFilePaths().length !== 1;
   const trigger = row?.querySelector('.file-context-trigger');
@@ -3283,6 +3286,11 @@ async function renderTebex() {
       </form>
       <p class="muted">Use the Game Server secret from Tebex → Game Servers, the Webstore Public Token from Integrations → API Keys, and the webhook signing secret from your endpoint. This connects the panel to Tebex; it does not install or configure the official game plugin.</p>
     `}
+    ${tebex.configured ? `
+      <h3>Live payment console</h3>
+      <p class="muted">Read-only stream of payments as Tebex confirms them. Player name, package, rank, and amount appear the moment a purchase lands.</p>
+      <div class="console-box tebex-console" id="tebexPaymentFeed"></div>
+    ` : ''}
     ${tebex.configured && !tebex.webhookConfigured ? `
       <form class="settings-form" id="tebexWebhookSecretForm">
         <label>Webhook signing secret <input name="webhookSecret" type="password" autocomplete="off" placeholder="Tebex → Developers → Webhooks → endpoint" required minlength="8" maxlength="256"></label>
@@ -3316,11 +3324,6 @@ async function renderTebex() {
           </div>`;
         }).join('')}
       </div>
-    ` : ''}
-    ${tebex.configured ? `
-      <h3>Live payment console</h3>
-      <p class="muted">Read-only stream of payments as Tebex confirms them. Player name, package, rank, and amount appear the moment a purchase lands.</p>
-      <div class="console-box tebex-console" id="tebexPaymentFeed"></div>
     ` : ''}
   `;
   if (tebex.configured) {

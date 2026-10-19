@@ -399,10 +399,15 @@ function validateAllocationInput({ ip, port, protocol = 'tcp', label = '' }) {
 
 function createAllocation(serverId, input) {
   const clean = validateAllocationInput(input);
+  const cleanServerId = serverId == null || serverId === '' ? null : Number(serverId);
+  if (cleanServerId !== null && (!Number.isSafeInteger(cleanServerId) || cleanServerId < 1
+    || !db.prepare('SELECT id FROM servers WHERE id = ?').get(cleanServerId))) {
+    throw new Error('Server not found.');
+  }
   const collision = db.prepare('SELECT id FROM network_allocations WHERE ip = ? AND port = ?').get(clean.ip, clean.port);
   if (collision) throw new Error(`Port ${clean.port} on ${clean.ip} is already allocated.`);
-  const serverPort = serverId
-    ? db.prepare('SELECT port FROM servers WHERE id = ?').get(Number(serverId))
+  const serverPort = cleanServerId
+    ? db.prepare('SELECT port FROM servers WHERE id = ?').get(cleanServerId)
     : null;
   if (serverPort && Number(serverPort.port) === clean.port) {
     throw new Error(`Port ${clean.port} is the server's own game port; it is already bound by the game.`);
@@ -410,7 +415,7 @@ function createAllocation(serverId, input) {
   const result = db.prepare(`
     INSERT INTO network_allocations (server_id, label, ip, port, protocol, assigned_at)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(serverId ? Number(serverId) : null, clean.label, clean.ip, clean.port, clean.protocol, Date.now());
+  `).run(cleanServerId, clean.label, clean.ip, clean.port, clean.protocol, Date.now());
   return allocationRows().find((row) => row.id === Number(result.lastInsertRowid));
 }
 
@@ -439,14 +444,14 @@ function deleteAllocation(allocationId) {
 function probeAllocation(allocationId) {
   const row = db.prepare('SELECT * FROM network_allocations WHERE id = ?').get(Number(allocationId));
   if (!row) throw new Error('Allocation not found.');
-  const isLocal = ['127.0.0.1', '::1', '0.0.0.0'].includes(row.ip);
+  const isLocal = ['127.0.0.1', '::1', '0.0.0.0', '::'].includes(row.ip);
   if (!isLocal) {
     return { ok: true, note: 'Remote IP allocations are not probed from the panel.', listening: null };
   }
   const tryProtocol = (protocol) => new Promise((resolve) => {
     if (protocol === 'udp') {
       // UDP has no handshake; a bind attempt tells us if the port is taken.
-      const socket = require('node:dgram').createSocket('udp4');
+      const socket = require('node:dgram').createSocket(net.isIP(row.ip) === 6 ? 'udp6' : 'udp4');
       const done = (ok, detail) => { try { socket.close(); } catch {} resolve({ ok, detail }); };
       socket.once('error', (error) => done(false, error.code || error.message));
       socket.once('listening', () => done(true, 'Port is free.'));
@@ -460,8 +465,17 @@ function probeAllocation(allocationId) {
     try { server.listen(row.port, row.ip); } catch (error) { done(false, error.message); }
   });
   return (async () => {
-    const tcp = await tryProtocol('tcp');
-    return { ok: true, listening: !tcp.ok, detail: tcp.detail, protocol: row.protocol };
+    const protocols = row.protocol === 'both' ? ['tcp', 'udp'] : [row.protocol];
+    const results = {};
+    for (const protocol of protocols) results[protocol] = await tryProtocol(protocol);
+    const listening = Object.values(results).some((result) => !result.ok);
+    return {
+      ok: true,
+      listening,
+      protocol: row.protocol,
+      detail: Object.entries(results).map(([protocol, result]) => `${protocol.toUpperCase()}: ${result.detail}`).join(' · '),
+      checks: results,
+    };
   })();
 }
 

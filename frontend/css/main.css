@@ -1299,7 +1299,11 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   position: fixed;
   z-index: 5000;
   display: grid;
-  min-width: 190px;
+  width: max-content;
+  min-width: 205px;
+  max-width: min(280px, calc(100vw - 16px));
+  max-height: min(70vh, 520px);
+  overflow: auto;
   gap: 4px;
   padding: 7px;
   border: 1px solid color-mix(in srgb, var(--line), white 12%);
@@ -1308,6 +1312,30 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   box-shadow: 0 22px 65px rgba(0, 0, 0, .48), 0 3px 12px rgba(0, 0, 0, .2);
   backdrop-filter: blur(22px) saturate(1.25);
   animation: file-menu-appear 130ms cubic-bezier(.2,.8,.2,1) both;
+}
+
+#fileContextMenu[data-layout="windows"] { border-radius: 8px; }
+#fileContextMenu[data-layout="linux"] { border-radius: 12px; }
+#fileContextMenu[data-layout="advanced"] {
+  border-color: color-mix(in srgb, var(--cyan), transparent 35%);
+  box-shadow: 0 0 35px color-mix(in srgb, var(--cyan), transparent 80%), 0 22px 65px rgba(0,0,0,.55);
+}
+
+@media (max-width: 620px) {
+  #fileContextMenu {
+    width: min(260px, calc(100vw - 24px));
+    min-width: 0;
+    max-width: calc(100vw - 24px);
+    max-height: min(62vh, 420px);
+    padding: 6px;
+    border-radius: 16px;
+    gap: 3px;
+  }
+  #fileContextMenu button {
+    min-height: 44px;
+    padding: .65rem .8rem;
+    font-size: .95rem;
+  }
 }
 
 @keyframes file-menu-appear {

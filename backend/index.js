@@ -1373,13 +1373,25 @@ async function runHealthCheck(force = false) {
     }
   }
 
-  const hasJavaServer = servers.some((server) => {
+  for (const server of servers) {
     const software = findSoftware(server.software_key) || defaultSoftware(server.type);
-    return software && software.edition === 'java';
-  });
-  if (hasJavaServer) {
-    const java = spawnSync('java', ['-version'], { encoding: 'utf8', windowsHide: true });
-    add('Java runtime', !java.error && java.status === 0, java.error ? 'Java is not in PATH' : 'Java responds');
+    if (!software || software.edition !== 'java') continue;
+    const requiredMajor = requiredJavaMajorForMinecraftVersion(server.software_version || 'latest');
+    const root = server.server_path || serverPath(server.id, server.name);
+    const bundled = bundledJavaBinary(root, requiredMajor);
+    const java = bundled ? spawnSync(bundled, ['-version'], { encoding: 'utf8', windowsHide: true })
+      : spawnSync('java', ['-version'], { encoding: 'utf8', windowsHide: true });
+    const systemMajor = bundled ? requiredMajor : installedJavaMajor();
+    const javaWorks = !java.error && java.status === 0 && systemMajor >= requiredMajor;
+    const source = bundled ? `Bundled Java responds (${displayPath(bundled)})` : `System Java ${systemMajor || 'not found'}`;
+    const detail = java.error
+      ? java.error.message
+      : java.status !== 0
+        ? String(java.stderr || java.stdout || `exit ${java.status}`).trim()
+        : systemMajor < requiredMajor
+          ? `Java ${requiredMajor}+ is required; found Java ${systemMajor || 'none'}.`
+          : `${source}; Java ${requiredMajor}+ is compatible.`;
+    add(`${server.name} Java runtime`, javaWorks, detail);
   }
 
   const okCount = checks.filter((check) => check.ok).length;
@@ -5333,7 +5345,9 @@ app.get('/api/network/allocations', requirePermission(capabilities.NETWORK_MANAG
 });
 
 app.post('/api/network/allocations', requirePermission(capabilities.NETWORK_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
-  const allocation = hosting.createAllocation(req.body.serverId || null, req.body || {});
+  const serverId = req.body.serverId ? Number(req.body.serverId) : null;
+  if (serverId) getServerOr404(serverId, req.user);
+  const allocation = hosting.createAllocation(serverId, req.body || {});
   logFixed({ category: 'network', title: 'Network allocation created', detail: `${allocation.ip}:${allocation.port} (${allocation.protocol})`, source: 'owner-action' });
   res.status(201).json({ allocation });
 });
