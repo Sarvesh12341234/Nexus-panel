@@ -5173,7 +5173,7 @@ app.get('/api/servers/:id/tebex', requirePermission(capabilities.SERVER_MANAGE, 
 
 app.post('/api/servers/:id/tebex/auto-config', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
-  const result = await tebex.autoConfigureTebex(server, req.body.webstoreSecret, req.body.webhookSecret);
+  const result = await tebex.autoConfigureTebex(server, req.body.webstoreSecret, req.body.webhookSecret, req.body.webstoreToken);
   appendLog(server.id, `[NexusPanel] Tebex auto-config complete: webstore ${result.webstoreName || result.webstoreId}, ${result.packages} package(s), config at ${result.configPath}.`);
   res.json({ tebex: { ...tebex.tebexStatus(server.id), webhookUrl: tebexWebhookUrl(req, server.id) }, autoConfig: result });
 }));

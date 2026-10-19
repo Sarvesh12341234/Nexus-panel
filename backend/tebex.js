@@ -5,7 +5,7 @@
  *
  * Auto-configures the Tebex plugin for a Minecraft server:
  *  1. Validates the webstore secret against the Tebex plugin API.
- *  2. Fetches the webstore's packages and game servers.
+ *  2. Fetches the webstore's packages through the Headless API.
  *  3. Stores the secrets securely and syncs package metadata for the panel.
  *
  * The panel never handles payments itself — Tebex does. This module only
@@ -19,6 +19,7 @@ const { db } = require('./db');
 const { ensureServerDirs } = require('./paths');
 
 const TEBEX_PLUGIN_API = 'https://plugin.tebex.io';
+const TEBEX_HEADLESS_API = 'https://headless.tebex.io/api/accounts';
 const TEBEX_PLUGIN_VERSION = 'v1.0.0';
 
 const DATA_ROOT = path.join(__dirname, '..', 'data');
@@ -131,21 +132,31 @@ function validateWebhookSecret(secret) {
   return clean;
 }
 
-/** Fetch the packages defined in the webstore. */
-async function fetchWebstorePackages(secret) {
-  const response = await fetch(`${TEBEX_PLUGIN_API}/packages`, {
-    headers: {
-      'X-Tebex-Secret': String(secret || ''),
-      'X-Tebex-Plugin-Version': TEBEX_PLUGIN_VERSION,
-      'User-Agent': 'NexusPanel-Tebex/1.0.0',
-    },
+function validateWebstoreToken(token) {
+  const clean = String(token || '').trim();
+  if (clean.length < 8 || clean.length > 256) {
+    throw new Error('Tebex Public Token must be 8-256 characters. Find it under Integrations → API Keys.');
+  }
+  return clean;
+}
+
+/** Fetch packages from Tebex's supported Headless API. */
+async function fetchWebstorePackages(token) {
+  const clean = validateWebstoreToken(token);
+  const response = await fetch(`${TEBEX_HEADLESS_API}/${encodeURIComponent(clean)}/packages`, {
+    headers: { Accept: 'application/json', 'User-Agent': 'NexusPanel-Tebex/1.0.0' },
     signal: AbortSignal.timeout(10000),
   }).catch(() => {
-    throw new Error('Could not reach the Tebex plugin API.');
+    throw new Error('Could not reach the Tebex Headless API.');
   });
-  if (!response.ok) throw new Error(`Tebex packages lookup failed: HTTP ${response.status}.`);
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 422) {
+      throw new Error('Tebex rejected the Public Token. Copy the Public Token from Integrations → API Keys.');
+    }
+    throw new Error(`Tebex packages lookup failed: HTTP ${response.status}.`);
+  }
   const payload = await response.json().catch(() => null);
-  if (!Array.isArray(payload?.data)) throw new Error('Tebex returned an unexpected packages response.');
+  if (!Array.isArray(payload?.data)) throw new Error('Tebex Headless API returned an unexpected packages response.');
   return payload.data;
 }
 
@@ -167,18 +178,20 @@ function rankFromPackageName(name) {
  *  - sync packages into the panel DB
  *  - store package metadata for the panel payment audit view
  */
-async function autoConfigureTebex(server, secret, webhookSecret) {
+async function autoConfigureTebex(server, secret, webhookSecret, webstoreToken) {
   const clean = String(secret || '').trim();
   const cleanWebhookSecret = validateWebhookSecret(webhookSecret);
+  const cleanWebstoreToken = validateWebstoreToken(webstoreToken);
   const info = await validateWebstoreSecret(clean);
-  const packages = await fetchWebstorePackages(clean);
+  const packages = await fetchWebstorePackages(cleanWebstoreToken);
   const now = Date.now();
 
   db.prepare(`
-    INSERT INTO tebex_configs (server_id, webstore_secret, webhook_secret, webstore_id, tebex_plugin_version, auto_config, enabled, last_check_at, last_check_ok, last_check_message, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 1, 1, ?, 1, 'Webstore verified.', ?, ?)
+    INSERT INTO tebex_configs (server_id, webstore_secret, webstore_token, webhook_secret, webstore_id, tebex_plugin_version, auto_config, enabled, last_check_at, last_check_ok, last_check_message, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 1, 'Webstore verified.', ?, ?)
     ON CONFLICT(server_id) DO UPDATE SET
       webstore_secret = excluded.webstore_secret,
+      webstore_token = excluded.webstore_token,
       webhook_secret = excluded.webhook_secret,
       webstore_id = excluded.webstore_id,
       auto_config = 1,
@@ -187,7 +200,7 @@ async function autoConfigureTebex(server, secret, webhookSecret) {
       last_check_ok = 1,
       last_check_message = 'Webstore verified.',
       updated_at = excluded.updated_at
-  `).run(Number(server.id), encryptSecret(clean), encryptSecret(cleanWebhookSecret), info.webstoreId, TEBEX_PLUGIN_VERSION, now, now, now);
+  `).run(Number(server.id), encryptSecret(clean), encryptSecret(cleanWebstoreToken), encryptSecret(cleanWebhookSecret), info.webstoreId, TEBEX_PLUGIN_VERSION, now, now, now);
 
   // Sync packages. Rank defaults to a cleaned package name; owners can edit it.
   const existing = new Map(db.prepare('SELECT id, tebex_package_id FROM tebex_packages WHERE server_id = ?')

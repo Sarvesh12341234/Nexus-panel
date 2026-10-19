@@ -448,6 +448,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     server_id INTEGER NOT NULL UNIQUE,
     webstore_secret TEXT NOT NULL DEFAULT '',
+    webstore_token TEXT NOT NULL DEFAULT '',
     webhook_secret TEXT NOT NULL DEFAULT '',
     webstore_id TEXT NOT NULL DEFAULT '',
     tebex_plugin_version TEXT NOT NULL DEFAULT 'v1.0.0',
@@ -465,6 +466,9 @@ db.exec(`
 const existingTebexConfigColumns = new Set(db.prepare('PRAGMA table_info(tebex_configs)').all().map((column) => column.name));
 if (!existingTebexConfigColumns.has('webhook_secret')) {
   db.exec("ALTER TABLE tebex_configs ADD COLUMN webhook_secret TEXT NOT NULL DEFAULT ''");
+}
+if (!existingTebexConfigColumns.has('webstore_token')) {
+  db.exec("ALTER TABLE tebex_configs ADD COLUMN webstore_token TEXT NOT NULL DEFAULT ''");
 }
 
 db.exec(`

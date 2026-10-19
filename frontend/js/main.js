@@ -3275,10 +3275,11 @@ async function renderTebex() {
     ` : `
       <form class="settings-form" id="tebexSetupForm">
         <label>Game server secret <input name="webstoreSecret" type="password" autocomplete="off" placeholder="Tebex → Game Servers" required minlength="8" maxlength="128"></label>
+        <label>Webstore Public Token <input name="webstoreToken" type="password" autocomplete="off" placeholder="Tebex → Integrations → API Keys" required minlength="8" maxlength="256"></label>
         <label>Webhook signing secret <input name="webhookSecret" type="password" autocomplete="off" placeholder="Tebex → Developers → Webhooks → endpoint" required minlength="8" maxlength="256"></label>
         <button type="submit">Auto-configure Tebex</button>
       </form>
-      <p class="muted">This connects the panel to the Tebex Game Server API and payment webhook. It does not install or configure the official game plugin. Install the current Tebex plugin, set its secret with <code>tebex.secret YOUR_SECRET</code>, and configure delivery commands in your Tebex store. Panel package commands are for its own audit view.</p>
+      <p class="muted">Use the Game Server secret from Tebex → Game Servers, the Webstore Public Token from Integrations → API Keys, and the webhook signing secret from your endpoint. This connects the panel to Tebex; it does not install or configure the official game plugin.</p>
     `}
     ${tebex.configured && !tebex.webhookConfigured ? `
       <form class="settings-form" id="tebexWebhookSecretForm">
