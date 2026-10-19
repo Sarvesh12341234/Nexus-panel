@@ -318,7 +318,7 @@ function beginServerFileOperation(serverId) {
 function beginLiveServerFileOperation(serverId) {
   const id = Number(serverId);
   if (!Number.isSafeInteger(id) || id < 1) throw new Error('Invalid server ID.');
-  if (!processes.has(id) || startingServers.has(id)) {
+  if ((!processes.has(id) && !activeAsfUnit(id)) || startingServers.has(id)) {
     throw new Error('Live file operations require the server to be running.');
   }
   return trackServerFileOperation(id);

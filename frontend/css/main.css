@@ -1132,6 +1132,7 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 .file-list {
   max-height: 62vh;
   overflow: auto;
+  overflow-anchor: none;
   padding-right: 0.35rem;
   scrollbar-width: thin;
   min-height: 220px;

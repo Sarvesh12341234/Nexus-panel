@@ -2603,6 +2603,7 @@ async function renderFiles() {
 }
 
 function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a file or paste config here.') {
+  const scrollTop = elements.fileList.scrollTop;
   elements.fileList.innerHTML = entries.map((entry) => `
     <div class="file-row">
       <label class="file-check"><input type="checkbox" class="file-pick" value="${escapeHtml(entry.path)}" data-file-type="${escapeHtml(entry.type)}"><span></span></label>
@@ -2615,6 +2616,7 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
     </div>
   `).join('') || `<p class="empty-state">${escapeHtml(emptyText)}</p>`;
   applyFileManagerLayout();
+  elements.fileList.scrollTop = scrollTop;
 }
 
 async function refreshPluginRows() {
@@ -4226,7 +4228,6 @@ elements.fileEditor.addEventListener('submit', async (event) => {
   try {
     await api(`/api/servers/${server.id}/files`, { method: 'PUT', body: JSON.stringify(payload) });
     showToast(server.status === 'online' ? 'File saved. Reload the affected plugin or restart the server if needed.' : 'File saved.');
-    await renderFiles();
   } catch (error) {
     showToast(error.message);
   }
