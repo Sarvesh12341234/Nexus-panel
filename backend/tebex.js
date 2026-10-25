@@ -286,15 +286,17 @@ function upsertPackageCommand(serverId, packageRowId, { command, delaySeconds = 
 }
 
 /** Record a payment webhook (called by the Tebex plugin's relay or manually). */
-function recordPayment(serverId, { transactionId, username = '', uuid = '', packageId = null, priceCents = 0, currency = 'USD', commands = [] }) {
+function recordPayment(serverId, { transactionId, username = '', uuid = '', packageId = null, packageName = '', rank = '', priceCents = 0, currency = 'USD', commands = [] }) {
   const cleanTxn = String(transactionId || '').trim().slice(0, 120);
   if (!cleanTxn) throw new Error('Transaction id is required.');
   db.prepare(`
-    INSERT INTO tebex_payments (server_id, transaction_id, status, username, uuid, package_id, price_cents, currency, commands_json, created_at)
-    VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tebex_payments (server_id, transaction_id, status, username, uuid, package_id, package_name, rank, price_cents, currency, commands_json, created_at)
+    VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(transaction_id) DO UPDATE SET
       username = excluded.username,
       package_id = excluded.package_id,
+      package_name = excluded.package_name,
+      rank = excluded.rank,
       price_cents = excluded.price_cents,
       currency = excluded.currency
   `).run(
@@ -303,6 +305,8 @@ function recordPayment(serverId, { transactionId, username = '', uuid = '', pack
     String(username || '').slice(0, 32),
     String(uuid || '').slice(0, 64),
     packageId ? Number(packageId) : null,
+    String(packageName || '').slice(0, 120),
+    String(rank || '').slice(0, 32),
     Math.max(0, Math.round(Number(priceCents) || 0)),
     String(currency || 'USD').slice(0, 8).toUpperCase(),
     JSON.stringify(Array.isArray(commands) ? commands.slice(0, 20) : []),
@@ -501,11 +505,17 @@ function ingestWebhook(serverId, rawBody, signature) {
       }))
     : [];
 
+  const packageName = packageRow?.name || payment.packageName;
+  const rank = packageRow?.rank || (payment.packageName && payment.packageName !== 'Unknown package'
+    ? rankFromPackageName(payment.packageName)
+    : '');
   recordPayment(serverId, {
     transactionId: payment.transactionId,
     username: payment.username,
     uuid: payment.uuid,
     packageId: packageRow?.id || null,
+    packageName,
+    rank,
     priceCents: payment.priceCents,
     currency: payment.currency,
     commands,
@@ -516,8 +526,8 @@ function ingestWebhook(serverId, rawBody, signature) {
     transactionId: payment.transactionId,
     username: payment.username,
     uuid: payment.uuid,
-    packageName: packageRow?.name || payment.packageName,
-    rank: packageRow?.rank || '',
+    packageName,
+    rank,
     priceCents: payment.priceCents,
     currency: payment.currency,
     commands,

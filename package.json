@@ -16,7 +16,7 @@
     "service:logs": "journalctl -u nexuspanel -f",
     "cli": "node backend/cli.js",
     "update": "bash update/update.sh",
-    "test": "npm run test:auth && npm run test:v3 && npm run test:security && npm run test:advanced && npm run test:exploit && npm run test:database && npm run test:asf && npm run test:update",
+    "test": "npm run test:auth && npm run test:v3 && npm run test:security && npm run test:advanced && npm run test:process && npm run test:tebex && npm run test:exploit && npm run test:database && npm run test:asf && npm run test:update",
     "test:auth": "node tests/auth.test.js",
     "test:v3": "node tests/v3.test.js && node tests/setup.test.js && node tests/java-runtime-archive.test.js",
     "test-auth": "npm run test:auth",
@@ -31,6 +31,8 @@
     "test:exploit": "node tests/security-exploit.test.js",
     "test:database": "node tests/database-provisioning.test.js",
     "test:advanced": "node tests/advanced-ops.test.js",
+    "test:process": "node tests/process-restart.test.js",
+    "test:tebex": "node tests/tebex-history.test.js",
     "test:update": "node tests/update.test.js"
   },
   "keywords": [],

@@ -3389,10 +3389,11 @@ async function renderTebex() {
     const feed = document.querySelector('#tebexPaymentFeed');
     if (feed) {
       for (const payment of [...tebex.payments].reverse()) {
+        const matchedPackage = tebex.packages.find((pkg) => pkg.id === payment.package_id);
         appendTebexPayment({
           ...payment,
-          packageName: tebex.packages.find((pkg) => pkg.id === payment.package_id)?.name || 'Package',
-          rank: tebex.packages.find((pkg) => pkg.id === payment.package_id)?.rank || '',
+          packageName: payment.package_name || matchedPackage?.name || 'Package',
+          rank: payment.rank || matchedPackage?.rank || '',
           at: payment.created_at,
         });
       }
@@ -3986,10 +3987,10 @@ function startRefreshLoop() {
         state.uploadRefreshInFlight = false;
       });
     }
-    const formFieldActive = document.activeElement?.matches?.('input, textarea, select');
+    const userEditingOrInteracting = document.activeElement?.matches?.('input, textarea, select, button, summary, [contenteditable="true"]');
     const activelyScrolling = now - state.lastUserScrollAt < 900;
     const sectionInterval = state.activeView === 'files' ? 1800 : 5000;
-    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !formFieldActive && !activelyScrolling) {
+    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !userEditingOrInteracting && !activelyScrolling) {
       state.sectionRefreshAt = now;
       state.sectionRefreshInFlight = true;
       const view = state.activeView;
@@ -4009,9 +4010,9 @@ function startRefreshLoop() {
   }, 500);
 }
 
-window.addEventListener('scroll', () => {
+document.addEventListener('scroll', () => {
   state.lastUserScrollAt = Date.now();
-}, { passive: true });
+}, { passive: true, capture: true });
 
 elements.loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();

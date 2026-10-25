@@ -2,9 +2,9 @@ $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 Write-Host 'NexusPanel Windows installer'
 $node = Get-Command node -ErrorAction SilentlyContinue
-if (-not $node) { throw 'Node.js 24 LTS or newer is required. Install Node.js and run this installer again.' }
-$major = [int]((node -p "process.versions.node.split('.')[0]").Trim())
-if ($major -lt 24) { throw "Node.js 24+ required; detected $major" }
+if (-not $node) { throw 'Node.js >=22.5.0 and <25.0.0 is required. Install a supported Node.js version and rerun this installer.' }
+$nodeVersion = [version]((node -p "process.versions.node").Trim())
+if ($nodeVersion -lt [version]'22.5.0' -or $nodeVersion -ge [version]'25.0.0') { throw "Node.js >=22.5.0 and <25.0.0 required; detected $nodeVersion" }
 Write-Host "Using Node.js $(node --version)"
 & npm install --no-audit --no-fund
 if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }

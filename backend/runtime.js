@@ -20,6 +20,8 @@ const logWriteChains = new Map();
 const fileOperations = new Map();
 const startingServers = new Set();
 const stopEscalationTimers = new Map();
+const recoveredStopEscalationTimers = new Map();
+const restartWaiters = new Map();
 let exitHandler = null;
 let asfUnitSnapshot = { expiresAt: 0, units: new Map() };
 const MAX_LOG_LINES = 600;
@@ -162,6 +164,12 @@ function signalSystemdUnit(unit, signal) {
 }
 
 function stopRecoveredAsfUnit(serverId, unit, force = false) {
+  const id = Number(serverId);
+  const existingTimer = recoveredStopEscalationTimers.get(id);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    recoveredStopEscalationTimers.delete(id);
+  }
   const signal = force ? 'SIGKILL' : 'SIGTERM';
   const result = signalSystemdUnit(unit, signal);
   invalidateAsfUnitSnapshot();
@@ -169,7 +177,18 @@ function stopRecoveredAsfUnit(serverId, unit, force = false) {
     const detail = String(result.stderr || result.error?.message || '').trim();
     throw new Error(detail || `systemctl kill failed for ${unit}.`);
   }
-  appendLog(serverId, `[NexusPanel] ${force ? 'Force-killed' : 'Graceful stop signal sent to'} recovered server unit ${unit}.`);
+  if (!force) {
+    const timer = setTimeout(() => {
+      recoveredStopEscalationTimers.delete(id);
+      if (activeAsfUnit(id) !== unit) return;
+      appendLog(id, `[NexusPanel] Recovered server unit did not stop within ${Math.round(STOP_GRACE_PERIOD_MS / 1000)} seconds; sending a force-kill signal.`);
+      try { stopRecoveredAsfUnit(id, unit, true); }
+      catch (error) { appendLog(id, `[NexusPanel] Force-kill of recovered server unit failed: ${error.message}`); }
+    }, STOP_GRACE_PERIOD_MS);
+    timer.unref?.();
+    recoveredStopEscalationTimers.set(id, timer);
+  }
+  appendLog(id, `[NexusPanel] ${force ? 'Force-killed' : 'Graceful stop signal sent to'} recovered server unit ${unit}.`);
   return { ok: true, message: force ? 'Recovered server process killed.' : 'Stop signal sent to recovered server.' };
 }
 
@@ -848,14 +867,41 @@ function scheduleStopEscalation(serverId, child) {
   stopEscalationTimers.set(id, timer);
 }
 
+function scheduleRestartAfterStop(server, software) {
+  const id = Number(server.id);
+  if (restartWaiters.has(id)) return;
+  const deadline = Date.now() + 45_000;
+  const timer = setInterval(() => {
+    if (processes.has(id) || activeAsfUnit(id)) {
+      if (Date.now() < deadline) return;
+      clearInterval(timer);
+      restartWaiters.delete(id);
+      appendLog(id, '[NexusPanel] Restart timed out waiting for the old process and systemd unit to stop. No duplicate server process was started.');
+      return;
+    }
+    clearInterval(timer);
+    restartWaiters.delete(id);
+    try {
+      const result = startServer(server, software);
+      if (!result?.ok) appendLog(id, `[NexusPanel] Restart could not start the server: ${result?.message || 'unknown start failure'}`);
+    } catch (error) {
+      appendLog(id, `[NexusPanel] Restart failed: ${error.message}`);
+    }
+  }, 250);
+  timer.unref?.();
+  restartWaiters.set(id, timer);
+}
+
 function restartServer(server, software) {
   const serverId = Number(server.id);
+  if (restartWaiters.has(serverId)) return { ok: true, message: 'Restart is already waiting for the previous process to stop.' };
   const child = processes.get(serverId);
   if (!child) {
     const recoveredUnit = activeAsfUnit(serverId);
     if (!recoveredUnit) return startServer(server, software);
     stopRecoveredAsfUnit(serverId, recoveredUnit);
-    return startServer(server, software);
+    scheduleRestartAfterStop(server, software);
+    return { ok: true, message: 'Restart queued; waiting for the recovered systemd process to stop.' };
   }
   appendLog(serverId, '[NexusPanel] Restart requested.');
   intentionalStops.add(serverId);
@@ -866,16 +912,7 @@ function restartServer(server, software) {
     forceStopServer(serverId, child);
   }
   scheduleStopEscalation(serverId, child);
-  const timer = setInterval(() => {
-    if (!processes.has(serverId)) {
-      clearInterval(timer);
-      try {
-        startServer(server, software);
-      } catch (error) {
-        appendLog(serverId, `[NexusPanel] Restart failed: ${error.message}`);
-      }
-    }
-  }, 350);
+  scheduleRestartAfterStop(server, software);
   return { ok: true, message: 'Restart queued.' };
 }
 

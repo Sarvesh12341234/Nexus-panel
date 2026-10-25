@@ -27,19 +27,19 @@ sudo nexuspanel setup-url
 # Open the printed URL in a browser
 ```
 
-Check `node --version` before installing manually. The panel uses Node's
-`node:sqlite` module and will reject unsupported runtimes before creating its
-systemd service. If the version is below 22.5.0, install Node.js 24 and rerun
-the installation; the Linux release installer handles this automatically.
+Check `node --version` before installing manually. The supported range is
+Node.js `>=22.5.0` and `<25.0.0`; Node.js 25 and newer are rejected until the
+SQLite adapter is verified on that major version. If the version is outside
+that range, install Node.js 24 and rerun the installation.
 
 ## Installers
 
 The Linux release installers are in [`installers/`](installers/):
 
-- `nexuspanel-normal-v1.0.0-linux-installer.sh` installs the normal edition.
-- `nexuspanel-host-v1.0.0-linux-installer.sh` installs the host edition.
+- `nexuspanel-normal-v1.0.3-linux-installer.sh` installs the normal edition.
+- `nexuspanel-host-v1.0.3-linux-installer.sh` installs the host edition.
 
-Both installers use the `v1.0.0` source tag by default. Windows users can run
+Both installers use the `v1.0.3` source tag by default. Windows users can run
 [`install.bat`](install.bat) from the extracted release source.
 
 Game-server execution is supported only on Linux hosts where the per-server

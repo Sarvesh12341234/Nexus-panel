@@ -514,6 +514,8 @@ db.exec(`
     username TEXT NOT NULL DEFAULT '',
     uuid TEXT NOT NULL DEFAULT '',
     package_id INTEGER,
+    package_name TEXT NOT NULL DEFAULT '',
+    rank TEXT NOT NULL DEFAULT '',
     price_cents INTEGER NOT NULL DEFAULT 0,
     currency TEXT NOT NULL DEFAULT 'USD',
     commands_json TEXT NOT NULL DEFAULT '[]',
@@ -622,6 +624,11 @@ const fixedLogColumns = {
   actor_name: "TEXT NOT NULL DEFAULT 'System'",
 };
 
+const tebexPaymentColumns = {
+  package_name: "TEXT NOT NULL DEFAULT ''",
+  rank: "TEXT NOT NULL DEFAULT ''",
+};
+
 const repairPlaybookColumns = {
   pending_validation: 'INTEGER NOT NULL DEFAULT 0',
   validated_at: 'INTEGER NOT NULL DEFAULT 0',
@@ -666,6 +673,11 @@ for (const [name, definition] of Object.entries(sessionColumns)) {
 const existingFixedLogColumns = new Set(db.prepare('PRAGMA table_info(fixed_logs)').all().map((column) => column.name));
 for (const [name, definition] of Object.entries(fixedLogColumns)) {
   if (!existingFixedLogColumns.has(name)) db.exec(`ALTER TABLE fixed_logs ADD COLUMN ${name} ${definition}`);
+}
+
+const existingTebexPaymentColumns = new Set(db.prepare('PRAGMA table_info(tebex_payments)').all().map((column) => column.name));
+for (const [name, definition] of Object.entries(tebexPaymentColumns)) {
+  if (!existingTebexPaymentColumns.has(name)) db.exec(`ALTER TABLE tebex_payments ADD COLUMN ${name} ${definition}`);
 }
 
 const existingRepairPlaybookColumns = new Set(db.prepare('PRAGMA table_info(repair_playbooks)').all().map((column) => column.name));

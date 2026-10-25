@@ -168,18 +168,15 @@ install_system_packages() {
     esac
 }
 
-node_major() {
-    node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
+node_supported() {
+    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major > 22 && major < 25) || (major === 22 && minor >= 5) ? 0 : 1)' >/dev/null 2>&1
 }
 
 ensure_node() {
-    if command_exists node; then
-        local current_major="$(node_major)"
-        if [ "$current_major" -ge 24 ]; then
-            NODE_PATH="$(command -v node)"
-            info "Node.js $("$NODE_PATH" --version) detected."
-            return 0
-        fi
+    if command_exists node && node_supported; then
+        NODE_PATH="$(command -v node)"
+        info "Node.js $("$NODE_PATH" --version) detected."
+        return 0
     fi
     local pm="$(detect_pm)"
     if [ "$pm" = "apt" ]; then
@@ -200,9 +197,8 @@ ensure_node() {
         die "Cannot determine package manager for Node.js."
     fi
     command_exists node || die "Node.js was not installed."
-    local major="$(node_major)"
-    if [ "$major" -lt 24 ]; then
-        die "Node.js 24+ is required. Detected: $(node --version)"
+    if ! node_supported; then
+        die "Node.js >=22.5.0 and <25.0.0 is required. Detected: $(node --version)"
     fi
     NODE_PATH="$(command -v node)"
     info "Node.js installed successfully."
