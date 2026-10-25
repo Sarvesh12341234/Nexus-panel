@@ -408,7 +408,6 @@ npm_install_with_recovery() {
     configure_npm
     if retry npm install --omit=optional --no-audit --no-fund; then
         info "npm dependencies installed."
-        npm install --include=optional --no-audit --no-fund || warn "Optional npm dependencies failed."
         return 0
     fi
     warn "npm install failed."

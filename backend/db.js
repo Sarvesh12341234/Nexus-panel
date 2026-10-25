@@ -4,27 +4,7 @@ const { assertSupportedNode } = require('./node_version');
 
 assertSupportedNode();
 
-/**
- * SQLite driver selection.
- *
- * node:sqlite is experimental before Node 24 and its API can shift between
- * minors, so we use better-sqlite3 only if it exposes the DatabaseSync API
- * consumed below; otherwise we fall back to node:sqlite. Both expose the
- * compatible prepare().run/get/all and exec methods used by the panel.
- *
- * The current better-sqlite3 package exports a different constructor API, so
- * it falls back to node:sqlite until a compatible adapter is available.
- */
-let DatabaseSync;
-let sqliteDriver = 'node:sqlite';
-try {
-  const betterSqlite3 = require('better-sqlite3');
-  if (typeof betterSqlite3.DatabaseSync !== 'function') throw new Error('better-sqlite3 does not expose the DatabaseSync interface.');
-  ({ DatabaseSync } = betterSqlite3);
-  sqliteDriver = 'better-sqlite3';
-} catch {
-  ({ DatabaseSync } = require('node:sqlite'));
-}
+const { DatabaseSync } = require('node:sqlite');
 
 const dataDir = process.env.NEXUSPANEL_DATA_DIR
   ? path.resolve(process.env.NEXUSPANEL_DATA_DIR)
