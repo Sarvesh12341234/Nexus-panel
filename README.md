@@ -1,4 +1,4 @@
-# NexusPanel 1.0.3
+# NexusPanel 1.0.4
 
 Linux-native Minecraft server panel with the **ASF (Advanced Sandbox Fabric)**
 kernel isolation protocol — our own Landlock + seccomp + cgroup v2 sandbox that
@@ -36,10 +36,10 @@ that range, install Node.js 24 and rerun the installation.
 
 The Linux release installers are in [`installers/`](installers/):
 
-- `nexuspanel-normal-v1.0.3-linux-installer.sh` installs the normal edition.
-- `nexuspanel-host-v1.0.3-linux-installer.sh` installs the host edition.
+- `nexuspanel-normal-v1.0.4-linux-installer.sh` installs the normal edition.
+- `nexuspanel-host-v1.0.4-linux-installer.sh` installs the host edition.
 
-Both installers use the `v1.0.3` source tag by default. Windows users can run
+Both installers use the `v1.0.4` source tag by default. Windows users can run
 [`install.bat`](install.bat) from the extracted release source.
 
 Game-server execution is supported only on Linux hosts where the per-server

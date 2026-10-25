@@ -23,7 +23,7 @@ try {
   fs.mkdirSync(path.join(source, 'update'), { recursive: true });
   fs.writeFileSync(path.join(source, 'package.json'), JSON.stringify({
     name: 'nexuspanel-update-fixture',
-    version: '1.0.3',
+    version: '1.0.4',
   }));
   fs.writeFileSync(path.join(source, 'backend', 'marker.js'), 'module.exports = "new";\n');
   fs.writeFileSync(path.join(source, 'update', 'update.sh'), '# fixture update script\n');
@@ -33,7 +33,7 @@ try {
   run('git', ['-C', source, 'config', 'user.name', 'NexusPanel update test']);
   run('git', ['-C', source, 'add', '.']);
   run('git', ['-C', source, 'commit', '-qm', 'fixture release']);
-  run('git', ['-C', source, 'tag', 'v1.0.3']);
+  run('git', ['-C', source, 'tag', 'v1.0.4']);
   run('git', ['init', '--bare', '-q', remote]);
   run('git', ['-C', source, 'remote', 'add', 'origin', remote]);
   run('git', ['-C', source, 'push', '-q', 'origin', 'HEAD:main', '--tags']);
@@ -56,12 +56,12 @@ try {
       ...process.env,
       PATH: [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
       NEXUSPANEL_DIR: install,
-      NEXUSPANEL_UPDATE_TAG: 'v1.0.3',
+      NEXUSPANEL_UPDATE_TAG: 'v1.0.4',
       NEXUSPANEL_UPDATE_BACKUP_DIR: path.join(install, 'update', 'backups'),
     },
   });
 
-  assert.equal(JSON.parse(fs.readFileSync(path.join(install, 'package.json'), 'utf8')).version, '1.0.3');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(install, 'package.json'), 'utf8')).version, '1.0.4');
   assert.equal(fs.readFileSync(path.join(install, 'backend', 'marker.js'), 'utf8'), 'module.exports = "new";\n');
   assert.equal(fs.readFileSync(path.join(install, 'data', 'nexuspanel.sqlite'), 'utf8'), 'keep database');
   assert.equal(fs.readFileSync(path.join(install, 'servers', 'world', 'level.dat'), 'utf8'), 'keep world');
@@ -93,13 +93,13 @@ try {
       ...process.env,
       PATH: [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
       NEXUSPANEL_DIR: gitInstall,
-      NEXUSPANEL_UPDATE_TAG: 'v1.0.3',
+      NEXUSPANEL_UPDATE_TAG: 'v1.0.4',
       NEXUSPANEL_UPDATE_BACKUP_DIR: path.join(gitInstall, 'update', 'backups'),
     },
   }).toString();
 
-  assert.match(gitOutput, /Panel code verified .* \(1\.0\.3\)/);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(gitInstall, 'package.json'), 'utf8')).version, '1.0.3');
+  assert.match(gitOutput, /Panel code verified .* \(1\.0\.4\)/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(gitInstall, 'package.json'), 'utf8')).version, '1.0.4');
   assert.equal(fs.readFileSync(path.join(gitInstall, 'backend', 'marker.js'), 'utf8'), 'module.exports = "new";\n');
 
   console.log('Update test passed: bare GitHub version tags and non-Git updates work while user data is preserved.');

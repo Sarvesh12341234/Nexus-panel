@@ -292,7 +292,7 @@ function panelSettingsPayload(user = null) {
   const defaultTag = `v${PANEL_VERSION}`;
   let configuredTag = settingValue('update_target_tag', defaultTag);
   // Migrate any pre-1.0 tag (v1.x-v5.x) to the 1.0 scheme automatically.
-  if (/^(?:normal|host)-v(?:[1-5]\.)\d/.test(configuredTag)) {
+  if (/^(?:normal|host)-v(?:[1-5]\.)\d/.test(configuredTag) || /^(?:(?:normal|host)-)?v1\.0\.3$/.test(configuredTag)) {
     configuredTag = defaultTag;
     setSettingValue('update_target_tag', configuredTag);
   }
