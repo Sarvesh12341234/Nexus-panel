@@ -118,6 +118,9 @@ db.exec(`
     expires_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL DEFAULT 0,
     user_agent_hash TEXT NOT NULL DEFAULT '',
+    user_agent TEXT NOT NULL DEFAULT '',
+    ip TEXT NOT NULL DEFAULT '',
+    ip_changed_at INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
@@ -609,6 +612,14 @@ const uploadColumns = {
 const sessionColumns = {
   last_seen_at: 'INTEGER NOT NULL DEFAULT 0',
   user_agent_hash: "TEXT NOT NULL DEFAULT ''",
+  user_agent: "TEXT NOT NULL DEFAULT ''",
+  ip: "TEXT NOT NULL DEFAULT ''",
+  ip_changed_at: 'INTEGER NOT NULL DEFAULT 0',
+};
+
+const fixedLogColumns = {
+  actor_user_id: 'INTEGER',
+  actor_name: "TEXT NOT NULL DEFAULT 'System'",
 };
 
 const repairPlaybookColumns = {
@@ -650,6 +661,11 @@ function getUserCount() {
 const existingSessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map((column) => column.name));
 for (const [name, definition] of Object.entries(sessionColumns)) {
   if (!existingSessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${definition}`);
+}
+
+const existingFixedLogColumns = new Set(db.prepare('PRAGMA table_info(fixed_logs)').all().map((column) => column.name));
+for (const [name, definition] of Object.entries(fixedLogColumns)) {
+  if (!existingFixedLogColumns.has(name)) db.exec(`ALTER TABLE fixed_logs ADD COLUMN ${name} ${definition}`);
 }
 
 const existingRepairPlaybookColumns = new Set(db.prepare('PRAGMA table_info(repair_playbooks)').all().map((column) => column.name));

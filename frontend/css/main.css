@@ -29,6 +29,7 @@ body[data-theme="aurora"] { --bg:#061018; --sidebar:#0a1620; --green:#76ffcf; --
 body[data-theme="lava"] { --bg:#100503; --sidebar:#1a0805; --green:#ffb703; --cyan:#ff6b00; --yellow:#ffe45e; --red:#ff2e2e; --glow:rgba(255,107,0,.36); }
 body[data-theme="berry"] { --bg:#12051a; --sidebar:#1c0a29; --green:#ff4fd8; --cyan:#7c3cff; --yellow:#ffe066; --red:#ff477e; --glow:rgba(255,79,216,.34); }
 body[data-theme="matrix"] { --bg:#020a05; --sidebar:#06150b; --green:#39ff14; --cyan:#00ffaa; --yellow:#d9ff5c; --red:#ff4d6d; --glow:rgba(57,255,20,.34); }
+body[data-theme="black"] { --bg:#020204; --sidebar:#08080c; --panel:rgba(10,10,14,.96); --panel-2:rgba(16,16,21,.96); --green:#e4e4eb; --cyan:#b9b9c7; --yellow:#d4d4dc; --red:#f1c4cd; --glow:rgba(205,205,220,.32); }
 body[data-theme="quantum-city"] { --bg:#030411; --sidebar:#07091d; --green:#58f7ff; --cyan:#7657ff; --yellow:#ffde59; --red:#ff4778; --glow:rgba(88,247,255,.4); }
 body[data-theme="holo-forge"] { --bg:#06100f; --sidebar:#081c19; --green:#4dffc3; --cyan:#00b8ff; --yellow:#ffba4a; --red:#ff526d; --glow:rgba(77,255,195,.38); }
 body[data-theme="void-architect"] { --bg:#05020a; --sidebar:#0c0614; --green:#d58cff; --cyan:#7b61ff; --yellow:#f5d0fe; --red:#ff4d8d; --glow:rgba(213,140,255,.4); }
@@ -913,7 +914,7 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   height: clamp(360px, 58vh, 720px);
   padding: 1rem;
   overflow: auto;
-  border-radius: 8px;
+  border-radius: 14px;
   background: #05080c;
   border: 1px solid var(--line);
   color: #d8ffe9;
@@ -2050,9 +2051,16 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 
 @media (max-width: 620px) {
   .workspace {
-    padding: 14px;
+    padding: 12px;
+    gap: 14px;
     min-width: 0;
   }
+
+  body::before { display: none; }
+  body[data-theme-mode="picture"] { background-attachment: scroll; }
+  .console-box { height: min(62dvh, 620px); min-height: 300px; padding: .75rem; border-radius: 14px; }
+  .surface, .server-card, .software-card, .plugin-row, .user-row, .quick-stats article { backdrop-filter: none !important; }
+  .sidebar { backdrop-filter: none; }
 
   .panel-shell,
   .surface,
@@ -2116,6 +2124,12 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
     white-space: normal;
     overflow-wrap: anywhere;
   }
+}
+
+@media (max-width: 960px) and (pointer: coarse) {
+  *, *::before, *::after { scroll-behavior: auto !important; }
+  .backplate, .theme-card-art i { animation: none !important; }
+  body[data-sticky-topbar="true"] .topbar { backdrop-filter: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

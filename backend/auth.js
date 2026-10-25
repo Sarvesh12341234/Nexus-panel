@@ -4,9 +4,18 @@ const path = require('node:path');
 const { db } = require('./db');
 
 const SESSION_COOKIE = 'np_session';
-const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
-const SESSION_IDLE_MS = 1000 * 60 * 60 * 2;
+// Keep an active browser signed in, while still requiring a fresh login after
+// two weeks without activity. The 30-day cookie is renewed during use.
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
+const SESSION_IDLE_MS = 1000 * 60 * 60 * 24 * 14;
 const secretPath = path.join(__dirname, '..', 'data', 'cookie_secret');
+
+function userAgentFingerprint(userAgent) {
+  const normalized = String(userAgent || '')
+    .replace(/(Chrome|Chromium|Firefox|Version|Safari|Edg|OPR)\/\d+(?:\.\d+)*/gi, '$1')
+    .replace(/\b\d+_\d+(?:_\d+)*\b/g, 'os-version');
+  return crypto.createHash('sha256').update(normalized).digest('hex');
+}
 
 function loadCookieSecret() {
   if (process.env.NEXUSPANEL_COOKIE_SECRET) return process.env.NEXUSPANEL_COOKIE_SECRET;
@@ -195,14 +204,14 @@ function createUser({ email, name, password, role = 'admin', accessLevel = 0, pe
   return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid));
 }
 
-function createSession(userId, { userAgent = '' } = {}) {
+function createSession(userId, { userAgent = '', ip = '' } = {}) {
   const id = crypto.randomBytes(32).toString('base64url');
   const expiresAt = Date.now() + SESSION_TTL_MS;
   const now = Date.now();
-  const userAgentHash = userAgent ? crypto.createHash('sha256').update(String(userAgent)).digest('hex') : '';
+  const userAgentHash = userAgent ? userAgentFingerprint(userAgent) : '';
   db.prepare('DELETE FROM sessions WHERE user_id = ? AND id NOT IN (SELECT id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 4)').run(userId, userId);
-  db.prepare('INSERT INTO sessions (id, user_id, expires_at, last_seen_at, user_agent_hash) VALUES (?, ?, ?, ?, ?)')
-    .run(id, userId, expiresAt, now, userAgentHash);
+  db.prepare('INSERT INTO sessions (id, user_id, expires_at, last_seen_at, user_agent_hash, user_agent, ip) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, userId, expiresAt, now, userAgentHash, String(userAgent).slice(0, 420), String(ip).slice(0, 80));
   return encodeSession(id);
 }
 
@@ -239,6 +248,7 @@ function authMiddleware(req, res, next) {
   const row = db.prepare(`
     SELECT users.*, sessions.id AS session_id, sessions.last_seen_at AS session_last_seen_at,
       sessions.user_agent_hash AS session_user_agent_hash,
+      sessions.ip AS session_ip, sessions.ip_changed_at AS session_ip_changed_at,
       sessions.expires_at AS session_expires_at
     FROM sessions
     JOIN users ON users.id = sessions.user_id
@@ -246,7 +256,8 @@ function authMiddleware(req, res, next) {
   `).get(sessionId);
 
   const now = Date.now();
-  const requestAgentHash = crypto.createHash('sha256').update(String(req.headers['user-agent'] || '')).digest('hex');
+  const requestAgentHash = userAgentFingerprint(req.headers['user-agent'] || '');
+  const requestIp = String(req.ip || req.socket.remoteAddress || '').slice(0, 80);
   const idleExpired = row && Number(row.session_last_seen_at || 0) && now - Number(row.session_last_seen_at) > SESSION_IDLE_MS;
   const agentMismatch = row?.session_user_agent_hash && row.session_user_agent_hash !== requestAgentHash;
   const sessionExpired = row && Number(row.session_expires_at || 0) <= now;
@@ -260,8 +271,13 @@ function authMiddleware(req, res, next) {
     clearSessionCookie(res);
   } else if (row) {
     req.user = row;
-    if (now - Number(row.session_last_seen_at || 0) > 5 * 60 * 1000) {
-      db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').run(now, sessionId);
+    const ipChanged = Boolean(row.session_ip && requestIp && row.session_ip !== requestIp);
+    if (ipChanged || now - Number(row.session_last_seen_at || 0) > 5 * 60 * 1000) {
+      db.prepare(`UPDATE sessions SET last_seen_at = ?, expires_at = ?,
+        ip = ?, ip_changed_at = CASE WHEN ? THEN ? ELSE ip_changed_at END WHERE id = ?`)
+        .run(now, now + SESSION_TTL_MS, requestIp || row.session_ip || '', ipChanged ? 1 : 0, now, sessionId);
+      req.user.session_ip_changed_at = ipChanged ? now : row.session_ip_changed_at;
+      setSessionCookie(res, encodeSession(sessionId), { secure: req.secure });
     }
   }
   next();

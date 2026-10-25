@@ -22,6 +22,7 @@ const state = {
   uploadRefreshInFlight: false,
   sectionRefreshAt: 0,
   sectionRefreshInFlight: false,
+  lastUserScrollAt: 0,
   consolePollAt: {},
   consoleInFlight: {},
   consoleMetricsAt: {},
@@ -224,6 +225,7 @@ const themes = [
   { key: 'lava', name: 'Plain - Lava Core', mode: 'plain' },
   { key: 'berry', name: 'Plain - Berry Blast', mode: 'plain' },
   { key: 'matrix', name: 'Plain - Matrix Lime', mode: 'plain' },
+  { key: 'black', name: 'Plain - Blackhole Glow', mode: 'plain' },
   { key: 'forge-ui', name: 'Plain - Forge Geometry', mode: 'plain' },
   { key: 'quantum-city', name: 'Advanced - Quantum City', mode: 'advanced' },
   { key: 'holo-forge', name: 'Advanced - Holographic Forge', mode: 'advanced' },
@@ -2733,6 +2735,7 @@ function renderSettings() {
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.0.0')}"></label>
       <label>Visible servers before scrolling <input name="serverSwitcherVisibleCount" type="number" min="1" max="20" value="${Number(settings.serverSwitcherVisibleCount || 3)}"></label>
+      <label>Maximum backup file size (GB) <input name="maxBackupSizeGb" type="number" min="1" max="100" value="${Number(settings.maxBackupSizeGb || 20)}"><small>Applies to manual and automatic archives. The limit is enforced while writing, and incomplete oversized files are removed.</small></label>
       <label>Update source <input readonly value="${escapeHtml(settings.updateRepo || '')}"></label>
       <label>Update tag <input name="updateTargetTag" value="${escapeHtml(settings.updateTag || '')}" placeholder="v1.0.0"></label>
       <label>Public panel URL <input name="publicBaseUrl" type="url" value="${escapeHtml(settings.publicBaseUrl || '')}" placeholder="https://panel.example.com"></label>
@@ -3172,13 +3175,22 @@ async function renderAllocations() {
 async function renderDatabases() {
   if (!elements.databasesPanel) return;
   const server = activeServer();
+  const panel = elements.databasesPanel;
+  const renderServerId = server?.id ?? null;
+  const manualDetailsWasOpen = Boolean(panel.querySelector('.database-manual-connect')?.open);
+  const savedFormValues = Object.fromEntries(
+    [...(panel.querySelector('#databaseForm')?.elements || [])]
+      .filter((field) => field.name && field.type !== 'password')
+      .map((field) => [field.name, field.value]),
+  );
   const [data, hostData] = await Promise.all([
     api(`/api/databases${server ? `?serverId=${server.id}` : ''}`).catch(() => ({ connections: [] })),
     api('/api/databases/host').catch((error) => ({ host: { configured: false }, error: error.message })),
   ]);
+  if (state.activeView !== 'databases' || (activeServer()?.id ?? null) !== renderServerId) return;
   const connections = data.connections || [];
   const host = hostData.host || {};
-  elements.databasesPanel.innerHTML = `
+  panel.innerHTML = `
     <div class="section-head"><div><p class="eyebrow">Databases</p><h2>Server databases</h2></div></div>
     <div class="public-help-grid">
       <article>
@@ -3229,6 +3241,12 @@ async function renderDatabases() {
       `).join('') || '<p class="empty-state">No database connections yet.</p>'}
     </div>
   `;
+  const manualDetails = panel.querySelector('.database-manual-connect');
+  if (manualDetails) manualDetails.open = manualDetailsWasOpen;
+  for (const [name, value] of Object.entries(savedFormValues)) {
+    const field = panel.querySelector(`#databaseForm [name="${CSS.escape(name)}"]`);
+    if (field) field.value = value;
+  }
 }
 
 function showDatabaseDetails(connection) {
@@ -3474,7 +3492,7 @@ async function renderFixed() {
         <div class="plugin-row">
           <div>
             <strong>${escapeHtml(item.title || 'Fixed event')}</strong>
-            <div class="muted">${escapeHtml(item.serverName || 'Panel')} · ${escapeHtml(item.category || 'panel')} · ${escapeHtml(item.source || 'system')} · ${escapeHtml(formatPanelDate(item.createdAt))}</div>
+            <div class="muted">${escapeHtml(item.actorName || 'System')} · ${escapeHtml(item.serverName || 'Panel')} · ${escapeHtml(item.category || 'panel')} · ${escapeHtml(formatPanelDate(item.createdAt))}</div>
             ${item.detail ? `<div class="muted">${escapeHtml(item.detail).replaceAll('\n', '<br>')}</div>` : ''}
           </div>
           <span class="badge is-on">fixed</span>
@@ -3969,8 +3987,9 @@ function startRefreshLoop() {
       });
     }
     const formFieldActive = document.activeElement?.matches?.('input, textarea, select');
-    const sectionInterval = state.activeView === 'files' ? 1400 : 2500;
-    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !formFieldActive) {
+    const activelyScrolling = now - state.lastUserScrollAt < 900;
+    const sectionInterval = state.activeView === 'files' ? 1800 : 5000;
+    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !formFieldActive && !activelyScrolling) {
       state.sectionRefreshAt = now;
       state.sectionRefreshInFlight = true;
       const view = state.activeView;
@@ -3989,6 +4008,10 @@ function startRefreshLoop() {
     }
   }, 500);
 }
+
+window.addEventListener('scroll', () => {
+  state.lastUserScrollAt = Date.now();
+}, { passive: true });
 
 elements.loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -5069,6 +5092,22 @@ document.addEventListener('click', async (event) => {
     if (action === 'refresh-fixed') {
       await renderFixed();
       showToast('Fixed history refreshed.');
+      return;
+    }
+    if (action === 'security-revoke-session') {
+      const sessionId = actionTarget.dataset.sessionId;
+      if (!sessionId || !confirm('Revoke this browser session? That device will need to sign in again.')) return;
+      try {
+        const result = await api(`/api/security/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+        if (result.current) {
+          await api('/api/me').catch(() => {});
+          return;
+        }
+        showToast('Session revoked.');
+        await renderSecurity();
+      } catch (error) {
+        showToast(error.message);
+      }
       return;
     }
     if (action === 'probe-allocation') {

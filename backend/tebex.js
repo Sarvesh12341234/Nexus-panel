@@ -403,7 +403,11 @@ function normalizePaymentWebhook(payload) {
     ? subject.products
     : Array.isArray(subject.packages)
       ? subject.packages
-      : [];
+      : Array.isArray(payload.products)
+        ? payload.products
+        : Array.isArray(payload.packages)
+          ? payload.packages
+          : [];
   const firstProduct = products[0] || {};
   const customer = subject.customer || {};
   const customerUsername = customer.username || firstProduct.username || subject.player || payload.player || {};
@@ -411,9 +415,24 @@ function normalizePaymentWebhook(payload) {
     ? customerUsername
     : customerUsername.username || subject.username || payload.username || '';
   const username = String(rawUsername).trim();
-  const price = subject.price_paid || subject.price || firstProduct.paid_price || firstProduct.base_price || {};
-  const amountCents = subject.amount_cents ?? subject.price_cents ?? firstProduct.base_price_cents;
-  const amount = Number(amountCents ?? (Number(price.amount ?? price) * 100));
+  const moneyValues = [
+    subject.amount_cents,
+    subject.price_cents,
+    firstProduct.paid_price_cents,
+    firstProduct.base_price_cents,
+  ].map(Number).filter((value) => Number.isFinite(value) && value >= 0);
+  const money = [subject.price_paid, subject.price, firstProduct.paid_price, firstProduct.base_price, payload.price_paid, payload.price]
+    .find((value) => value !== undefined && value !== null);
+  const price = money && typeof money === 'object' ? money : {};
+  const amountValue = Number(typeof money === 'object' ? (money.amount ?? money.value ?? money.total) : money);
+  const amountCents = moneyValues.find((value) => value > 0) ?? moneyValues[0];
+  const priceCents = amountCents > 0
+    ? amountCents
+    : Number.isFinite(amountValue)
+      ? Math.max(0, Math.round(amountValue * 100))
+      : (amountCents || 0);
+  const productId = firstProduct.id ?? firstProduct.package_id ?? firstProduct.packageId
+    ?? subject.package_id ?? subject.packageId ?? payload.package_id ?? payload.packageId;
   const transactionId = String(subject.transaction_id || payload.transaction_id || (legacyPayment ? payload.id : '') || '')
     .trim()
     .slice(0, 120);
@@ -423,9 +442,9 @@ function normalizePaymentWebhook(payload) {
     transactionId,
     username: username.slice(0, 32),
     uuid: String(subject.uuid || payload.uuid || customerUsername.id || customer.uuid || subject.player?.uuid || payload.player?.uuid || '').slice(0, 64),
-    packageId: Number(firstProduct.id) || null,
-    packageName: String(firstProduct.name || 'Unknown package').slice(0, 120),
-    priceCents: Number.isFinite(amount) ? Math.max(0, Math.round(amount)) : 0,
+    packageId: Number(productId) || null,
+    packageName: String(firstProduct.name || firstProduct.package_name || subject.package_name || payload.package_name || 'Unknown package').slice(0, 120),
+    priceCents,
     currency: String(
       subject.currency
       || price.currency
@@ -462,10 +481,14 @@ function ingestWebhook(serverId, rawBody, signature) {
   if (payment.ignored) return { ok: true, ...payment };
 
   // Resolve the panel package row so the feed can show the rank being granted.
-  const packageRow = payment.packageId
+  let packageRow = payment.packageId
     ? db.prepare('SELECT id, name, rank FROM tebex_packages WHERE server_id = ? AND tebex_package_id = ?')
       .get(Number(serverId), payment.packageId)
     : null;
+  if (!packageRow && payment.packageName && payment.packageName !== 'Unknown package') {
+    packageRow = db.prepare('SELECT id, name, rank FROM tebex_packages WHERE server_id = ? AND lower(trim(name)) = lower(trim(?)) ORDER BY active DESC, id DESC LIMIT 1')
+      .get(Number(serverId), payment.packageName);
+  }
   const commands = packageRow
     ? db.prepare('SELECT command, delay_seconds, online_required FROM tebex_commands WHERE package_id = ? AND enabled = 1')
       .all(packageRow.id)

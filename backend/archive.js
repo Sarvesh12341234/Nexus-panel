@@ -73,6 +73,18 @@ async function createZip(root, relativePaths, outputPath, options = {}) {
   const central = [];
   let output;
   let offset = 0n;
+  let outputBytes = 0n;
+  const maxOutputBytes = Number.isFinite(Number(options.maxOutputBytes)) && Number(options.maxOutputBytes) > 0
+    ? BigInt(Math.floor(Number(options.maxOutputBytes))) : 0n;
+  const writeOutput = async (buffer) => {
+    const nextBytes = outputBytes + BigInt(buffer.length);
+    if (maxOutputBytes && nextBytes > maxOutputBytes) {
+      const maxGb = Number(maxOutputBytes) / (1024 ** 3);
+      throw new Error(`Archive exceeds the configured ${maxGb.toFixed(1)} GB maximum. Raise the backup size limit in Settings and retry.`);
+    }
+    await writeBuffer(output, buffer);
+    outputBytes = nextBytes;
+  };
   let written = 0;
   let skipped = 0;
   const totalEntries = entries.length;
@@ -113,9 +125,9 @@ async function createZip(root, relativePaths, outputPath, options = {}) {
       const localExtra = Buffer.alloc(20);
       localExtra.writeUInt16LE(0x0001, 0);
       localExtra.writeUInt16LE(16, 2);
-      await writeBuffer(output, local);
-      await writeBuffer(output, name);
-      await writeBuffer(output, localExtra);
+      await writeOutput(local);
+      await writeOutput(name);
+      await writeOutput(localExtra);
 
       let crc = 0xffffffff;
       let rawSize = 0n;
@@ -130,7 +142,7 @@ async function createZip(root, relativePaths, outputPath, options = {}) {
       const compressedOutput = new Writable({
         write(chunk, encoding, callback) {
           compressedSize += BigInt(chunk.length);
-          writeBuffer(output, chunk).then(() => callback(), callback);
+          writeOutput(chunk).then(() => callback(), callback);
         },
       });
       try {
@@ -150,7 +162,7 @@ async function createZip(root, relativePaths, outputPath, options = {}) {
       descriptor.writeUInt32LE(crc, 4);
       descriptor.writeBigUInt64LE(compressedSize, 8);
       descriptor.writeBigUInt64LE(rawSize, 16);
-      await writeBuffer(output, descriptor);
+      await writeOutput(descriptor);
 
       const header = Buffer.alloc(46);
       header.writeUInt32LE(0x02014b50, 0);
@@ -184,7 +196,7 @@ async function createZip(root, relativePaths, outputPath, options = {}) {
 
     const centralOffset = offset;
     const centralSize = BigInt(central.reduce((sum, chunk) => sum + chunk.length, 0));
-    for (const chunk of central) await writeBuffer(output, chunk);
+    for (const chunk of central) await writeOutput(chunk);
 
     const zip64End = Buffer.alloc(56);
     zip64End.writeUInt32LE(0x06064b50, 0);
@@ -197,14 +209,14 @@ async function createZip(root, relativePaths, outputPath, options = {}) {
     zip64End.writeBigUInt64LE(BigInt(written), 32);
     zip64End.writeBigUInt64LE(centralSize, 40);
     zip64End.writeBigUInt64LE(centralOffset, 48);
-    await writeBuffer(output, zip64End);
+    await writeOutput(zip64End);
 
     const zip64Locator = Buffer.alloc(20);
     zip64Locator.writeUInt32LE(0x07064b50, 0);
     zip64Locator.writeUInt32LE(0, 4);
     zip64Locator.writeBigUInt64LE(offset + centralSize, 8);
     zip64Locator.writeUInt32LE(1, 16);
-    await writeBuffer(output, zip64Locator);
+    await writeOutput(zip64Locator);
 
     const end = Buffer.alloc(22);
     end.writeUInt32LE(0x06054b50, 0);
@@ -215,7 +227,7 @@ async function createZip(root, relativePaths, outputPath, options = {}) {
     end.writeUInt32LE(0xffffffff, 12);
     end.writeUInt32LE(0xffffffff, 16);
     end.writeUInt16LE(0, 20);
-    await writeBuffer(output, end);
+    await writeOutput(end);
     await output.sync();
     await output.close();
     output = null;

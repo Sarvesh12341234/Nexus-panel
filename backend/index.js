@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { stdin, stdout } = require('node:process');
 const { createZip } = require('./archive');
 const { extractJavaRuntimeArchive } = require('./java_runtime_archive');
@@ -59,6 +60,7 @@ const {
 } = require('./auth');
 
 const app = express();
+const requestActorStorage = new AsyncLocalStorage();
 const port = Number(process.env.PORT || 3000);
 const dataRoot = path.join(__dirname, '..', 'data');
 const healthPath = path.join(dataRoot, 'panel_health.json');
@@ -115,6 +117,10 @@ app.use((req, res, next) => {
   next();
 });
 app.use(authMiddleware);
+app.use((req, res, next) => {
+  const user = req.user;
+  requestActorStorage.run(user ? { id: user.id, name: user.name, role: user.role } : null, next);
+});
 app.use('/api', (req, res, next) => {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
   const securityError = requestSecurityError(req);
@@ -243,17 +249,23 @@ function pruneRepairHistory() {
   db.prepare('DELETE FROM repair_playbooks WHERE last_learned_at < ?').run(cutoff);
 }
 
-function logFixed({ serverId = null, category = 'panel', title = '', detail = '', source = 'panel' }) {
+function logFixed({ serverId = null, category = 'panel', title = '', detail = '', source = 'panel', actorName = '', actorUserId = null }) {
   pruneFixedLogs();
+  const actor = requestActorStorage.getStore();
+  const automated = /(?:\bai\b|needle|repair-agent)/i.test(String(source || ''));
+  const cleanActorName = String(actorName || (automated ? 'AI' : actor?.name || 'System')).trim().slice(0, 100);
+  const cleanActorId = actorUserId ?? (automated ? null : actor?.id ?? null);
   db.prepare(`
-    INSERT INTO fixed_logs (server_id, category, title, detail, source, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO fixed_logs (server_id, category, title, detail, source, actor_user_id, actor_name, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     serverId ? Number(serverId) : null,
     String(category || 'panel').slice(0, 40),
     String(title || '').slice(0, 160),
     String(detail || '').slice(0, 1200),
     String(source || 'panel').slice(0, 80),
+    cleanActorId ? Number(cleanActorId) : null,
+    cleanActorName || 'System',
     Date.now(),
   );
 }
@@ -294,6 +306,7 @@ function panelSettingsPayload(user = null) {
     updateTag: configuredTag,
     updateStatus,
     serverSwitcherVisibleCount: clampNumber(settingValue('server_switcher_visible_count', '3'), 1, 20, 3),
+    maxBackupSizeGb: clampNumber(settingValue('backup_max_size_gb', '20'), 1, 100, 20),
     hostApiTokenPreview: edition === 'host' && user?.role === 'owner' ? `${hostToken.slice(0, 8)}....${hostToken.slice(-6)}` : '',
     asfEnabled: settingValue('asf_enabled', '1') === '1',
     hostAgent: hostAgent.localStatus(),
@@ -2381,9 +2394,11 @@ async function createServerBackupUnlocked(server, reason = 'manual', onProgress 
     .map((entry) => entry.name);
 
   const heldBedrockWorld = await holdBedrockWorldForBackup(server);
+  const maxBackupSizeGb = clampNumber(settingValue('backup_max_size_gb', '20'), 1, 100, 20);
   let archiveResult;
   try {
     archiveResult = await createZip(root, entries, archivePath, {
+      maxOutputBytes: maxBackupSizeGb * 1024 * 1024 * 1024,
       onProgress: ({ completedEntries, totalEntries, percent, phase }) => {
         try { onProgress?.({ percent, message: `${phase === 'complete' ? 'Finalizing' : 'Archiving'} ${completedEntries}/${totalEntries} files` }); } catch {}
       },
@@ -4450,7 +4465,7 @@ app.post('/api/setup', asyncRoute(async (req, res) => {
   try {
     const user = createUser({ email, name, password, role: 'owner', accessLevel: 100 });
     finishInitialSetup();
-    setSessionCookie(res, createSession(user.id, { userAgent: req.headers['user-agent'] || '' }), { secure: req.secure });
+    setSessionCookie(res, createSession(user.id, { userAgent: req.headers['user-agent'] || '', ip: clientIp(req) }), { secure: req.secure });
     res.status(201).json({ ok: true, user: publicUser(user) });
   } catch (error) {
     if (/UNIQUE constraint failed: users\.email/i.test(String(error.message))) {
@@ -4478,7 +4493,7 @@ app.post('/api/login', (req, res) => {
 
   clearLoginThrottle(throttle.keys);
   recordLoginEvent(req, user);
-  setSessionCookie(res, createSession(user.id, { userAgent: req.headers['user-agent'] || '' }), { secure: req.secure });
+  setSessionCookie(res, createSession(user.id, { userAgent: req.headers['user-agent'] || '', ip: clientIp(req) }), { secure: req.secure });
   res.json({ user: publicUser(user) });
 });
 
@@ -4561,6 +4576,18 @@ app.get('/api/audit/logins', requirePermission(capabilities.SECURITY_VIEW, permi
   res.json({ events: loginEventRows(10) });
 });
 
+app.delete('/api/security/sessions/:id', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
+  const sessionId = String(req.params.id || '').slice(0, 100);
+  const session = db.prepare('SELECT id, user_id FROM sessions WHERE id = ?').get(sessionId);
+  if (!session || (Number(session.user_id) !== Number(req.user.id) && req.user.role !== 'owner')) {
+    return res.status(404).json({ error: 'Session not found.' });
+  }
+  db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id);
+  if (String(req.user.session_id) === String(session.id)) clearSessionCookie(res);
+  logFixed({ category: 'security', title: 'Session revoked', detail: `Revoked a session for user #${session.user_id}.`, source: 'owner-action' });
+  res.json({ ok: true, current: String(req.user.session_id) === String(session.id) });
+});
+
 app.get('/api/host/token', requireAuth, (req, res) => {
   if (!isHostEdition()) return res.status(404).json({ error: 'Host API is available only in host edition.' });
   if (!ownerOnly(req)) return res.status(403).json({ error: 'Only owner can view host API token.' });
@@ -4616,6 +4643,17 @@ app.get('/api/security/render', requirePermission(capabilities.SECURITY_VIEW, pe
     hostAgent.request('STATUS'),
   ]);
   const events = loginEventRows(10);
+  const now = Date.now();
+  const sessionScope = req.user.role === 'owner' ? '' : 'AND sessions.user_id = ?';
+  const sessionParams = req.user.role === 'owner' ? [now, now - 14 * 24 * 60 * 60 * 1000] : [now, now - 14 * 24 * 60 * 60 * 1000, req.user.id];
+  const activeSessions = db.prepare(`
+    SELECT sessions.id, sessions.user_id, sessions.user_agent, sessions.ip,
+      sessions.ip_changed_at, sessions.last_seen_at, sessions.expires_at,
+      users.name, users.email
+    FROM sessions JOIN users ON users.id = sessions.user_id
+    WHERE sessions.expires_at > ? AND sessions.last_seen_at > ? ${sessionScope}
+    ORDER BY sessions.last_seen_at DESC LIMIT 100
+  `).all(...sessionParams);
   const deviceMemory = hostMemoryStats();
   const deviceMemoryGb = Math.round((deviceMemory.total / 1024 / 1024 / 1024) * 10) / 10;
   const checks = (health.checks || []).map((check) => `
@@ -4627,6 +4665,16 @@ app.get('/api/security/render', requirePermission(capabilities.SECURITY_VIEW, pe
       <div><strong>${renderEscape(event.email)}</strong><span>${renderEscape(event.browser)} - ${renderEscape(event.device)}</span></div>
       <code>${renderEscape(event.ip || 'unknown IP')}</code><time>${renderEscape(renderUserDate(req.user, event.createdAt))}</time>
     </article>`).join('');
+  const sessions = activeSessions.map((session) => {
+    const current = String(session.id) === String(req.user.session_id);
+    const ownerCanManage = req.user.role === 'owner' || Number(session.user_id) === Number(req.user.id);
+    return `<article class="audit-row">
+      <div><strong>${renderEscape(session.name)}${current ? ' · Current session' : ''}</strong><span>${renderEscape(browserFromUserAgent(session.user_agent))} · ${renderEscape(deviceFromUserAgent(session.user_agent))} · ${renderEscape(session.email)}</span></div>
+      <code>${renderEscape(session.ip || 'unknown IP')}${session.ip_changed_at ? ` · address changed ${renderEscape(renderUserDate(req.user, session.ip_changed_at))}` : ''}</code>
+      <time>Active ${renderEscape(renderUserDate(req.user, session.last_seen_at))}</time>
+      ${ownerCanManage ? `<button class="secondary" type="button" data-action="security-revoke-session" data-session-id="${renderEscape(session.id)}">${current ? 'Sign out this device' : 'Revoke'}</button>` : ''}
+    </article>`;
+  }).join('');
   const agentState = liveAgent.available && liveAgent.ok ? 'online' : 'unavailable';
   res.type('html').send(`
     <div class="section-head">
@@ -4650,6 +4698,9 @@ app.get('/api/security/render', requirePermission(capabilities.SECURITY_VIEW, pe
     <div class="health-grid">${checks || '<p class="empty-state">No checks available.</p>'}</div>
     <div class="section-head"><div><p class="eyebrow">Audit</p><h2>Recent logins</h2></div></div>
     <div class="audit-list">${logins || '<p class="empty-state">No login events recorded yet.</p>'}</div>
+    <div class="section-head"><div><p class="eyebrow">Sessions</p><h2>Active sessions</h2></div></div>
+    <p class="muted">Network address changes are recorded for review and do not sign you out by themselves. Active browser sessions renew while in use and expire after 14 days without activity.</p>
+    <div class="audit-list">${sessions || '<p class="empty-state">No other active sessions.</p>'}</div>
   `);
 }));
 
@@ -4750,7 +4801,7 @@ app.get('/api/fixed/logs', requirePermission(capabilities.SECURITY_VIEW, permiss
   pruneFixedLogs();
   const logs = db.prepare(`
     SELECT fixed.id, fixed.server_id, fixed.category, fixed.title, fixed.detail,
-      fixed.source, fixed.created_at, server.name AS server_name
+      fixed.source, fixed.actor_user_id, fixed.actor_name, fixed.created_at, server.name AS server_name
     FROM fixed_logs fixed
     LEFT JOIN servers server ON server.id = fixed.server_id
     ORDER BY fixed.created_at DESC
@@ -4763,6 +4814,8 @@ app.get('/api/fixed/logs', requirePermission(capabilities.SECURITY_VIEW, permiss
     title: row.title,
     detail: row.detail,
     source: row.source,
+    actorUserId: row.actor_user_id,
+    actorName: row.actor_name || 'System',
     createdAt: row.created_at,
   }));
   res.json({
@@ -4945,7 +4998,12 @@ app.post('/api/users', requirePermission(capabilities.ADMINS_MANAGE, permissions
   if (assignAllServers && user.role !== 'owner') {
     db.prepare('UPDATE servers SET owner_user_id = ?').run(user.id);
   }
-  logFixed({ category: 'admins', title: 'Admin account created', detail: `${user.name} <${user.email}>`, source: 'owner-action' });
+  const assignment = assignAllServers
+    ? 'Granted access to all servers'
+    : assignedServer
+      ? `Granted access to ${assignedServer.name}`
+      : 'No server assignment';
+  logFixed({ category: 'admins', title: 'Admin account created', detail: `${user.name} · ${assignment}`, source: 'owner-action' });
 
   res.status(201).json({ user });
 });
@@ -5417,6 +5475,9 @@ app.put('/api/settings', requirePermission(capabilities.SETTINGS_MANAGE, permiss
   setSettingValue('repair_agent_terminal_enabled', toBool(req.body.repairAgentTerminalEnabled, true) ? '1' : '0');
   if (req.body.serverSwitcherVisibleCount !== undefined) {
     setSettingValue('server_switcher_visible_count', clampNumber(req.body.serverSwitcherVisibleCount, 1, 20, 3));
+  }
+  if (req.body.maxBackupSizeGb !== undefined) {
+    setSettingValue('backup_max_size_gb', clampNumber(req.body.maxBackupSizeGb, 1, 100, 20));
   }
   if (req.body.timeZone) setUserTimezone(req.user.id, String(req.body.timeZone));
   const publicBaseUrl = String(req.body.publicBaseUrl || '').trim().replace(/\/+$/, '');
@@ -6161,7 +6222,9 @@ app.get('/api/modrinth/search', requireAuth, asyncRoute(async (req, res) => {
   const params = new URLSearchParams({
     query,
     limit: '24',
-    index: 'downloads',
+    // Relevance ranks a directly matching project name ahead of popular but
+    // unrelated plugins (e.g. "Geyser" should not be buried by download count).
+    index: query ? 'relevance' : 'downloads',
     facets: JSON.stringify(facets),
   });
   const response = await fetch(`https://api.modrinth.com/v2/search?${params}`, {
@@ -6650,18 +6713,18 @@ app.put('/api/servers/:id/properties', requirePermission(capabilities.PROPERTIES
     if (!Number.isInteger(requestedPort) || requestedPort < 1024 || requestedPort > 65535) {
       return res.status(400).json({ error: 'Server port must be an integer between 1024 and 65535.' });
     }
-    if (runtimeStatus(server.id) === 'online' || runtimeStatus(server.id) === 'starting') {
-      return res.status(409).json({ error: 'Stop the server before changing its game port.' });
-    }
-    const collision = db.prepare(`
-      SELECT id, name FROM servers
-      WHERE port = ? AND id != ?
-      LIMIT 1
-    `).get(requestedPort, server.id);
-    if (collision) {
-      return res.status(409).json({ error: `Port ${requestedPort} is already allocated to ${collision.name || `server #${collision.id}`}.` });
-    }
     if (requestedPort !== Number(server.port)) {
+      if (runtimeStatus(server.id) === 'online' || runtimeStatus(server.id) === 'starting') {
+        return res.status(409).json({ error: 'Stop the server before changing its game port.' });
+      }
+      const collision = db.prepare(`
+        SELECT id, name FROM servers
+        WHERE port = ? AND id != ?
+        LIMIT 1
+      `).get(requestedPort, server.id);
+      if (collision) {
+        return res.status(409).json({ error: `Port ${requestedPort} is already allocated to ${collision.name || `server #${collision.id}`}.` });
+      }
       db.prepare('UPDATE servers SET port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(requestedPort, server.id);
       const updatedServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(server.id);
       try {
