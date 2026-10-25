@@ -58,7 +58,11 @@ function removeWorker(serverId, worker, kill = true) {
   if (workers.get(serverId) !== worker) return;
   workers.delete(serverId);
   if (worker.startTimer) clearTimeout(worker.startTimer);
+  if (worker.startTimer) worker.startTimer = null;
   if (worker.pendingTimer) clearTimeout(worker.pendingTimer);
+  if (worker.pendingTimer) worker.pendingTimer = null;
+  // Clear busy so anything waiting on this worker stops immediately.
+  worker.busy = false;
   for (const resolve of worker.pending.values()) resolve(null);
   worker.pending.clear();
   if (kill && worker.child && !worker.child.killed) worker.child.kill();
@@ -93,6 +97,7 @@ function createWorker(serverId) {
     busy: false,
     lastUsedAt: Date.now(),
     pending: new Map(),
+    requestQueue: Promise.resolve(),
     buffer: '',
     startTimer: null,
     pendingTimer: null,
@@ -157,29 +162,49 @@ async function requestWorkerResult(serverId, input) {
   const text = redact(input);
   if (!Number.isSafeInteger(id) || id <= 0 || text.length < 12) return null;
   const worker = await getReadyWorker(id);
-  if (!worker || worker.busy || !worker.child.stdin.writable) return null;
+  if (!worker) return null;
 
-  const requestId = nextRequestId++;
-  worker.busy = true;
-  worker.lastUsedAt = Date.now();
-  const result = await new Promise((resolve) => {
-    worker.pending.set(requestId, resolve);
-    worker.pendingTimer = setTimeout(() => {
-      worker.pending.delete(requestId);
-      worker.busy = false;
-      removeWorker(id, worker);
+  // Queue requests atomically. Polling `busy` allows multiple callers to see
+  // the same idle worker and write concurrently, corrupting request/result
+  // association in the single-session Python process.
+  let queueExpired = false;
+  let queueTimeout;
+  const queueDeadline = new Promise((resolve) => {
+    queueTimeout = setTimeout(() => {
+      queueExpired = true;
       resolve(null);
     }, REQUEST_TIMEOUT_MS);
-    worker.pendingTimer.unref?.();
-    worker.child.stdin.write(`${JSON.stringify({ requestId, text })}\n`, (error) => {
-      if (error) {
-        worker.pending.delete(requestId);
-        clearTimeout(worker.pendingTimer);
-        worker.busy = false;
-        resolve(null);
-      }
-    });
+    queueTimeout.unref?.();
   });
+  const runRequest = async () => {
+    if (queueExpired || workers.get(id) !== worker || !worker.child.stdin.writable) return null;
+    const requestId = nextRequestId++;
+    worker.busy = true;
+    worker.lastUsedAt = Date.now();
+    return new Promise((resolve) => {
+      worker.pending.set(requestId, resolve);
+      worker.pendingTimer = setTimeout(() => {
+        worker.pending.delete(requestId);
+        worker.busy = false;
+        removeWorker(id, worker);
+        resolve(null);
+      }, REQUEST_TIMEOUT_MS);
+      worker.pendingTimer.unref?.();
+      worker.child.stdin.write(`${JSON.stringify({ requestId, text })}\n`, (error) => {
+        if (error) {
+          worker.pending.delete(requestId);
+          clearTimeout(worker.pendingTimer);
+          worker.pendingTimer = null;
+          worker.busy = false;
+          resolve(null);
+        }
+      });
+    });
+  };
+  const request = worker.requestQueue.then(runRequest, runRequest);
+  worker.requestQueue = request.catch(() => null);
+  const result = await Promise.race([request, queueDeadline]);
+  clearTimeout(queueTimeout);
 
   if (!result || typeof result !== 'object') return null;
   const evidence = typeof result.evidence === 'string' ? result.evidence.trim() : '';
