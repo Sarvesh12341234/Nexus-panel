@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="Cache-Control" content="no-store">
     <title>NexusPanel</title>
-    <link rel="stylesheet" href="/css/main.css?v=1.0.7">
-    <link rel="stylesheet" href="/css/nexus-widgets.css?v=1.0.7">
+    <link rel="stylesheet" href="/css/main.css?v=1.0.8">
+    <link rel="stylesheet" href="/css/nexus-widgets.css?v=1.0.8">
   </head>
   <body>
     <div class="backplate" aria-hidden="true"></div>
@@ -188,6 +188,22 @@
           <div class="surface tool-surface">
             <div class="section-head"><div><p class="eyebrow">Files</p><h2>Server file manager</h2></div></div>
             <p class="plugin-note" id="fileLiveNotice" hidden>The server is running, but all user-managed files remain available here. Live edits, uploads, moves, or deletes can conflict with files the game is using; back up important data first. Some changes require a plugin reload or server restart to take effect.</p>
+            <div class="file-search-panel">
+              <div class="file-search-label">
+                <label for="fileSearch">Search files</label>
+                <input id="fileSearch" type="search" placeholder="Search this server..." autocomplete="off">
+                <div class="file-search-filters">
+                  <select id="fileSearchMode" aria-label="Search mode">
+                    <option value="name">Names & paths</option>
+                    <option value="content">Text content</option>
+                  </select>
+                  <select id="fileSearchScope" aria-label="Search scope">
+                    <option value="server">Whole server</option>
+                    <option value="folder">Current folder</option>
+                  </select>
+                </div>
+              </div>
+            </div>
             <div class="file-toolbar">
               <button type="button" data-action="file-layout-cycle" id="fileLayoutButton">Layout: Default</button>
               <button class="secondary" type="button" data-action="file-up">Up</button>
@@ -197,18 +213,6 @@
               <button class="secondary" type="button" data-action="file-paste">Paste</button>
               <button class="secondary" type="button" data-action="file-new">New File</button>
               <button class="secondary" type="button" data-action="folder-new">New Folder</button>
-              <label class="file-search-label">
-                <span>Search files</span>
-                <select id="fileSearchMode" aria-label="Search mode">
-                  <option value="name">Names & paths</option>
-                  <option value="content">Text content</option>
-                </select>
-                <select id="fileSearchScope" aria-label="Search scope">
-                  <option value="server">Whole server</option>
-                  <option value="folder">Current folder</option>
-                </select>
-                <input id="fileSearch" type="search" placeholder="Search this server..." autocomplete="off">
-              </label>
               <input id="fileUploadInput" type="file" multiple hidden>
               <code id="filePathLabel">/</code>
             </div>
@@ -424,8 +428,8 @@
       <p class="toast" id="toast" hidden></p>
     </main>
 
-    <script src="/js/password-toggle.js?v=1.0.7" defer></script>
-    <script src="/js/main.js?v=1.0.7" defer></script>
-    <script src="/js/nexus-widgets.js?v=1.0.7" defer></script>
+    <script src="/js/password-toggle.js?v=1.0.8" defer></script>
+    <script src="/js/main.js?v=1.0.8" defer></script>
+    <script src="/js/nexus-widgets.js?v=1.0.8" defer></script>
   </body>
 </html>

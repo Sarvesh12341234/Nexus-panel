@@ -1336,39 +1336,56 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   font-size: 1.15rem;
 }
 
-.file-search-label {
-  display: flex;
-  align-items: center;
-  gap: .65rem;
-  flex: 1 1 360px;
-  min-width: min(320px, 100%);
-  min-height: 42px;
-  padding: .35rem .6rem .35rem .8rem;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--panel-2), transparent 6%);
-  color: var(--muted);
-  font-size: .78rem;
+.file-search-panel {
+  width: 100%;
+  min-width: 0;
+  margin: 0 0 .7rem;
 }
 
-.file-search-label select {
-  flex: 0 0 auto;
-  width: auto;
-  min-width: 132px;
-  min-height: 34px;
-  padding: .35rem .5rem;
-  font-size: .78rem;
+.file-search-label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: .6rem;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: .8rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-2), transparent 6%);
+  color: var(--muted);
+  font-size: .84rem;
+}
+
+.file-search-label > span { display: block; }
+
+.file-search-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .6rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.file-search-filters select {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
 }
 
 .file-search-label input {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 34px;
-  padding: .4rem .65rem;
+  display: block;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none;
+  min-height: 50px;
+  box-sizing: border-box;
+  padding: .7rem .85rem;
   border: 1px solid color-mix(in srgb, var(--line), transparent 12%);
-  border-radius: 8px;
+  border-radius: 9px;
   background: color-mix(in srgb, var(--panel), transparent 8%);
   color: var(--text);
+  font-size: 16px;
 }
 
 .file-search-status {
@@ -3661,6 +3678,32 @@ body[data-nav-layout="top"] .layout-picker { min-width: 150px; }
 /* Mobile rules intentionally come last so global form sizing, customizable
    toolbar zoom, and the top-nav breakpoint cannot collapse critical controls. */
 @media (max-width: 620px) {
+  .file-search-panel { margin-bottom: .55rem; }
+  .file-search-panel .file-search-label {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: .6rem;
+    width: 100%;
+    min-width: 0;
+    padding: .75rem;
+  }
+  .file-search-panel .file-search-label > input {
+    width: 100% !important;
+    min-width: 0 !important;
+    min-height: 52px;
+    font-size: 16px;
+  }
+  .file-search-panel .file-search-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .5rem;
+  }
+  .file-search-panel .file-search-filters select {
+    width: 100%;
+    min-width: 0;
+    min-height: 46px;
+  }
   body .file-toolbar {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3673,36 +3716,6 @@ body[data-nav-layout="top"] .layout-picker { min-width: 150px; }
   body .file-toolbar > button { width: 100%; }
   body .file-toolbar > #fileLayoutButton,
   body .file-toolbar > #filePathLabel { grid-column: 1 / -1; }
-  body .file-toolbar > .file-search-label {
-    grid-column: 1 / -1 !important;
-    flex: none !important;
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: .55rem;
-    width: 100%;
-    min-width: 0;
-    min-height: 0;
-    padding: .7rem;
-  }
-  body .file-search-label > span { display: block; width: 100%; }
-  body .file-search-label > select,
-  body .file-search-label > input {
-    display: block;
-    flex: 0 0 auto;
-    width: 100% !important;
-    min-width: 0 !important;
-    max-width: none;
-    min-height: 46px;
-    box-sizing: border-box;
-  }
-  body .file-search-label > #fileSearch {
-    grid-column: auto;
-    font-size: 16px;
-    line-height: 1.35;
-    padding: .65rem .75rem;
-  }
-
   body .panel-shell { display: block; }
   body .sidebar {
     position: sticky;
