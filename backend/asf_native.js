@@ -75,7 +75,13 @@ function nativeStatus({ build = true } = {}) {
   if (!fs.existsSync(sourcePath)) return { available: false, reason: 'source-missing' };
 
   const sourceMtime = fs.statSync(sourcePath).mtimeMs;
-  if (cached && cached.sourceMtime === sourceMtime) return cached;
+  const currentBinaryMtime = fs.existsSync(binaryPath) ? fs.statSync(binaryPath).mtimeMs : 0;
+  if (cached && cached.sourceMtime === sourceMtime) {
+    if (cached.available || !build) return cached;
+    // A failed probe can become healthy when an operator rebuilds/replaces
+    // the external runtime. Don't keep serving that stale failure forever.
+    if (cached.binaryMtime === currentBinaryMtime && Date.now() - Number(cached.checkedAt || 0) < 5000) return cached;
+  }
   const existing = probeBinary(binaryPath);
   if (existing?.available && fs.statSync(binaryPath).mtimeMs >= sourceMtime) {
     cached = { ...existing, sourceMtime };
@@ -129,6 +135,8 @@ function nativeStatus({ build = true } = {}) {
         staleBinary: true,
         buildWarning: String(result.stderr || result.stdout || '').trim().slice(0, 1000),
         sourceMtime,
+        binaryMtime: fs.existsSync(binaryPath) ? fs.statSync(binaryPath).mtimeMs : 0,
+        checkedAt: Date.now(),
       };
       return cached;
     }
@@ -151,10 +159,17 @@ function nativeStatus({ build = true } = {}) {
         staleBinary: true,
         buildWarning: candidate?.error || candidate?.reason || 'candidate self-test failed',
         sourceMtime,
+        binaryMtime: fs.existsSync(binaryPath) ? fs.statSync(binaryPath).mtimeMs : 0,
+        checkedAt: Date.now(),
       };
       return cached;
     }
-    cached = { ...(candidate || { available: false, reason: 'kernel-unsupported' }), sourceMtime };
+    cached = {
+      ...(candidate || { available: false, reason: 'kernel-unsupported' }),
+      sourceMtime,
+      binaryMtime: fs.existsSync(binaryPath) ? fs.statSync(binaryPath).mtimeMs : 0,
+      checkedAt: Date.now(),
+    };
     return cached;
   }
   fs.renameSync(temporary, binaryPath);
