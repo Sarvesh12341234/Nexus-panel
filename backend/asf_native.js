@@ -31,7 +31,12 @@ function probeBinary(file) {
   let selfTest;
   const trueCommand = fs.existsSync('/bin/true') ? '/bin/true' : '/usr/bin/true';
   try {
-    selfTest = spawnSync(file, ['--root', testRoot, '--port', '65535', '--tier', 'core', '--', trueCommand], {
+    // The core tier intentionally exposes only JVM-critical host paths and
+    // does not include /bin or its dynamic loader. Use maximum here so this
+    // runtime health check tests Landlock/seccomp instead of failing because
+    // its own probe executable is outside the core allowlist. The systemd
+    // preflight separately selects the strongest tier the host can run.
+    selfTest = spawnSync(file, ['--root', testRoot, '--port', '65535', '--tier', 'maximum', '--', trueCommand], {
       encoding: 'utf8',
       timeout: 5000,
     });
