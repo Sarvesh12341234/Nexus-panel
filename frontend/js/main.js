@@ -94,6 +94,10 @@ const elements = {
   filePreview: document.querySelector('#filePreview'),
   fileLayoutButton: document.querySelector('#fileLayoutButton'),
   filePathLabel: document.querySelector('#filePathLabel'),
+  fileSearch: document.querySelector('#fileSearch'),
+  fileSearchMode: document.querySelector('#fileSearchMode'),
+  fileSearchScope: document.querySelector('#fileSearchScope'),
+  fileSearchStatus: document.querySelector('#fileSearchStatus'),
   fileEditor: document.querySelector('#fileEditor'),
   fileUploadInput: document.querySelector('#fileUploadInput'),
   uploadPanel: document.querySelector('#uploadPanel'),
@@ -112,10 +116,16 @@ const elements = {
 
 let filePath = '';
 let fileSearchQuery = '';
+let fileSearchMode = 'name';
+let fileSearchScope = 'server';
 let fileSearchTimer = 0;
+let fileSearchController = null;
+let fileSearchRequestId = 0;
+let pendingEditorFind = null;
 let fileContextPath = '';
 let fileContextType = '';
 let fileRenderToken = 0;
+let openFileSignature = '';
 const fileLayoutModes = ['default', 'windows', 'linux', 'advanced'];
 let fileLayoutMode = fileLayoutModes.includes(localStorage.getItem('nexusFileLayout')) ? localStorage.getItem('nexusFileLayout') : 'default';
 let fileClipboard = { mode: '', paths: [], serverId: null };
@@ -1302,7 +1312,17 @@ async function api(path, options = {}) {
         authError.code = 'AUTH_REQUIRED';
         throw authError;
       }
-      if (!response.ok) throw new Error(data.error || raw.slice(0, 500) || 'Request failed.');
+      if (!response.ok) {
+        // Only server-provided, user-safe messages are surfaced. Raw response
+        // bodies can contain stack traces or internal host details.
+        const message = typeof data.error === 'string' && data.error.trim()
+          ? data.error.trim().slice(0, 300)
+          : `Request failed (${response.status}).`;
+        const requestError = new Error(message);
+        requestError.code = data.code || `HTTP_${response.status}`;
+        requestError.status = response.status;
+        throw requestError;
+      }
       if (method !== 'GET' && method !== 'HEAD') {
         for (const cacheKey of apiCache.keys()) {
           if (cacheKey.includes(path.split('/').slice(0, 4).join('/'))) apiCache.delete(cacheKey);
@@ -1312,6 +1332,7 @@ async function api(path, options = {}) {
       return data;
     } catch (error) {
       if (error.name === 'AbortError') {
+        if (fetchOptions.signal) throw error;
         const timeoutError = new Error('Request timed out.');
         timeoutError.code = 'timeout';
         throw timeoutError;
@@ -1333,7 +1354,7 @@ function invalidateApiCache(prefix = '') {
 async function apiText(path) {
   const response = await fetch(path, { cache: 'no-store', credentials: 'include', headers: { Accept: 'text/html' } });
   const body = await response.text();
-  if (!response.ok) throw new Error(body.slice(0, 500) || 'Request failed.');
+  if (!response.ok) throw new Error(`Request failed (${response.status}).`);
   return body;
 }
 
@@ -1523,7 +1544,8 @@ async function renderUploadSessions() {
       <button class="danger" type="button" data-action="upload-cancel" data-upload-path="${escapeHtml(upload.path)}">Cancel</button>
     </div>
   `).join('');
-  reapplyDynamicLayout();
+  // The upload panel is not part of the customizable layout regions, so a
+  // global layout rescan here would only cost main-thread time.
 }
 
 function selectedFilePaths() {
@@ -1561,6 +1583,92 @@ function closeFileContextMenu() {
   document.querySelectorAll('.file-context-trigger[aria-expanded="true"]').forEach((trigger) => trigger.setAttribute('aria-expanded', 'false'));
 }
 
+function editorMatchPositions(content, needle) {
+  const positions = [];
+  if (!needle) return positions;
+  const haystack = content.toLocaleLowerCase();
+  const normalizedNeedle = needle.toLocaleLowerCase();
+  let cursor = haystack.indexOf(normalizedNeedle);
+  while (cursor >= 0) {
+    // Unicode case folding can expand a code point (for example, ß -> SS),
+    // so convert the folded-string index back to the editor's UTF-16 offset.
+    const candidate = content.slice(0, cursor).toLocaleLowerCase().length;
+    let original = cursor;
+    if (candidate !== cursor) {
+      let low = 0;
+      let high = content.length;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (content.slice(0, mid).toLocaleLowerCase().length <= cursor) low = mid;
+        else high = mid - 1;
+      }
+      original = low;
+    }
+    positions.push(original);
+    cursor = haystack.indexOf(normalizedNeedle, cursor + Math.max(1, normalizedNeedle.length));
+  }
+  return positions;
+}
+
+function navigateEditorToMatch(target) {
+  const editor = elements.fileEditor?.elements.content;
+  const status = document.querySelector('#fileEditorFindStatus');
+  if (!editor || !target) return;
+  if (!target.text) {
+    const lines = editor.value.split(/\r?\n/);
+    const requestedLine = Math.max(1, Number(target.line) || 1);
+    const lineIndex = Math.min(lines.length - 1, requestedLine - 1);
+    const lineStart = lines.slice(0, lineIndex).reduce((total, line) => total + line.length + 1, 0);
+      const index = Number.isFinite(Number(target.offset)) && Number(target.offset) >= 0
+        ? Math.min(editor.value.length, Number(target.offset))
+        : lineStart + Math.max(0, Math.min(lines[lineIndex]?.length || 0, (Number(target.column) || 1) - 1));
+    editor.focus({ preventScroll: true });
+    editor.setSelectionRange(index, index);
+    if (status) status.textContent = `Opened near line ${lineIndex + 1}, column ${index - lineStart + 1}.`;
+    requestAnimationFrame(() => {
+      const lineHeight = Number.parseFloat(window.getComputedStyle(editor).lineHeight) || 20;
+      editor.scrollTop = Math.max(0, lineIndex * lineHeight - editor.clientHeight / 3);
+    });
+    return;
+  }
+  const positions = editorMatchPositions(editor.value, target.text);
+  if (!positions.length) {
+    if (status) status.textContent = 'The file changed and no longer contains that match.';
+    return;
+  }
+  const requestedLine = Number(target.line) || 0;
+  const requestedColumn = Number(target.column) || 0;
+  let index = positions[0];
+  if (Number.isFinite(Number(target.offset)) && Number(target.offset) >= 0) {
+    const exactOffset = Number(target.offset);
+    const exact = positions.find((position) => position === exactOffset);
+    if (exact !== undefined) index = exact;
+  }
+  if (requestedLine > 0) {
+    const lines = editor.value.split(/\r?\n/);
+    const lineIndex = Math.min(lines.length - 1, Math.max(0, requestedLine - 1));
+    const lineStart = lines.slice(0, lineIndex).reduce((total, line) => total + line.length + 1, 0);
+    const lineEnd = lineStart + (lines[lineIndex]?.length || 0);
+    const requestedOffset = lineStart + Math.max(0, requestedColumn - 1);
+    const exact = Number.isFinite(Number(target.offset)) && positions.includes(Number(target.offset))
+      ? Number(target.offset)
+      : positions.find((position) => position >= lineStart && position <= lineEnd && position === requestedOffset);
+    index = exact ?? positions.reduce((closest, position) => (
+      Math.abs(position - lineStart) < Math.abs(closest - lineStart) ? position : closest
+    ), positions[0]);
+  }
+  editor.focus({ preventScroll: true });
+  editor.setSelectionRange(index, index + target.text.length);
+  const before = editor.value.slice(0, index);
+  const line = before.split(/\r?\n/).length;
+  const column = index - (before.lastIndexOf('\n') + 1) + 1;
+  if (status) status.textContent = `Match ${positions.indexOf(index) + 1} of ${positions.length} · line ${line}, column ${column}.`;
+  requestAnimationFrame(() => {
+    const lineHeight = Number.parseFloat(window.getComputedStyle(editor).lineHeight) || 20;
+    editor.scrollTop = Math.max(0, (line - 1) * lineHeight - editor.clientHeight / 3);
+  });
+}
+
 function findEditorText(direction = 1) {
   const query = document.querySelector('#fileEditorFind')?.value || '';
   const editor = elements.fileEditor?.elements.content;
@@ -1569,18 +1677,26 @@ function findEditorText(direction = 1) {
     if (status) status.textContent = query ? 'Open a text file first.' : 'Enter text to find.';
     return;
   }
-  const content = editor.value.toLocaleLowerCase();
-  const needle = query.toLocaleLowerCase();
-  const from = direction > 0 ? editor.selectionEnd : Math.max(0, editor.selectionStart - 1);
-  let index = direction > 0 ? content.indexOf(needle, from) : content.lastIndexOf(needle, from);
-  if (index < 0) index = direction > 0 ? content.indexOf(needle) : content.lastIndexOf(needle);
-  if (index < 0) {
+  const positions = editorMatchPositions(editor.value, query);
+  if (!positions.length) {
     if (status) status.textContent = 'No matches.';
     return;
   }
-  editor.focus();
+  const from = direction > 0 ? editor.selectionEnd : Math.max(0, editor.selectionStart - 1);
+  let index = direction > 0
+    ? positions.find((position) => position >= from)
+    : [...positions].reverse().find((position) => position < from);
+  if (index === undefined) index = direction > 0 ? positions[0] : positions[positions.length - 1];
+  editor.focus({ preventScroll: true });
   editor.setSelectionRange(index, index + query.length);
-  if (status) status.textContent = `Found at character ${index + 1}.`;
+  const before = editor.value.slice(0, index);
+  const line = before.split(/\r?\n/).length;
+  const column = index - (before.lastIndexOf('\n') + 1) + 1;
+  if (status) status.textContent = `Match ${positions.indexOf(index) + 1} of ${positions.length} · line ${line}, column ${column}.`;
+  requestAnimationFrame(() => {
+    const lineHeight = Number.parseFloat(window.getComputedStyle(editor).lineHeight) || 20;
+    editor.scrollTop = Math.max(0, (line - 1) * lineHeight - editor.clientHeight / 3);
+  });
 }
 
 function selectedFileEntries() {
@@ -1619,6 +1735,57 @@ async function digestHex(blob) {
   const bytes = blob instanceof Blob ? await blob.arrayBuffer() : blob;
   const hash = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(hash)].map((item) => item.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Hash a blob without blocking the UI thread.
+ *
+ * crypto.subtle is already async, but reading a multi-hundred-megabyte file
+ * into an ArrayBuffer and hashing it still competes with rendering. The
+ * worker keeps the main thread responsive so scrolling and animations stay
+ * smooth during large uploads.
+ */
+let hashWorker = null;
+let hashWorkerRequestId = 0;
+const hashWorkerPending = new Map();
+
+function ensureHashWorker() {
+  if (hashWorker || typeof Worker === 'undefined') return hashWorker;
+  try {
+    hashWorker = new Worker('/js/hash-worker.js?v=1.0.0');
+    hashWorker.addEventListener('message', (event) => {
+      const { id, hash, error } = event.data || {};
+      const pending = hashWorkerPending.get(id);
+      if (!pending) return;
+      hashWorkerPending.delete(id);
+      if (error) pending.reject(new Error(error));
+      else pending.resolve(hash);
+    });
+    hashWorker.addEventListener('error', () => {
+      for (const pending of hashWorkerPending.values()) pending.reject(new Error('Hash worker failed.'));
+      hashWorkerPending.clear();
+      hashWorker = null;
+    });
+  } catch {
+    hashWorker = null;
+  }
+  return hashWorker;
+}
+
+async function digestHexOffThread(blob) {
+  const worker = ensureHashWorker();
+  if (!worker) return digestHex(blob);
+  const id = ++hashWorkerRequestId;
+  const buffer = blob instanceof Blob ? await blob.arrayBuffer() : blob;
+  return new Promise((resolve, reject) => {
+    hashWorkerPending.set(id, { resolve, reject });
+    try {
+      worker.postMessage({ id, buffer }, [buffer]);
+    } catch (error) {
+      hashWorkerPending.delete(id);
+      reject(error);
+    }
+  }).catch(() => digestHex(blob));
 }
 
 function uploadChunk(server, chunk, destinationPath, offset, totalSize, fileSha256, chunkSha256, onProgress) {
@@ -1674,19 +1841,19 @@ function publishUploadProgress(server, destinationPath, size, uploadedBytes, sta
       body: JSON.stringify(payload),
     }).catch(() => {});
   };
-  if (immediate || Date.now() - uploadProgressBroadcast.lastSentAt >= 250) {
+  if (immediate || Date.now() - uploadProgressBroadcast.lastSentAt >= 1000) {
     clearTimeout(uploadProgressBroadcast.timer);
     send();
     return;
   }
   if (!uploadProgressBroadcast.timer) {
-    uploadProgressBroadcast.timer = setTimeout(send, 250);
+    uploadProgressBroadcast.timer = setTimeout(send, 1000);
   }
 }
 
 async function uploadFile(server, file, destinationPath, onProgress) {
   onProgress(0, 'hashing');
-  const fileSha256 = file.size <= 512 * 1024 * 1024 ? await digestHex(file) : '';
+  const fileSha256 = file.size <= 512 * 1024 * 1024 ? await digestHexOffThread(file) : '';
   const status = await api(`/api/servers/${server.id}/files/upload-status?path=${encodeURIComponent(destinationPath)}&size=${file.size}&sha256=${fileSha256}`);
   if (status.complete) {
     onProgress(100, 'already uploaded');
@@ -1709,6 +1876,21 @@ async function uploadFile(server, file, destinationPath, onProgress) {
     onProgress(Math.min(100, Math.round((loaded / file.size) * 100)), phase);
     publishUploadProgress(server, destinationPath, file.size, loaded, 'active');
   };
+  // Progress events fire far faster than the UI can paint. Coalescing them
+  // into animation frames avoids layout thrash during large uploads.
+  let pendingProgress = null;
+  let progressFrame = 0;
+  const paintProgress = (progress, phase) => {
+    pendingProgress = { progress, phase };
+    if (progressFrame) return;
+    progressFrame = window.requestAnimationFrame(() => {
+      progressFrame = 0;
+      const next = pendingProgress;
+      pendingProgress = null;
+      if (!next) return;
+      onProgress(next.progress, next.phase);
+    });
+  };
   if (chunks.some((chunk) => chunk.uploaded)) updateProgress('resuming');
 
   let cursor = 0;
@@ -1727,13 +1909,13 @@ async function uploadFile(server, file, destinationPath, onProgress) {
       const meta = chunks[index];
       if (meta.uploaded) continue;
       const blob = file.slice(meta.offset, meta.end);
-      const chunkSha256 = await digestHex(blob);
+      const chunkSha256 = await digestHexOffThread(blob);
       let result;
       for (let attempt = 1; attempt <= 4; attempt += 1) {
         try {
           result = await uploadChunk(server, blob, destinationPath, meta.offset, file.size, fileSha256, chunkSha256, (loaded) => {
             meta.loaded = loaded;
-            updateProgress(attempt > 1 ? `retry ${attempt}` : 'uploading');
+            paintProgress(Math.min(100, Math.round(((chunks.reduce((sum, chunk) => sum + (chunk.uploaded ? chunk.end - chunk.offset : chunk.loaded), 0)) / file.size) * 100)), attempt > 1 ? `retry ${attempt}` : 'uploading');
           });
           break;
         } catch (error) {
@@ -2565,6 +2747,7 @@ async function renderWhitelist() {
 async function renderFiles() {
   const server = activeServer();
   const renderToken = ++fileRenderToken;
+  const requestId = ++fileSearchRequestId;
   if (!elements.fileList) return;
   const editor = elements.fileEditor;
   if (editor && !editor.hidden && editor.dataset.dirty === '1') {
@@ -2594,16 +2777,25 @@ async function renderFiles() {
   }
   if (query && query.length < 2) {
     elements.fileList.innerHTML = '<p class="empty-state">Enter at least two characters to search this server.</p>';
+    if (elements.fileSearchStatus) {
+      elements.fileSearchStatus.hidden = false;
+      elements.fileSearchStatus.textContent = 'Type at least two characters to start searching.';
+    }
     return;
   }
+  if (fileSearchController) fileSearchController.abort();
+  fileSearchController = query ? new AbortController() : null;
+  const searchScopePath = fileSearchScope === 'folder'
+    ? (filePath ? (filePath.split('/').slice(0, -1).join('/') || '') : '')
+    : '';
   const endpoint = query
-    ? `/api/servers/${server.id}/files/search?q=${encodeURIComponent(query)}`
+    ? `/api/servers/${server.id}/files/search?q=${encodeURIComponent(query)}&mode=${encodeURIComponent(fileSearchMode)}&path=${encodeURIComponent(searchScopePath)}`
     : `/api/servers/${server.id}/files?path=${encodeURIComponent(filePath)}`;
-  const data = await api(endpoint).catch((error) => {
-    showToast(error.message);
+  const data = await api(endpoint, { signal: fileSearchController?.signal, timeoutMs: query ? 120000 : 0 }).catch((error) => {
+    if (error.name !== 'AbortError') showToast(error.message);
     return null;
   });
-  if (renderToken !== fileRenderToken || activeServer()?.id !== server.id) return;
+  if (renderToken !== fileRenderToken || requestId !== fileSearchRequestId || activeServer()?.id !== server.id) return;
   if (!data) return;
   const serverRunning = server.status === 'online';
   const liveNotice = document.querySelector('#fileLiveNotice');
@@ -2612,32 +2804,70 @@ async function renderFiles() {
   if (data.results) {
     if (elements.fileEditor) elements.fileEditor.hidden = true;
     if (elements.filePreview) elements.filePreview.hidden = true;
-    renderFileEntries(data.results, 'No files match this search.');
-    if (data.truncated) showToast('Showing the first 250 matching files. Refine your search for more results.');
+    renderFileEntries(data.results, query ? 'No files match this search.' : 'Folder is empty.');
+    if (elements.fileSearchStatus) {
+      elements.fileSearchStatus.hidden = !query;
+      const modeLabel = data.mode === 'content' ? 'text content' : 'names and paths';
+      const scopeLabel = data.scope ? ` in /${data.scope}` : '';
+      const skippedLabel = data.skippedFiles ? ` ${data.skippedFiles} oversized file(s) skipped.` : '';
+      const limitLabel = data.truncated ? ` · scan reached its safety limit.${skippedLabel} Refine the search.` : '';
+      elements.fileSearchStatus.textContent = query
+        ? `${data.results.length} match${data.results.length === 1 ? '' : 'es'} in ${modeLabel}${scopeLabel}${limitLabel}.`
+        : '';
+    }
     return;
+  }
+  if (elements.fileSearchStatus) {
+    elements.fileSearchStatus.hidden = true;
+    elements.fileSearchStatus.textContent = '';
   }
   if (data.type === 'file') {
     elements.fileList.innerHTML = '';
     if (data.editable) {
       if (elements.filePreview) elements.filePreview.hidden = true;
       if (elements.fileEditor) {
-        elements.fileEditor.hidden = false;
-        elements.fileEditor.path.value = data.path;
-        elements.fileEditor.content.value = data.content;
-        elements.fileEditor.dataset.dirty = '0';
-        elements.fileEditor.dataset.serverId = String(server.id);
-        const editorStatus = document.querySelector('#fileEditorStatus');
-        if (editorStatus) {
-          editorStatus.textContent = 'Saved';
-          editorStatus.classList.remove('is-unsaved');
+        const signature = `${server.id}:${data.path}:${data.size}:${Number(data.modifiedAt) || 0}`;
+        const editorDirty = elements.fileEditor.dataset.dirty === '1';
+        const sameFile = elements.fileEditor.dataset.serverId === String(server.id)
+          && elements.fileEditor.path.value === data.path;
+        const changedOnDisk = sameFile && signature !== openFileSignature;
+        // Avoid replacing editor content (and losing the caret) when the file
+        // has not changed since the last render. Unsaved local edits are never
+        // silently overwritten by a background refresh.
+        if (!sameFile || (!editorDirty && changedOnDisk)) {
+          elements.fileEditor.hidden = false;
+          elements.fileEditor.path.value = data.path;
+          elements.fileEditor.content.value = data.content;
+          elements.fileEditor.dataset.dirty = '0';
+          elements.fileEditor.dataset.serverId = String(server.id);
+          openFileSignature = signature;
+          const editorStatus = document.querySelector('#fileEditorStatus');
+          if (editorStatus) {
+            editorStatus.textContent = 'Saved';
+            editorStatus.classList.remove('is-unsaved');
+          }
+          const saveButton = elements.fileEditor.querySelector('[type="submit"]');
+          const deleteButton = elements.fileEditor.querySelector('[data-action="file-delete"]');
+          if (saveButton) saveButton.disabled = false;
+          if (deleteButton) deleteButton.disabled = false;
+        } else if (changedOnDisk && editorDirty) {
+          const editorStatus = document.querySelector('#fileEditorStatus');
+          if (editorStatus) {
+            editorStatus.textContent = 'Unsaved changes · file changed on disk';
+            editorStatus.classList.add('is-unsaved');
+          }
         }
-        const saveButton = elements.fileEditor.querySelector('[type="submit"]');
-        const deleteButton = elements.fileEditor.querySelector('[data-action="file-delete"]');
-        if (saveButton) saveButton.disabled = false;
-        if (deleteButton) deleteButton.disabled = false;
+        if (pendingEditorFind) {
+          const findInput = document.querySelector('#fileEditorFind');
+          if (findInput) findInput.value = pendingEditorFind.text || '';
+          const target = pendingEditorFind;
+          pendingEditorFind = null;
+          navigateEditorToMatch(target);
+        }
       }
     } else {
       if (elements.fileEditor) elements.fileEditor.hidden = true;
+      openFileSignature = '';
       renderFilePreview(data, server);
     }
     return;
@@ -2647,21 +2877,126 @@ async function renderFiles() {
   renderFileEntries(data.entries);
 }
 
+function fileEntryMarkup(entry, selectedPaths) {
+  const matches = Array.isArray(entry.matches) ? entry.matches : [];
+  const matchCount = Number(entry.matchCount || matches.length);
+  const matchSummary = matches.length
+    ? `<span class="file-match-summary">${matchCount} match${matchCount === 1 ? '' : 'es'} · line ${matches[0].line}</span>`
+    : '';
+  const firstMatch = matches.length ? matches[0] : null;
+  const matchList = matches.length
+    ? `<div class="file-match-list">${matches.slice(0, 8).map((match) => `
+        <button class="file-match" type="button" data-action="file-open-match" data-file-path="${escapeHtml(entry.path)}" data-find-text="${escapeHtml(fileSearchQuery)}" data-find-line="${Number(match.line) || 1}" data-find-column="${Number(match.column) || 1}" data-find-offset="${Number(match.offset) || 0}" title="Open line ${Number(match.line) || 1}, column ${Number(match.column) || 1}">
+          <span>Ln ${Number(match.line) || 1}, Col ${Number(match.column) || 1}</span>
+          <code>${escapeHtml(String(match.text || '').trim().slice(0, 160))}</code>
+        </button>`).join('')}${matches.length > 8 ? `<small class="muted">${matches.length - 8} more match${matches.length - 8 === 1 ? '' : 'es'} in this file</small>` : ''}</div>`
+    : '';
+  return `
+  <div class="file-row" data-file-row="${escapeHtml(entry.path)}">
+    <label class="file-check"><input type="checkbox" class="file-pick" value="${escapeHtml(entry.path)}" data-file-type="${escapeHtml(entry.type)}" ${selectedPaths.has(entry.path) ? 'checked' : ''}><span></span></label>
+    <button class="file-open" type="button" data-action="file-open" data-file-path="${escapeHtml(entry.path)}" ${firstMatch ? `data-find-text="${escapeHtml(fileSearchQuery)}" data-find-line="${Number(firstMatch.line) || 1}" data-find-column="${Number(firstMatch.column) || 1}" data-find-offset="${Number(firstMatch.offset) || 0}"` : ''}>
+      <span class="file-icon">${fileTypeIcon(entry)}</span>
+      <span class="file-main"><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === 'directory' ? 'Folder' : `${escapeHtml(fileTypeLabel(entry))} · ${formatBytes(entry.size)}`}</small>${matchSummary}</span>
+    </button>
+    <div class="file-meta"><code>${escapeHtml(entry.path)}</code><time>${entry.modifiedAt ? escapeHtml(formatPanelDate(entry.modifiedAt)) : ''}</time>${matchList}</div>
+    <button class="file-context-trigger" type="button" data-action="file-show-context" data-file-path="${escapeHtml(entry.path)}" aria-label="More actions for ${escapeHtml(entry.name)}" aria-haspopup="menu" aria-expanded="false">...</button>
+  </div>`;
+}
+
+/**
+ * Render the file list with keyed row updates.
+ *
+ * A full innerHTML replacement on every live refresh caused scroll bounce,
+ * layout shift, and input lag on large folders. Rows are now reused by path
+ * and only changed rows are replaced, so the scroll position and the DOM
+ * structure stay stable between refreshes.
+ */
 function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a file or paste config here.') {
-  const scrollTop = elements.fileList.scrollTop;
-  elements.fileList.innerHTML = entries.map((entry) => `
-    <div class="file-row">
-      <label class="file-check"><input type="checkbox" class="file-pick" value="${escapeHtml(entry.path)}" data-file-type="${escapeHtml(entry.type)}"><span></span></label>
-      <button class="file-open" type="button" data-action="file-open" data-file-path="${escapeHtml(entry.path)}">
-        <span class="file-icon">${fileTypeIcon(entry)}</span>
-        <span class="file-main"><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === 'directory' ? 'Folder' : `${escapeHtml(fileTypeLabel(entry))} · ${formatBytes(entry.size)}`}</small></span>
-      </button>
-      <div class="file-meta"><code>${escapeHtml(entry.path)}</code><time>${entry.modifiedAt ? escapeHtml(formatPanelDate(entry.modifiedAt)) : ''}</time></div>
-      <button class="file-context-trigger" type="button" data-action="file-show-context" data-file-path="${escapeHtml(entry.path)}" aria-label="More actions for ${escapeHtml(entry.name)}" aria-haspopup="menu" aria-expanded="false">...</button>
-    </div>
-  `).join('') || `<p class="empty-state">${escapeHtml(emptyText)}</p>`;
+  const list = elements.fileList;
+  if (!list) return;
+  const scrollTop = list.scrollTop;
+  const selectedPaths = new Set(selectedFilePaths());
+  const active = document.activeElement;
+  const focusedRowPath = active?.closest?.('[data-file-row]')?.dataset.fileRow || '';
+  const focusedAction = active?.dataset?.action || '';
+  const focusedSelectionStart = typeof active?.selectionStart === 'number' ? active.selectionStart : null;
+  const focusedSelectionEnd = typeof active?.selectionEnd === 'number' ? active.selectionEnd : null;
+  const focusedScrollTop = active?.scrollTop || 0;
+  const existingRows = new Map(
+    [...list.querySelectorAll('[data-file-row]')].map((row) => [row.dataset.fileRow, row]),
+  );
+  const fragment = document.createDocumentFragment();
+  const seen = new Set();
+
+  for (const entry of entries) {
+    const path = String(entry?.path || '');
+    if (!path) continue;
+    seen.add(path);
+    const markup = fileEntryMarkup(entry, selectedPaths);
+    const current = existingRows.get(path);
+    if (current) {
+      // Reuse the row when nothing visible changed; this keeps the DOM node,
+      // its scroll anchoring, and any focused control intact.
+      const signature = fileEntrySignature(entry);
+      if (current.dataset.entrySignature === signature) {
+        const checkbox = current.querySelector('.file-pick');
+        if (checkbox) checkbox.checked = selectedPaths.has(path);
+        fragment.append(current);
+        continue;
+      }
+      const replacement = document.createElement('div');
+      replacement.innerHTML = markup;
+      const next = replacement.firstElementChild;
+      if (next) {
+        next.dataset.entrySignature = signature;
+        fragment.append(next);
+      }
+      continue;
+    }
+    const holder = document.createElement('div');
+    holder.innerHTML = markup;
+    const row = holder.firstElementChild;
+    if (row) {
+      row.dataset.entrySignature = fileEntrySignature(entry);
+      fragment.append(row);
+    }
+  }
+
+  list.replaceChildren(fragment);
+  if (!entries.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty-state';
+    empty.textContent = emptyText;
+    list.append(empty);
+  }
   applyFileManagerLayout();
-  elements.fileList.scrollTop = scrollTop;
+  // Rows are reused in place, so restoring the exact offset keeps the view
+  // perfectly still across live refreshes.
+  list.scrollTop = scrollTop;
+  if (focusedRowPath && focusedAction) {
+    const nextFocus = [...list.querySelectorAll('[data-file-row]')]
+      .find((row) => row.dataset.fileRow === focusedRowPath)
+      ?.querySelector(`[data-action="${CSS.escape(focusedAction)}"]`);
+    if (nextFocus) {
+      nextFocus.focus({ preventScroll: true });
+      if (focusedSelectionStart !== null && typeof nextFocus.setSelectionRange === 'function') {
+        try { nextFocus.setSelectionRange(focusedSelectionStart, focusedSelectionEnd); } catch {}
+      }
+      nextFocus.scrollTop = focusedScrollTop;
+    }
+  }
+}
+
+function fileEntrySignature(entry) {
+  const matches = Array.isArray(entry.matches) ? entry.matches : [];
+  return [
+    entry?.type || '',
+    entry?.size || 0,
+    entry?.modifiedAt || 0,
+    entry?.matchCount || matches.length,
+    matches[0]?.line || 0,
+    matches[0]?.column || 0,
+  ].join('|');
 }
 
 async function refreshPluginRows() {
@@ -2701,8 +3036,13 @@ function renderFilePreview(file, server) {
 
 function applyFileManagerLayout() {
   const view = document.querySelector('#view-files');
-  if (view) view.dataset.fileLayout = fileLayoutMode;
-  if (elements.fileLayoutButton) elements.fileLayoutButton.textContent = `Layout: ${fileLayoutMode[0].toUpperCase()}${fileLayoutMode.slice(1)}`;
+  // Only write the attribute when it actually changed: mutating it on every
+  // refresh invalidates style resolution and causes visible reflow.
+  if (view && view.dataset.fileLayout !== fileLayoutMode) view.dataset.fileLayout = fileLayoutMode;
+  if (elements.fileLayoutButton) {
+    const label = `Layout: ${fileLayoutMode[0].toUpperCase()}${fileLayoutMode.slice(1)}`;
+    if (elements.fileLayoutButton.textContent !== label) elements.fileLayoutButton.textContent = label;
+  }
 }
 
 function renderSettings() {
@@ -2728,11 +3068,12 @@ function renderSettings() {
       <div class="settings-group">
         <strong>ASF — Advanced Sandbox Fabric (native kernel runtime)</strong>
         <p class="muted" id="asfDoctorStatus">${settings.asfNative?.available
-          ? `Active: ${escapeHtml(settings.asfNative.detail || 'native Landlock and seccomp runtime ready')}. Each server also receives cgroup CPU, RAM, swap, task, device, and namespace limits.`
+          ? `Active: ${escapeHtml(settings.asfNative.detail || 'native Landlock and seccomp runtime ready')}. Each server also receives cgroup CPU, RAM, swap, and task limits, a dedicated locked system identity, and a seccomp policy that blocks namespace creation.`
           : `Native runtime unavailable: ${escapeHtml(settings.asfNative?.reason || 'unsupported host')}. Server starts require verified Linux per-server identity and ASF preflight; unisolated fallback is disabled.`}</p>
         <div class="row-actions"><button class="secondary" type="button" data-action="asf-doctor">Run Kernel Doctor</button></div>
       </div>
       <label class="switch"><input name="repairAgentTerminalEnabled" type="checkbox" ${settings.repairAgentTerminalEnabled ? 'checked' : ''}><span></span>Terminal diagnostics</label>
+      <label class="switch"><input type="checkbox" data-nexus-neural-graph-toggle ${localStorage.getItem('nexusNeuralGraph') === '1' ? 'checked' : ''}><span></span>Show live neural graph in Security</label>
       <label>Panel version <input readonly value="${escapeHtml(settings.version || '1.0.0')}"></label>
       <label>Visible servers before scrolling <input name="serverSwitcherVisibleCount" type="number" min="1" max="20" value="${Number(settings.serverSwitcherVisibleCount || 3)}"></label>
       <label>Maximum backup file size (GB) <input name="maxBackupSizeGb" type="number" min="1" max="100" value="${Number(settings.maxBackupSizeGb || 20)}"><small>Applies to manual and automatic archives. The limit is enforced while writing, and incomplete oversized files are removed.</small></label>
@@ -3281,6 +3622,7 @@ function showDatabaseDetails(connection) {
 /* ------------------------------------------------------------------ */
 
 let tebexPaymentStream = null;
+let tebexRenderRequestId = 0;
 
 function closeTebexStream() {
   if (tebexPaymentStream) {
@@ -3294,6 +3636,9 @@ function appendTebexPayment(payment) {
   if (!feed) return;
   const row = document.createElement('div');
   row.className = 'plugin-row tebex-payment-row';
+  if (payment.transaction_id || payment.transactionId) row.dataset.transactionId = String(payment.transaction_id || payment.transactionId);
+  const empty = feed.querySelector('.empty-state');
+  if (empty) empty.remove();
   const amount = (Number(payment.priceCents || 0) / 100).toFixed(2);
   row.innerHTML = `
     <div>
@@ -3311,12 +3656,14 @@ function appendTebexPayment(payment) {
 
 async function renderTebex() {
   if (!elements.tebexPanel) return;
+  const requestId = ++tebexRenderRequestId;
   const server = activeServer();
   if (!server) {
     elements.tebexPanel.innerHTML = '<p class="empty-state">Create a server to configure Tebex rank giving.</p>';
     return;
   }
   const data = await api(`/api/servers/${server.id}/tebex`).catch((error) => ({ tebex: null, error: error.message }));
+  if (requestId !== tebexRenderRequestId || state.activeView !== 'tebex' || activeServer()?.id !== server.id) return;
   const tebex = data.tebex;
   if (!tebex) {
     elements.tebexPanel.innerHTML = `<p class="empty-state">${escapeHtml(data.error || 'Could not load Tebex status.')}</p>`;
@@ -3389,11 +3736,12 @@ async function renderTebex() {
     const feed = document.querySelector('#tebexPaymentFeed');
     if (feed) {
       for (const payment of [...tebex.payments].reverse()) {
-        const matchedPackage = tebex.packages.find((pkg) => pkg.id === payment.package_id);
+        const matchedPackage = tebex.packages.find((pkg) => pkg.id === payment.package_id || pkg.tebex_package_id === payment.package_id);
         appendTebexPayment({
           ...payment,
-          packageName: payment.package_name || matchedPackage?.name || 'Package',
-          rank: payment.rank || matchedPackage?.rank || '',
+          packageName: payment.package_name || matchedPackage?.name || 'Unknown package',
+          rank: payment.rank || matchedPackage?.rank || (payment.package_name ? payment.package_name.toLowerCase().replace(/rank|package|tier|upgrade/g, '').replace(/[^a-z0-9]+/g, '').slice(0, 32) : ''),
+          transactionId: payment.transaction_id || payment.transactionId,
           at: payment.created_at,
         });
       }
@@ -3403,16 +3751,26 @@ async function renderTebex() {
       tebexPaymentStream = new EventSource(`/api/servers/${server.id}/tebex/payments/stream`);
       tebexPaymentStream.addEventListener('snapshot', (event) => {
         const payload = safeJsonParse(event.data);
-        if (Array.isArray(payload.payments) && payload.payments.length) {
+        if (Array.isArray(payload.payments)) {
           const feedNode = document.querySelector('#tebexPaymentFeed');
-          if (feedNode) feedNode.innerHTML = '';
-          for (const payment of [...payload.payments].reverse()) appendTebexPayment(payment);
+          if (feedNode) feedNode.replaceChildren();
+          for (const payment of [...payload.payments].reverse()) {
+            const matchedPackage = tebex.packages.find((pkg) => pkg.id === payment.package_id || pkg.tebex_package_id === payment.package_id);
+            appendTebexPayment({
+              ...payment,
+              packageName: payment.package_name || matchedPackage?.name || 'Unknown package',
+              rank: payment.rank || matchedPackage?.rank || (payment.package_name ? payment.package_name.toLowerCase().replace(/rank|package|tier|upgrade/g, '').replace(/[^a-z0-9]+/g, '').slice(0, 32) : ''),
+              transactionId: payment.transaction_id || payment.transactionId,
+              at: payment.created_at,
+            });
+          }
+          if (feedNode && !payload.payments.length) feedNode.innerHTML = '<p class="empty-state">No payments yet. Purchases appear here live.</p>';
         }
       });
       tebexPaymentStream.addEventListener('payment', (event) => {
         const payload = safeJsonParse(event.data);
         const feedNode = document.querySelector('#tebexPaymentFeed');
-        if (feedNode?.querySelector('.empty-state')) feedNode.innerHTML = '';
+        if (feedNode && payload.transactionId && feedNode.querySelector(`[data-transaction-id="${CSS.escape(String(payload.transactionId))}"]`)) return;
         appendTebexPayment(payload);
         showToast(`${payload.username || 'A player'} purchased ${payload.packageName || 'a package'}.`);
       });
@@ -3772,6 +4130,10 @@ function setView(view) {
   const shellScroll = currentShellScroll();
   state.shellScroll = shellScroll;
   state.activeView = view;
+  if (view !== 'tebex') {
+    tebexRenderRequestId += 1;
+    closeTebexStream();
+  }
   localStorage.setItem('nexusActiveView', view);
   if (view === 'console') {
     consoleStickToBottom = true;
@@ -3980,7 +4342,7 @@ function startRefreshLoop() {
         state.statusRefreshInFlight = false;
       });
     }
-    if (state.activeView === 'files' && now - state.uploadRefreshAt >= 400 && !state.uploadRefreshInFlight) {
+    if (state.activeView === 'files' && now - state.uploadRefreshAt >= 1000 && !state.uploadRefreshInFlight) {
       state.uploadRefreshAt = now;
       state.uploadRefreshInFlight = true;
       renderUploadSessions().catch(() => {}).finally(() => {
@@ -3989,8 +4351,11 @@ function startRefreshLoop() {
     }
     const userEditingOrInteracting = document.activeElement?.matches?.('input, textarea, select, button, summary, [contenteditable="true"]');
     const activelyScrolling = now - state.lastUserScrollAt < 900;
+    const fileSearchActive = state.activeView === 'files' && Boolean(fileSearchQuery.trim());
+    if (state.activeView === 'tebex') return;
     const sectionInterval = state.activeView === 'files' ? 1800 : 5000;
-    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !userEditingOrInteracting && !activelyScrolling) {
+    const suppressSectionRefresh = ['files', 'properties', 'whitelist', 'plugins', 'databases', 'allocations', 'admins', 'settings'].includes(state.activeView);
+    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !userEditingOrInteracting && !activelyScrolling && !fileSearchActive && !suppressSectionRefresh) {
       state.sectionRefreshAt = now;
       state.sectionRefreshInFlight = true;
       const view = state.activeView;
@@ -4010,8 +4375,8 @@ function startRefreshLoop() {
   }, 500);
 }
 
-document.addEventListener('scroll', () => {
-  state.lastUserScrollAt = Date.now();
+document.addEventListener('scroll', (event) => {
+  if (event.isTrusted) state.lastUserScrollAt = Date.now();
 }, { passive: true, capture: true });
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -4095,8 +4460,11 @@ if (elements.templateGameSelect) {
 
 elements.activeServerSelect.addEventListener('change', () => {
   state.activeServerId = Number(elements.activeServerSelect.value);
+  tebexRenderRequestId += 1;
+  closeTebexStream();
   filePath = '';
   fileSearchQuery = '';
+  openFileSignature = '';
   const search = document.querySelector('#fileSearch');
   if (search) search.value = '';
   consoleRenderToken += 1;
@@ -4179,7 +4547,19 @@ elements.fileList.addEventListener('click', (event) => {
 document.querySelector('#fileSearch')?.addEventListener('input', (event) => {
   fileSearchQuery = event.target.value;
   window.clearTimeout(fileSearchTimer);
-  fileSearchTimer = window.setTimeout(() => { void renderFiles(); }, 250);
+  fileSearchTimer = window.setTimeout(() => { void renderFiles(); }, 350);
+});
+
+document.querySelector('#fileSearchMode')?.addEventListener('change', (event) => {
+  fileSearchMode = event.target.value === 'content' ? 'content' : 'name';
+  window.clearTimeout(fileSearchTimer);
+  fileSearchTimer = window.setTimeout(() => { void renderFiles(); }, 0);
+});
+
+document.querySelector('#fileSearchScope')?.addEventListener('change', (event) => {
+  fileSearchScope = event.target.value === 'folder' ? 'folder' : 'server';
+  window.clearTimeout(fileSearchTimer);
+  fileSearchTimer = window.setTimeout(() => { void renderFiles(); }, 0);
 });
 
 document.querySelector('#fileEditorFind')?.addEventListener('keydown', (event) => {
@@ -5046,7 +5426,7 @@ document.addEventListener('click', async (event) => {
         const systemdSummary = asf.systemdActive
           ? (asf.systemdVersion ? `active v${asf.systemdVersion}` : 'active, runner restricted')
           : 'not active';
-        const summary = `Tier ${asf.tier || 'unknown'} | native ${native.available ? `ready, ABI ${native.landlockAbi || '?'}` : native.reason || 'unavailable'} | cgroup v2 ${asf.cgroupV2 ? 'active' : 'fallback'} | systemd ${systemdSummary} | preflight ${asf.preflightPassed ? 'passed' : 'native fallback'}`;
+        const summary = `Tier ${asf.tier || 'unknown'} | native ${native.available ? `ready, ABI ${native.landlockAbi || '?'}` : native.reason || 'unavailable'} | cgroup v2 ${asf.cgroupV2 ? 'active' : 'fallback'} | systemd ${systemdSummary} | preflight ${asf.preflightPassed ? 'passed' : 'blocked (native runtime required)'}`;
         if (statusNode) statusNode.textContent = summary;
         showToast('ASF kernel doctor completed.');
       } catch (error) {
@@ -5783,8 +6163,15 @@ document.addEventListener('click', async (event) => {
       await renderWhitelist();
       return;
     }
-    if (action === 'file-open') {
+    if (action === 'file-open' || action === 'file-open-match') {
       filePath = actionTarget.dataset.filePath;
+      const findText = actionTarget.dataset.findText || '';
+      const findLine = Number(actionTarget.dataset.findLine) || 0;
+      const findColumn = Number(actionTarget.dataset.findColumn) || 0;
+      const findOffset = Number(actionTarget.dataset.findOffset);
+      pendingEditorFind = findText || findLine
+        ? { text: findText, line: findLine, column: findColumn, offset: Number.isFinite(findOffset) ? findOffset : null }
+        : null;
       fileSearchQuery = '';
       const search = document.querySelector('#fileSearch');
       if (search) search.value = '';
@@ -5920,6 +6307,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'file-up') {
       filePath = filePath.split('/').slice(0, -1).join('/');
       fileSearchQuery = '';
+      openFileSignature = '';
       const search = document.querySelector('#fileSearch');
       if (search) search.value = '';
       await renderFiles();
@@ -5959,8 +6347,15 @@ document.addEventListener('click', async (event) => {
       const selected = contextFilePaths();
       if (!selected.length) return showToast('Select files or folders first.');
       if (!confirm(`Delete ${selected.length} selected item(s)?`)) return;
-      await Promise.all(selected.map((target) => api(`/api/servers/${server.id}/files?path=${encodeURIComponent(target)}`, { method: 'DELETE' })));
-      showToast('Selected items deleted.');
+      const result = await api(`/api/servers/${server.id}/files/delete-batch`, {
+        method: 'POST',
+        body: JSON.stringify({ paths: selected }),
+      });
+      const deleted = Array.isArray(result.deleted) ? result.deleted.length : 0;
+      const failed = Array.isArray(result.failed) ? result.failed.length : 0;
+      showToast(failed
+        ? `Deleted ${deleted} item(s); ${failed} could not be removed.`
+        : `Deleted ${deleted} item(s).`);
       await renderFiles();
       return;
     }

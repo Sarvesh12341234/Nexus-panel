@@ -34,6 +34,36 @@ assert.throws(
   /Live file operations require the server to be running/,
 );
 
+// The ASF launch boundary must never accept a weaker, systemd-only mode.
+const asfSource = fs.readFileSync(path.join(__dirname, '..', 'backend', 'asf.js'), 'utf8');
+assert.ok(
+  asfSource.includes('native ASF runtime unavailable'),
+  'ASF launches must fail closed when the native runtime is unavailable',
+);
+assert.ok(
+  asfSource.includes('!native.available || !identity.available || !status.preflightPassed'),
+  'ASF launches must fail closed when native identity or kernel preflight is unavailable',
+);
+assert.ok(
+  asfSource.includes("'--uid', String(identity.uid), '--gid', String(identity.gid)"),
+  'ASF workload must always use the verified dedicated identity',
+);
+assert.ok(
+  !asfSource.includes('disableNative'),
+  'ASF must not expose a native-to-fallback downgrade switch',
+);
+const runtimeSource = fs.readFileSync(path.join(__dirname, '..', 'backend', 'runtime.js'), 'utf8');
+assert.ok(
+  !runtimeSource.includes('disableNative'),
+  'the runtime must not retry a failed native sandbox without isolation',
+);
+const agentTerminal = require('../backend/agent_terminal');
+assert.equal(
+  typeof agentTerminal.runFullAccessCommand,
+  'undefined',
+  'the raw full-access shell runner must not be exported',
+);
+
 const syscallDiagnostics = diagnoseRuntime([
   'asf-test.service: Main process exited, code=killed, status=31/SYS',
 ]);

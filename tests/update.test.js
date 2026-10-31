@@ -6,6 +6,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
+// update/update.sh is a Linux/systemd-focused updater. The panel's own update
+// endpoint documents the same limitation, so the functional test only runs on
+// POSIX hosts where the script and its paths behave as intended.
+if (process.platform === 'win32') {
+  console.log('Update script test requires a POSIX host; skipped.');
+  process.exit(0);
+}
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-update-test-'));
 const source = path.join(root, 'source');
 const remote = path.join(root, 'remote.git');
@@ -104,5 +112,11 @@ try {
 
   console.log('Update test passed: bare GitHub version tags and non-Git updates work while user data is preserved.');
 } finally {
-  fs.rmSync(root, { recursive: true, force: true });
+  // Git object files are read-only on Windows, so a plain recursive delete can
+  // fail with EPERM. Clear read-only flags and retry before giving up.
+  try {
+    const { execFileSync } = require('node:child_process');
+    execFileSync('chmod', ['-R', 'u+w', root], { stdio: 'ignore' });
+  } catch {}
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }

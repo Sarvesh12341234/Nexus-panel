@@ -94,7 +94,18 @@ try:
 
         for name, target in links:
             ensure_directory(posixpath.dirname(name))
-            os.symlink(target, os.path.join(stage, *name.split('/')))
+            link_path = os.path.join(stage, *name.split('/'))
+            resolved_target = os.path.join(stage, posixpath.dirname(name), target)
+            if os.name == 'nt':
+                # Windows symlink targets are resolved inconsistently across
+                # runtimes and break when the staging folder is renamed.
+                # Materialize the already-validated internal target as a
+                # regular file so the runtime stays self-contained.
+                if not os.path.isfile(resolved_target):
+                    raise ValueError('Java runtime archive contains a link to a missing internal file.')
+                shutil.copyfile(resolved_target, link_path)
+            else:
+                os.symlink(target, link_path)
 
         stage_real = os.path.realpath(stage)
         for name, _ in links:
@@ -126,16 +137,36 @@ except Exception:
 `;
 
 function extractJavaRuntimeArchive(archivePath, destination) {
-  const result = spawnSync('python3', ['-c', extractionScript, archivePath, destination], {
-    encoding: 'utf8',
-    windowsHide: true,
-    maxBuffer: 1024 * 1024,
-  });
-  if (result.error?.code === 'ENOENT') {
+  const candidates = process.platform === 'win32'
+    ? [
+      { command: 'python3', args: [] },
+      { command: 'python', args: [] },
+      { command: 'py', args: ['-3'] },
+    ]
+    : [{ command: 'python3', args: [] }];
+  let result = null;
+  let lastError = null;
+  for (const candidate of candidates) {
+    result = spawnSync(candidate.command, [...candidate.args, '-c', extractionScript, archivePath, destination], {
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    });
+    if (!result.error) break;
+    lastError = result.error;
+    // Only continue to the next interpreter when this one is not installed.
+    if (result.error.code !== 'ENOENT') break;
+  }
+  if (result?.error) {
+    if (result.error.code === 'ENOENT') {
+      throw new Error('Python 3 is required to safely install the bundled Java runtime.');
+    }
+    throw result.error;
+  }
+  if (lastError && result?.status === null && result?.stdout === '' && result?.stderr === '') {
     throw new Error('Python 3 is required to safely install the bundled Java runtime.');
   }
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
+  if (result?.status !== 0) {
     const detail = (result.stderr || result.stdout || '').trim();
     throw new Error(`Bundled Java runtime extraction failed${detail ? `: ${detail}` : ` (exit ${result.status ?? 'unknown'})`}`);
   }

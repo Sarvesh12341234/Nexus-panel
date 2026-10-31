@@ -32,6 +32,11 @@ assert.equal(requestSecurityError(request('POST', {
   'x-nexuspanel-request': '1',
   origin: 'https://evil.example.test',
 })), 'Cross-site request blocked.');
-assert.equal(requestSecurityError(request('POST', { authorization: 'Bearer api-token' })), '');
+// Bearer tokens must not bypass the browser CSRF gate on ordinary panel routes.
+assert.equal(requestSecurityError(request('POST', { authorization: 'Bearer api-token' })), 'Request verification failed.');
+assert.equal(requestSecurityError(request('POST', { 'x-nexuspanel-token': 'api-token' })), 'Request verification failed.');
+// The dedicated host provisioning endpoint is the only token-authenticated exception.
+assert.equal(requestSecurityError(request('POST', { authorization: 'Bearer api-token' }, { path: '/host/provision' })), '');
+assert.equal(requestSecurityError(request('POST', { 'x-nexuspanel-token': 'api-token' }, { path: '/host/provision' })), '');
 assert.equal(requestSecurityError(request('POST', {}, { path: '/tebex/webhook/42' })), '');
 console.log('CSRF and origin security tests passed.');

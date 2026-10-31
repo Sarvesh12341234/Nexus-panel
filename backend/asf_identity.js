@@ -76,6 +76,7 @@ function removeAclEntry(name, targets) {
 function directoryTree(root) {
   const directories = [root];
   const executables = [];
+  const runtimeRoot = path.join(root, 'runtime');
   const queue = [root];
   while (queue.length) {
     const current = queue.shift();
@@ -89,7 +90,17 @@ function directoryTree(root) {
         queue.push(child);
       } else {
         try {
-          if ((fs.statSync(child).mode & 0o100) !== 0) executables.push(child);
+          const mode = fs.statSync(child).mode;
+          const ownerExecutable = (mode & 0o100) !== 0;
+          // Windows and some mounted filesystems do not preserve POSIX mode
+          // bits. Runtime launchers are still executables by location and
+          // extension, so classify them explicitly to keep ACL repair correct.
+          const insideRuntime = child.startsWith(`${runtimeRoot}${path.sep}`);
+          const runtimeLauncher = insideRuntime && (
+            path.basename(path.dirname(child)).toLowerCase() === 'bin'
+            || /\.(?:exe|cmd|bat|sh|com)$/i.test(child)
+          );
+          if (ownerExecutable || runtimeLauncher) executables.push(child);
         } catch {}
       }
     }
@@ -283,7 +294,12 @@ function applyAcl(name, serverRoot, nativeBinary = '', extraExecutables = []) {
 }
 
 function verifyIdentity(name, serverRoot, nativeBinary = '', extraExecutables = []) {
-  if (!commandAvailable('runuser')) return { ok: true, verification: 'acl-applied' };
+  // Identity isolation is only proven when the workload can actually be
+  // executed as the dedicated account. Without runuser there is no proof,
+  // so the launch must fail closed instead of reporting a false pass.
+  if (!commandAvailable('runuser')) {
+    return { ok: false, reason: 'runuser-missing', verification: 'unverified' };
+  }
   const checks = ['test', '-r', serverRoot, '-a', '-w', serverRoot, '-a', '-x', serverRoot];
   const rootCheck = run('runuser', ['-u', name, '--', ...checks], 5000);
   if (rootCheck.status !== 0) return { ok: false, reason: 'identity-root-access-failed' };
@@ -411,6 +427,7 @@ function identitySupportStatus() {
   if (process.env.ASF_PER_SERVER_USERS === '0') return { available: false, reason: 'disabled' };
   if (typeof process.getuid !== 'function' || process.getuid() !== 0) return { available: false, reason: 'panel-not-root' };
   if (!commandAvailable('setfacl')) return { available: false, reason: 'setfacl-missing' };
+  if (!commandAvailable('runuser')) return { available: false, reason: 'runuser-missing' };
   if (!commandAvailable('useradd') && !commandAvailable('adduser')) return { available: false, reason: 'account-tool-missing' };
   return { available: true, method: 'locked-system-user+posix-acl' };
 }

@@ -115,11 +115,15 @@ function nativeStatus({ build = true } = {}) {
   if (result.status !== 0) {
     try { fs.rmSync(temporary, { force: true }); } catch {}
     if (existing?.available) {
+      // A stale binary must never be used for a security boundary. Report it
+      // as unavailable so the launch fails closed until the host can rebuild.
       cached = {
         ...existing,
-        sourceMtime,
+        available: false,
+        reason: 'stale-binary',
         staleBinary: true,
         buildWarning: String(result.stderr || result.stdout || '').trim().slice(0, 1000),
+        sourceMtime,
       };
       return cached;
     }
@@ -137,9 +141,11 @@ function nativeStatus({ build = true } = {}) {
     if (existing?.available) {
       cached = {
         ...existing,
-        sourceMtime,
+        available: false,
+        reason: 'stale-binary',
         staleBinary: true,
         buildWarning: candidate?.error || candidate?.reason || 'candidate self-test failed',
+        sourceMtime,
       };
       return cached;
     }

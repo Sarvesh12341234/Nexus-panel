@@ -1,6 +1,6 @@
 {
   "name": "nexuspanel",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Lightweight cross-platform Minecraft server panel with the ASF (Advanced Sandbox Fabric) isolation protocol, secure server management, and safe change planning.",
   "main": "backend/index.js",
   "bin": {
@@ -24,7 +24,7 @@
     "reset-password": "node scripts/reset-password.js",
     "build:asf": "node backend/asf_native.js",
     "build:host-agent": "node backend/host_agent.js",
-    "test:asf": "bash native/asf/tests/test.sh",
+    "test:asf": "node tests/asf-runtime.test.js",
     "audit:asf": "sudo bash native/asf/tests/test-audit.sh",
     "benchmark:asf": "bash native/asf/tests/benchmark.sh",
     "test:security": "node tests/security-regression.test.js && node tests/request-security.test.js && node tests/isolation-security.test.js && node tests/node-version.test.js",

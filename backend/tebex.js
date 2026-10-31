@@ -289,6 +289,27 @@ function upsertPackageCommand(serverId, packageRowId, { command, delaySeconds = 
 function recordPayment(serverId, { transactionId, username = '', uuid = '', packageId = null, packageName = '', rank = '', priceCents = 0, currency = 'USD', commands = [] }) {
   const cleanTxn = String(transactionId || '').trim().slice(0, 120);
   if (!cleanTxn) throw new Error('Transaction id is required.');
+  const paymentServerId = Number(serverId);
+  if (!Number.isSafeInteger(paymentServerId) || paymentServerId < 1) throw new Error('Invalid server id.');
+  const packageRowId = Number(packageId);
+  const packageRow = Number.isSafeInteger(packageRowId) && packageRowId > 0
+    && db.prepare('SELECT 1 FROM tebex_packages WHERE id = ? AND server_id = ?').get(packageRowId, paymentServerId)
+    ? db.prepare('SELECT id, name, rank FROM tebex_packages WHERE id = ? AND server_id = ?').get(packageRowId, paymentServerId)
+    : null;
+  const cleanPackageName = packageRow?.name || String(packageName || '').trim().slice(0, 120);
+  const cleanRank = String(packageRow?.rank || rank || '').trim().replace(/[^A-Za-z0-9_-]+/g, '').slice(0, 32);
+  const cleanPriceCents = Number(priceCents);
+  const cleanCurrency = String(currency || 'USD').trim().toUpperCase();
+  if (!/^[A-Z0-9_-]{3,8}$/.test(cleanCurrency)) throw new Error('Invalid payment currency.');
+  const safeCommands = Array.isArray(commands) ? commands.slice(0, 20).map((item) => ({
+    command: String(item?.command || '').slice(0, 300),
+    delaySeconds: Math.max(0, Math.min(3600, Number(item?.delaySeconds) || 0)),
+    onlineRequired: Boolean(item?.onlineRequired),
+  })) : [];
+  if (safeCommands.some((item) => !item.command || /[\r\n;&|`$<>]/.test(item.command))) {
+    throw new Error('Payment command contains invalid or blocked characters.');
+  }
+  if (packageId && !packageRow) throw new Error('Payment package does not belong to this server.');
   db.prepare(`
     INSERT INTO tebex_payments (server_id, transaction_id, status, username, uuid, package_id, package_name, rank, price_cents, currency, commands_json, created_at)
     VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -300,16 +321,16 @@ function recordPayment(serverId, { transactionId, username = '', uuid = '', pack
       price_cents = excluded.price_cents,
       currency = excluded.currency
   `).run(
-    Number(serverId),
+    paymentServerId,
     cleanTxn,
     String(username || '').slice(0, 32),
     String(uuid || '').slice(0, 64),
-    packageId ? Number(packageId) : null,
-    String(packageName || '').slice(0, 120),
-    String(rank || '').slice(0, 32),
-    Math.max(0, Math.round(Number(priceCents) || 0)),
-    String(currency || 'USD').slice(0, 8).toUpperCase(),
-    JSON.stringify(Array.isArray(commands) ? commands.slice(0, 20) : []),
+    packageRow?.id || null,
+    cleanPackageName,
+    cleanRank,
+    Number.isFinite(cleanPriceCents) ? Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.round(cleanPriceCents))) : 0,
+    cleanCurrency,
+    JSON.stringify(safeCommands),
     Date.now(),
   );
   return { ok: true, transactionId: cleanTxn };

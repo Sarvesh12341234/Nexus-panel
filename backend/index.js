@@ -81,10 +81,15 @@ const serverSizeCache = new Map();
 const liveUploadProgress = new Map();
 const performanceMonitor = new PerformanceMonitor();
 const { HealthEngine, IncidentEngine, DependencyGraph, ChangePlanner } = require('./advanced/operations');
+const { NeuralGraph } = require('./advanced/neural_graph');
+const { AutonomousActivity } = require('./advanced/autonomous_activity');
+const { classify: classifyAutonomy } = require('./advanced/autonomy_policy');
 const healthEngine = new HealthEngine();
 const incidentEngine = new IncidentEngine(300);
 const dependencyGraph = new DependencyGraph();
 const changePlanner = new ChangePlanner();
+const neuralGraph = new NeuralGraph(1000);
+const autonomousActivity = new AutonomousActivity(500);
 let adaptiveMaintenanceStatus = { lastRunAt: 0, actions: [] };
 let databaseHealthStatus = { ...verifyDatabase(), checkedAt: Date.now(), snapshotAt: 0 };
 const dummyPasswordHash = hashPassword(crypto.randomBytes(24).toString('base64url'));
@@ -128,7 +133,6 @@ app.use('/api', (req, res, next) => {
   // Tebex webhook: authenticated by its own HMAC signature over the raw body,
   // not by session/CSRF. Tebex's servers cannot send our custom header.
   if (/^\/tebex\/webhook\//.test(req.path)) return next();
-  if (/^Bearer /i.test(String(req.headers.authorization || '')) || req.headers['x-nexuspanel-token']) return next();
   if (req.headers['x-nexuspanel-request'] !== '1') return res.status(403).json({ error: 'Request verification failed.' });
   const fetchSite = String(req.headers['sec-fetch-site'] || '');
   if (fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite)) return res.status(403).json({ error: 'Cross-site request blocked.' });
@@ -249,12 +253,36 @@ function pruneRepairHistory() {
   db.prepare('DELETE FROM repair_playbooks WHERE last_learned_at < ?').run(cutoff);
 }
 
+/**
+ * Mirror panel activity into the read-only live widgets.
+ *
+ * The activity feed and neural graph are observability surfaces only: they
+ * never execute an operation and never expose protected data.
+ */
+function recordAutonomousActivity({ category = 'panel', title = '', detail = '', source = 'panel', actorName = 'System', serverId = null }) {
+  const kind = String(category || 'panel').slice(0, 40);
+  const message = String(title || detail || 'Panel activity').slice(0, 300);
+  try {
+    autonomousActivity.add(kind, message, {
+      source: String(source || 'panel').slice(0, 80),
+      actor: String(actorName || 'System').slice(0, 100),
+      serverId: serverId ? Number(serverId) : null,
+    });
+    neuralGraph.node('panel', 'panel', 'Panel');
+    neuralGraph.node(`category:${kind}`, 'category', kind);
+    neuralGraph.pulse('panel', `category:${kind}`, `activity.${kind}`, { source: String(source || 'panel').slice(0, 80) });
+  } catch {
+    // Live widgets must never break a panel action.
+  }
+}
+
 function logFixed({ serverId = null, category = 'panel', title = '', detail = '', source = 'panel', actorName = '', actorUserId = null }) {
   pruneFixedLogs();
   const actor = requestActorStorage.getStore();
   const automated = /(?:\bai\b|needle|repair-agent)/i.test(String(source || ''));
   const cleanActorName = String(actorName || (automated ? 'AI' : actor?.name || 'System')).trim().slice(0, 100);
   const cleanActorId = actorUserId ?? (automated ? null : actor?.id ?? null);
+  recordAutonomousActivity({ category, title, detail, source, actorName: cleanActorName, serverId });
   db.prepare(`
     INSERT INTO fixed_logs (server_id, category, title, detail, source, actor_user_id, actor_name, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -4780,6 +4808,37 @@ app.get('/api/advanced/dependencies', requirePermission(capabilities.SECURITY_VI
   res.json(dependencyGraph.snapshot());
 });
 
+app.get('/api/advanced/autonomy/activity', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Authentication required.', code: 'AUTH_REQUIRED' });
+  res.setHeader('Cache-Control', 'no-store');
+  // Expose only generic activity categories. Internal detail strings can
+  // contain user supplied names, paths, addresses, or operation metadata.
+  const events = autonomousActivity.list(150).filter((event) => {
+    if (!event.serverId) return true;
+    const server = db.prepare('SELECT id, owner_user_id FROM servers WHERE id = ?').get(Number(event.serverId));
+    return Boolean(server && canUseServer(req.user, server));
+  }).map((event) => ({
+    ts: event.ts,
+    kind: String(event.kind || 'event').slice(0, 40),
+    message: '',
+  }));
+  res.json({ readonly: true, events });
+});
+
+app.post('/api/advanced/autonomy/classify', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (req, res) => {
+  // Classification only; this endpoint never executes an operation.
+  res.json({ readonly: true, ...classifyAutonomy(req.body || {}) });
+});
+
+app.get('/api/advanced/autonomy/status', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.json({ enabled: true, mode: 'observability', protectedDataConfirmation: true, readonly: true });
+});
+
+app.get('/api/advanced/neural-graph', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(neuralGraph.snapshot());
+});
+
 app.get('/api/performance', requirePermission(capabilities.SECURITY_VIEW, permissions.MANAGE_ADMINS), (_req, res) => {
   res.json({ performance: performanceMonitor.snapshot() });
 });
@@ -5213,8 +5272,8 @@ app.post('/api/settings/asf/doctor', requirePermission(capabilities.SETTINGS_MAN
     category: 'security',
     title: `ASF doctor: ${status.tier}`,
     detail: status.preflightPassed
-      ? `Kernel policy ${status.tier} passed with systemd ${status.systemdVersion}, cgroup v2 ${status.cgroupV2 ? 'active' : 'fallback'}, and native runtime ${status.native?.available ? 'active' : 'unavailable'}.`
-      : `Native fallback ${status.native?.available ? 'active' : 'unavailable'}; ${status.failures?.[0]?.detail || status.reason || 'systemd preflight unavailable'}`,
+      ? `Native kernel policy ${status.tier} passed with systemd ${status.systemdVersion}, cgroup v2 ${status.cgroupV2 ? 'active' : 'fallback'}, and native runtime active.`
+      : `Launch blocked (native runtime required); ${status.failures?.[0]?.detail || status.reason || 'native ASF preflight unavailable'}`,
     source: 'asf-doctor',
   });
   res.json({ asf: status });
@@ -5277,12 +5336,20 @@ app.put('/api/servers/:id/tebex/packages/:packageId/command', requirePermission(
 
 app.post('/api/servers/:id/tebex/payments', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
-  tebex.recordPayment(server.id, req.body || {});
+  try {
+    tebex.recordPayment(server.id, req.body || {});
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
   res.status(201).json({ tebex: tebex.tebexStatus(server.id) });
 });
 
 app.post('/api/servers/:id/tebex/payments/:transactionId/executed', requirePermission(capabilities.SERVER_MANAGE, permissions.MANAGE_SERVERS), (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
+  const payment = db.prepare('SELECT id, status FROM tebex_payments WHERE server_id = ? AND transaction_id = ?')
+    .get(Number(server.id), String(req.params.transactionId || '').slice(0, 120));
+  if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+  if (payment.status === 'executed') return res.json({ tebex: tebex.tebexStatus(server.id), alreadyExecuted: true });
   tebex.markPaymentExecuted(req.params.transactionId);
   res.json({ tebex: tebex.tebexStatus(server.id) });
 });
@@ -6687,8 +6754,33 @@ app.post('/api/servers/:id/kill', requirePermission(capabilities.SERVER_KILL, pe
   res.json(result);
 });
 
+const commandRateLimits = new Map();
+
+function consumeCommandRateLimit(userId, serverId) {
+  const key = `${Number(userId) || 0}:${Number(serverId) || 0}`;
+  const now = Date.now();
+  const windowMs = 10000;
+  const limit = 20;
+  const current = commandRateLimits.get(key);
+  if (!current || current.resetAt <= now) {
+    commandRateLimits.set(key, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, retryAfter: 0 };
+  }
+  current.count += 1;
+  if (current.count > limit) {
+    return { allowed: false, retryAfter: Math.max(1, Math.ceil((current.resetAt - now) / 1000)) };
+  }
+  return { allowed: true, retryAfter: 0 };
+}
+
 app.post('/api/servers/:id/command', requirePermission(capabilities.CONSOLE_COMMAND, permissions.SEND_COMMANDS), (req, res) => {
-  const result = sendCommand(Number(req.params.id), req.body.command);
+  const serverId = Number(req.params.id);
+  const rate = consumeCommandRateLimit(req.user?.id, serverId);
+  if (!rate.allowed) {
+    res.setHeader('Retry-After', String(rate.retryAfter));
+    return res.status(429).json({ error: `Too many console commands. Try again in ${rate.retryAfter} seconds.` });
+  }
+  const result = sendCommand(serverId, req.body.command);
   res.json(result);
 });
 
@@ -7160,6 +7252,7 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
     path: target.relative,
     type: 'file',
     size: stats.size,
+    modifiedAt: stats.mtimeMs,
     ...descriptor,
   });
   res.json({
@@ -7167,47 +7260,137 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
     type: 'file',
     content: await fs.promises.readFile(target.absolute, 'utf8'),
     size: stats.size,
+    modifiedAt: stats.mtimeMs,
     ...descriptor,
   });
 }));
 
 app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
   const server = getServerOr404(req.params.id, req.user);
-  const query = String(req.query.q || '').trim().toLocaleLowerCase();
-  if (query.length < 2) return res.json({ query, results: [] });
+  const query = String(req.query.q || '').trim();
+  const mode = req.query.mode === 'content' ? 'content' : 'name';
+  if (query.length < 2) return res.json({ query, mode, results: [] });
   if (query.length > 120) return res.status(400).json({ error: 'Search text must be 120 characters or fewer.' });
 
-  const root = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
-  const queue = [{ absolute: root, relative: '', depth: 0 }];
+  const serverRoot = ensureServerDirs({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
+  const scope = safeServerFile(server, req.query.path || '');
+  const scopeStats = await fs.promises.stat(scope.absolute).catch(() => null);
+  if (!scopeStats?.isDirectory()) return res.status(400).json({ error: 'Search scope must be a folder.' });
+
+  const queue = [{ absolute: scope.absolute, relative: scope.relative, depth: 0 }];
   const results = [];
+  const needle = query.toLocaleLowerCase();
+  const maxResults = 250;
+  const maxVisited = mode === 'content' ? 12000 : 30000;
+  const maxContentBytes = 1024 * 1024;
+  const maxScannedBytes = 128 * 1024 * 1024;
+  const maxDepth = 16;
   let visited = 0;
-  while (queue.length && results.length < 250 && visited < 50000) {
-    const directory = queue.pop();
-    if (directory.depth > 24) continue;
+  let scannedBytes = 0;
+  let skippedFiles = 0;
+  let truncated = false;
+
+  while (queue.length && results.length < maxResults && visited < maxVisited) {
+    const directory = queue.shift();
+    if (directory.depth > maxDepth) {
+      truncated = true;
+      continue;
+    }
     const children = await fs.promises.readdir(directory.absolute, { withFileTypes: true }).catch(() => []);
+    const candidates = [];
     for (const child of children) {
-      if (++visited > 50000) break;
+      if (++visited > maxVisited) {
+        truncated = true;
+        break;
+      }
       if (child.isSymbolicLink()) continue;
       const relative = path.posix.join(directory.relative, child.name).replace(/^\.\//, '');
       if (!isUserVisibleServerEntry(relative)) continue;
       const absolute = path.join(directory.absolute, child.name);
-      if (relative.toLocaleLowerCase().includes(query)) {
-        const stats = await fs.promises.stat(absolute).catch(() => null);
-        if (stats) results.push({
-          name: child.name,
-          path: relative,
-          type: child.isDirectory() ? 'directory' : 'file',
-          size: stats.isFile() ? stats.size : 0,
-          modifiedAt: stats.mtimeMs,
-          ...(stats.isDirectory() ? { extension: '', kind: 'folder', mime: '', editable: false, previewable: false } : fileDescriptor(child.name, stats.size)),
-        });
+      const stats = await fs.promises.stat(absolute).catch(() => null);
+      if (!stats) continue;
+      const descriptor = child.isDirectory()
+        ? { extension: '', kind: 'folder', mime: '', editable: false, previewable: false }
+        : fileDescriptor(child.name, stats.size);
+      const base = {
+        name: child.name,
+        path: relative,
+        type: child.isDirectory() ? 'directory' : 'file',
+        size: stats.isFile() ? stats.size : 0,
+        modifiedAt: stats.mtimeMs,
+        ...descriptor,
+      };
+      if (mode === 'name') {
+        if (relative.toLocaleLowerCase().includes(needle)) results.push(base);
+      } else if (child.isFile() && descriptor.editable && stats.size <= maxContentBytes) {
+        candidates.push({ absolute, base });
+      } else if (mode === 'content' && child.isFile() && descriptor.editable && stats.size > maxContentBytes) {
+        skippedFiles += 1;
+        truncated = true;
       }
       if (child.isDirectory()) queue.push({ absolute, relative, depth: directory.depth + 1 });
-      if (results.length >= 250) break;
+      if (results.length >= maxResults) break;
+    }
+
+    // Read candidate files concurrently in small batches so content search is
+    // responsive without opening thousands of descriptors at once.
+    for (let index = 0; index < candidates.length && results.length < maxResults; index += 8) {
+      const batch = candidates.slice(index, index + 8);
+      let reservedBatchBytes = 0;
+      const inspected = await Promise.all(batch.map(async (candidate) => {
+        if (candidate.base.size > maxScannedBytes - scannedBytes - reservedBatchBytes) return { skipped: true };
+        reservedBatchBytes += candidate.base.size;
+        const content = await fs.promises.readFile(candidate.absolute, 'utf8').catch(() => null);
+        if (content === null) return null;
+        // Reject likely binary or malformed text. Config and source search
+        // should not return random byte fragments decoded as UTF-8.
+        if (content.includes('\uFFFD') || /\0/.test(content)) return null;
+        const matches = [];
+        const lines = content.split(/\r?\n/);
+        const lineOffsets = [];
+        let totalLineOffset = 0;
+        for (const line of lines) {
+          lineOffsets.push(totalLineOffset);
+          totalLineOffset += line.length + 1;
+        }
+        for (let lineIndex = 0; lineIndex < lines.length && matches.length < 20; lineIndex += 1) {
+          const line = lines[lineIndex];
+          const lower = line.toLocaleLowerCase();
+          let column = lower.indexOf(needle);
+          while (column >= 0 && matches.length < 20) {
+            matches.push({ line: lineIndex + 1, column: column + 1, offset: lineOffsets[lineIndex] + column, text: line.slice(0, 500) });
+            column = lower.indexOf(needle, column + Math.max(1, needle.length));
+          }
+        }
+        return matches.length ? { ...candidate.base, matches, matchCount: matches.length } : null;
+      }));
+      for (let index = 0; index < inspected.length; index += 1) {
+        const match = inspected[index];
+        const candidate = batch[index];
+        if (match?.skipped) {
+          skippedFiles += 1;
+          truncated = true;
+        } else {
+          scannedBytes += candidate.base.size;
+          if (match) results.push(match);
+        }
+      }
     }
   }
+
+  if (queue.length || visited >= maxVisited) truncated = true;
   results.sort((left, right) => left.path.localeCompare(right.path));
-  res.json({ query, results, truncated: queue.length > 0 || visited >= 50000 });
+  res.json({
+    query,
+    mode,
+    scope: scope.relative,
+    results,
+    truncated,
+    scannedBytes,
+    visited,
+    skippedFiles,
+    root: path.relative(serverRoot, scope.absolute).replaceAll('\\', '/'),
+  });
 }));
 
 app.get('/api/servers/:id/files/preview', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
@@ -7330,6 +7513,12 @@ app.post('/api/servers/:id/files/upload-chunk', requirePermission(capabilities.F
   const partialPath = `${target.absolute}.uploading`;
   const existing = uploadSession(server.id, target.relative);
   if (existing && existing.status === 'canceled') return res.status(409).json({ error: 'Upload was canceled.' });
+  const existingChunks = parseChunkRanges(existing?.chunks_json);
+  const chunkEnd = offset + req.body.length;
+  const overlaps = existingChunks.some((range) => offset < range.end && chunkEnd > range.start);
+  if (overlaps) {
+    return res.status(409).json({ error: 'Upload chunk overlaps an already committed range. Resume from the reported chunks.' });
+  }
   if (!fs.existsSync(partialPath)) await fs.promises.writeFile(partialPath, Buffer.alloc(0));
   const handle = await fs.promises.open(partialPath, 'r+');
   try {
@@ -7337,7 +7526,7 @@ app.post('/api/servers/:id/files/upload-chunk', requirePermission(capabilities.F
   } finally {
     await handle.close();
   }
-  const chunks = mergeChunkRanges(parseChunkRanges(existing?.chunks_json), { start: offset, end: offset + req.body.length });
+  const chunks = mergeChunkRanges(existingChunks, { start: offset, end: chunkEnd });
   const uploadedBytes = uploadedRangeBytes(chunks);
   if (uploadedBytes >= totalSize && req.query.finalize === '1') {
     await safeTimelinePoint(server, req, 'Before chunked upload finalize', `Captured state before finalizing ${target.relative}.`);
@@ -7429,6 +7618,34 @@ app.delete('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE
   await safeTimelinePoint(server, req, 'Before file delete', `Captured state before deleting ${target.relative}.`);
   await fs.promises.rm(target.absolute, { recursive: true, force: true });
   res.json({ ok: true });
+}));
+
+// Bulk delete keeps multi-selection removal to a single round trip instead of
+// one request per item, which removes the multi-second delay and the request
+// storm that made large selections feel unreliable.
+app.post('/api/servers/:id/files/delete-batch', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {
+  const server = getServerOr404(req.params.id, req.user);
+  const requested = Array.isArray(req.body.paths) ? req.body.paths : [];
+  if (!requested.length) return res.status(400).json({ error: 'Select at least one item to delete.' });
+  if (requested.length > 500) return res.status(400).json({ error: 'Too many items selected. Delete in smaller batches.' });
+
+  const deleted = [];
+  const failed = [];
+  await safeTimelinePoint(server, req, 'Before bulk file delete', `Captured state before deleting ${requested.length} item(s).`);
+  for (const relative of requested) {
+    try {
+      const target = safeServerFile(server, relative);
+      if (!target.relative) {
+        failed.push({ path: String(relative || ''), error: 'Cannot delete the server root.' });
+        continue;
+      }
+      await fs.promises.rm(target.absolute, { recursive: true, force: true });
+      deleted.push(target.relative);
+    } catch (error) {
+      failed.push({ path: String(relative || ''), error: error.message });
+    }
+  }
+  res.json({ ok: failed.length === 0, deleted, failed });
 }));
 
 app.post('/api/servers/:id/files/copy', requirePermission(capabilities.FILES_MANAGE, permissions.MANAGE_FILES), asyncRoute(async (req, res) => {

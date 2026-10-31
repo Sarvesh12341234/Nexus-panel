@@ -3,8 +3,13 @@
 function requestSecurityError(req) {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return '';
   if (/^\/tebex\/webhook\//.test(req.path)) return '';
-  const authorization = String(req.headers.authorization || '');
-  if (/^Bearer\s+\S+$/i.test(authorization) || req.headers['x-nexuspanel-token']) return '';
+  // Host API tokens are accepted only by the dedicated host provisioning
+  // endpoint. A blanket exemption would let a stolen token bypass the
+  // browser CSRF/origin gate on every mutating panel route.
+  if (req.path === '/host/provision') {
+    const authorization = String(req.headers.authorization || '');
+    if (/^Bearer\s+\S+$/i.test(authorization) || req.headers['x-nexuspanel-token']) return '';
+  }
 
   if (req.headers['x-nexuspanel-request'] !== '1') return 'Request verification failed.';
 

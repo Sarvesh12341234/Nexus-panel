@@ -26,15 +26,22 @@ try {
   extractJavaRuntimeArchive(archive, destination);
   const extractedJava = path.join(destination, 'temurin', 'bin', 'java');
   assert.equal(fs.readFileSync(extractedJava, 'utf8'), '#!/bin/sh\nexit 0\n');
-  assert.notEqual(fs.statSync(extractedJava).mode & 0o100, 0);
+  // Windows does not persist POSIX owner-executable mode bits, so the
+  // executable-bit guarantee is only observable on POSIX hosts.
+  if (process.platform !== 'win32') {
+    assert.notEqual(fs.statSync(extractedJava).mode & 0o100, 0);
+  }
   assert.equal(
     fs.readFileSync(path.join(destination, 'temurin', 'legal', 'java.se', 'LICENSE'), 'utf8'),
     'runtime license\n',
   );
-  assert.equal(
-    fs.readlinkSync(path.join(destination, 'temurin', 'legal', 'java.se', 'LICENSE')),
-    '../java.base/LICENSE',
-  );
+  const extractedLink = path.join(destination, 'temurin', 'legal', 'java.se', 'LICENSE');
+  if (process.platform !== 'win32') {
+    assert.equal(fs.readlinkSync(extractedLink), '../java.base/LICENSE');
+  } else {
+    // Windows materializes validated internal links as regular files.
+    assert.equal(fs.lstatSync(extractedLink).isSymbolicLink(), false);
+  }
 
   fs.rmSync(path.join(source, 'temurin', 'legal', 'java.se', 'LICENSE'));
   fs.symlinkSync('../../../../outside', path.join(source, 'temurin', 'legal', 'java.se', 'LICENSE'));

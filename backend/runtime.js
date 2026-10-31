@@ -381,7 +381,6 @@ function launchServer(server, software, options = {}) {
   const root = ensureServerDirs(server);
   const runtimeEnv = ensureRuntimeEnvironment(root);
   appendLog(serverId, `[NexusPanel] Working directory: ${root}`);
-  if (options.disableNative) appendLog(serverId, '[NexusPanel] ASF native wrapper disabled; retaining verified systemd isolation and per-server identity.');
   const executable = server.executable_path;
   const totalCpuCores = hostCpuCount();
   const dbMemoryMb = Math.max(256, Math.round(Number(server.max_memory_mb) || 1024));
@@ -593,27 +592,17 @@ function launchServer(server, software, options = {}) {
       forceStopServer(serverId, child);
     }
 
-    // If the ASF kernel wrapper dies almost immediately, retry exactly once
-    // without the native wrapper. This preserves systemd resource isolation and
-    // makes a host-incompatible Landlock/seccomp policy self-healing.
+    // The ASF isolation contract is fail-closed: a native sandbox failure
+    // must never silently downgrade the workload to a weaker launch mode.
+    // Diagnostics are collected above so operators can repair the host
+    // policy, and the server stays stopped until an explicit retry.
     const nativeLaunch = String(wrapped.engine || '').startsWith('asf-');
-    const fallbackEligible = nativeLaunch && !options.disableNative && !intentional && uptimeMs < 5000 && code !== 0;
-    if (fallbackEligible) {
-      appendLog(serverId, `[NexusPanel] ASF sandbox exited too early (code=${code ?? 'none'}). Retrying once with compatibility isolation so Paper can expose its real error.`);
-      processes.delete(serverId);
-      players.delete(serverId);
-      partialLines.delete(serverId);
-      try {
-        const retry = startServer(server, software, { ...options, disableNative: true });
-        if (retry?.ok) return;
-      } catch (error) {
-        appendLog(serverId, `[NexusPanel] Compatibility retry failed to launch: ${error.message}`);
-      }
-    } else {
-      processes.delete(serverId);
-      players.delete(serverId);
-      partialLines.delete(serverId);
+    if (nativeLaunch && !intentional && uptimeMs < 5000 && code !== 0) {
+      appendLog(serverId, `[NexusPanel] ASF sandbox exited too early (code=${code ?? 'none'}). Isolation downgrade is blocked; fix the host ASF policy before restarting.`);
     }
+    processes.delete(serverId);
+    players.delete(serverId);
+    partialLines.delete(serverId);
 
     if (exitHandler) {
       Promise.resolve(exitHandler({
@@ -924,8 +913,14 @@ function sendCommand(serverId, command) {
     if (recoveredUnit) throw new Error('The server is still running, but the panel lost its console input pipe when it restarted. Stop it, then start it from the panel to reconnect the console.');
     throw new Error('Server is not running.');
   }
-  const clean = String(command || '').trim().replace(/^\//, '');
+  const raw = String(command ?? '');
+  if (raw.length > 512) throw new Error('Command is too long (maximum 512 characters).');
+  // Control characters could inject additional console lines or corrupt the
+  // server stdin protocol. Only printable characters and spaces are allowed.
+  if (/[\u0000-\u001f\u007f]/.test(raw)) throw new Error('Command contains unsupported control characters.');
+  const clean = raw.trim().replace(/^\//, '');
   if (!clean) throw new Error('Command is empty.');
+  if (clean.length > 512) throw new Error('Command is too long (maximum 512 characters).');
   child.stdin.write(`${clean}\n`);
   const line = appendLog(id, `> ${clean}`);
   return { ok: true, line };

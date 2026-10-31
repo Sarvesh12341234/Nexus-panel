@@ -287,24 +287,31 @@ function kernelStatus({ refresh = false } = {}) {
   let selected = '';
   const failures = [];
   try {
-    for (const tier of preflightTiers(native.available)) {
-      const unit = `asf-preflight-${process.pid}-${tier}-${Date.now().toString(36)}`;
-      const payloadCommand = fs.existsSync('/usr/bin/java') ? '/usr/bin/java' : '/bin/true';
-      const payloadArgs = payloadCommand.endsWith('/java') ? ['-version'] : [];
-      const testCommand = native.available ? native.binary : payloadCommand;
-      const testArgs = native.available
-        ? ['--root', preflightRoot, '--port', '65535', '--tier', tier, '--', payloadCommand, ...payloadArgs]
-        : payloadArgs;
-      const result = spawnSync(systemdRun, [
-        '--quiet', '--wait', '--collect', '--no-ask-password', `--unit=${unit}`,
-        ...propertyArgs(systemdProperties(testProfile, base, tier)),
-        '--', testCommand, ...testArgs,
-      ], { encoding: 'utf8', timeout: 15000 });
-      if (result.status === 0) {
-        selected = tier;
-        break;
+    // The preflight must exercise the real native ASF runtime. A systemd-only
+    // probe can pass while the actual sandbox is absent, which would report a
+    // false security guarantee.
+    if (!native.available) {
+      failures.push({ tier: 'native', detail: `native ASF runtime unavailable${native.reason ? `: ${native.reason}` : ''}` });
+    } else {
+      for (const tier of preflightTiers(native.available)) {
+        const unit = `asf-preflight-${process.pid}-${tier}-${Date.now().toString(36)}`;
+        const payloadCommand = fs.existsSync('/usr/bin/java') ? '/usr/bin/java' : '/bin/true';
+        const payloadArgs = payloadCommand.endsWith('/java') ? ['-version'] : [];
+        const testCommand = native.binary;
+        const testArgs = [
+          '--root', preflightRoot, '--port', '65535', '--tier', tier, '--', payloadCommand, ...payloadArgs,
+        ];
+        const result = spawnSync(systemdRun, [
+          '--quiet', '--wait', '--collect', '--no-ask-password', `--unit=${unit}`,
+          ...propertyArgs(systemdProperties(testProfile, base, tier)),
+          '--', testCommand, ...testArgs,
+        ], { encoding: 'utf8', timeout: 15000 });
+        if (result.status === 0) {
+          selected = tier;
+          break;
+        }
+        failures.push({ tier, detail: String(result.stderr || result.stdout || `exit ${result.status}`).trim().slice(0, 500) });
       }
-      failures.push({ tier, detail: String(result.stderr || result.stdout || `exit ${result.status}`).trim().slice(0, 500) });
     }
   } finally {
     if (path.dirname(preflightRoot) === preflightParent) {
@@ -313,9 +320,10 @@ function kernelStatus({ refresh = false } = {}) {
   }
   const value = {
     ...base,
-    available: Boolean(selected || native.available),
-    tier: selected || (native.available ? 'native-only' : 'process-guard'),
+    available: Boolean(selected),
+    tier: selected || 'unavailable',
     preflightPassed: Boolean(selected),
+    nativeRequired: true,
     failures,
   };
   kernelStatusCache = { value, expiresAt: Date.now() + 10 * 60 * 1000 };
@@ -323,25 +331,32 @@ function kernelStatus({ refresh = false } = {}) {
 }
 
 function wrapCommand(command, args, profile, options = {}) {
-  const disableNative = options.disableNative === true;
   if (process.platform !== 'linux') requireLaunchIsolation(process.platform, null, null);
 
   const status = kernelStatus();
   const native = status.native;
   const identity = ensureServerIdentity(profile, native.available ? native.binary : '');
   requireLaunchIsolation(process.platform, status, identity);
+  // The native ASF runtime is the enforcement boundary. A systemd-only
+  // launch is not an acceptable substitute, so the launch fails closed when
+  // the native runtime is missing, stale, or failed its self-test.
+  if (!native.available || !identity.available || !status.preflightPassed) {
+    const reasons = [
+      !native.available ? `native ASF runtime unavailable${native.reason ? ` (${native.reason})` : ''}` : '',
+      !identity.available ? `server identity unavailable${identity.reason ? ` (${identity.reason})` : ''}` : '',
+      !status.preflightPassed ? 'native kernel preflight did not pass' : '',
+    ].filter(Boolean).join('; ');
+    throw new Error(`Server launch is disabled: ${reasons}.`);
+  }
   const launchProfile = { ...profile, asfIdentity: identity };
-  const nativeUsable = !disableNative && native.available && identity.available && status.preflightPassed;
-  const nativeCommand = nativeUsable ? native.binary : command;
-  const nativeArgs = nativeUsable
-    ? [
-      '--root', profile.serverRoot,
-      '--port', String(Number(profile.port) || 25565),
-      '--tier', status.tier === 'maximum' ? 'maximum' : status.tier === 'compatible' ? 'compatible' : 'core',
-      ...(identity.available ? ['--uid', String(identity.uid), '--gid', String(identity.gid)] : []),
-      '--', command, ...args,
-    ]
-    : args;
+  const nativeCommand = native.binary;
+  const nativeArgs = [
+    '--root', profile.serverRoot,
+    '--port', String(Number(profile.port) || 25565),
+    '--tier', status.tier === 'maximum' ? 'maximum' : status.tier === 'compatible' ? 'compatible' : 'core',
+    '--uid', String(identity.uid), '--gid', String(identity.gid),
+    '--', command, ...args,
+  ];
   clearStaleUnits(profile.serverId, spawnSync);
   launchSequence = (launchSequence + 1) % 1000000;
   const unit = [
@@ -365,7 +380,7 @@ function wrapCommand(command, args, profile, options = {}) {
       ...nativeArgs,
     ],
     unit: `${unit}.service`,
-    engine: nativeUsable ? 'asf-kernel+cgroup-v2' : 'systemd-kernel-fallback',
+    engine: 'asf-kernel+cgroup-v2',
     policyTier: status.tier,
     nativeDetail: native.detail || native.reason || '',
     identity,

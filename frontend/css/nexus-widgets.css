@@ -1,0 +1,120 @@
+/* NexusPanel live widget styles (external so the panel CSP can stay strict). */
+
+.nx-autonomy-activity {
+  position: relative;
+  width: 100%;
+  max-height: 260px;
+  overflow: auto;
+  background: rgba(5, 8, 14, .72);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(120, 160, 255, .14);
+  border-radius: 12px;
+  padding: 10px;
+  font: 11px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #dfe8ff;
+  scrollbar-width: thin;
+}
+
+.nx-autonomy-head {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  margin-bottom: .35rem;
+  color: #b9c9ff;
+  letter-spacing: .04em;
+}
+
+.nx-autonomy-activity .a {
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, .05);
+  overflow-wrap: anywhere;
+}
+
+.nx-autonomy-activity .a:last-child {
+  border-bottom: 0;
+}
+
+.nx-autonomy-activity b {
+  font-weight: 650;
+  color: #8fd8ff;
+}
+
+.nx-autonomy-empty {
+  padding: 6px 0;
+  opacity: .65;
+}
+
+#nexus-neural-graph {
+  display: none;
+  position: relative;
+  min-height: 520px;
+  border-radius: 18px;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 50%, #172033 0, #090d16 48%, #05070c 100%);
+  border: 1px solid rgba(120, 160, 255, .18);
+  color: #eaf1ff;
+}
+
+#nexus-neural-graph.active {
+  display: block;
+}
+
+#nexus-neural-graph canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.nx-graph-title {
+  position: absolute;
+  z-index: 2;
+  left: 20px;
+  top: 16px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.nx-graph-sub {
+  position: absolute;
+  z-index: 2;
+  left: 20px;
+  top: 43px;
+  opacity: .6;
+  font-size: 12px;
+}
+
+.nx-graph-legend {
+  position: absolute;
+  z-index: 2;
+  right: 18px;
+  top: 16px;
+  font-size: 11px;
+  opacity: .65;
+}
+
+.nx5-status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  opacity: .75;
+  margin-right: 6px;
+}
+
+.nx5-status-dot[data-state="busy"] {
+  animation: nx5pulse 1.2s infinite;
+}
+
+@keyframes nx5pulse {
+  50% { opacity: .25; transform: scale(.75); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nx5-status-dot[data-state="busy"] { animation: none; }
+}
+
+@media (max-width: 620px) {
+  #nexus-neural-graph { min-height: 360px; }
+  .nx-graph-legend { display: none; }
+}
