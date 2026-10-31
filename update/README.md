@@ -27,7 +27,7 @@ this avoids deleting unknown user files.
 To select a different release tag or repository:
 
 ```bash
-sudo NEXUSPANEL_UPDATE_TAG=v1.0.5 \
+sudo NEXUSPANEL_UPDATE_TAG=v1.0.6 \
   NEXUSPANEL_REPO_URL=https://github.com/Sarvesh12341234/Nexus-panel.git \
   bash update/update.sh
 ```

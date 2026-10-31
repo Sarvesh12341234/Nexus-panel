@@ -1143,6 +1143,8 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 .file-list {
   max-height: 62vh;
   overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   overflow-anchor: none;
   padding-right: 0.35rem;
   scrollbar-width: thin;
@@ -1208,8 +1210,7 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   border: 1px solid var(--line);
   color: var(--text);
   text-align: left;
-  content-visibility: auto;
-  contain-intrinsic-size: 80px;
+  contain: layout style;
 }
 
 .file-row:hover {
@@ -2170,27 +2171,106 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   .surface, .server-card, .software-card, .plugin-row, .user-row, .quick-stats article { backdrop-filter: none !important; }
   .sidebar { backdrop-filter: none; }
 
-  .file-toolbar {
+  /* One deliberate mobile scroll surface for navigation. The old grid could
+     shrink labels into narrow columns and created nested sidebar scrollbars. */
+  .panel-shell { display: block; }
+  .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 50;
     display: grid;
-    grid-template-columns: 1fr;
-    align-items: stretch;
-    gap: .65rem;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+    gap: .55rem;
+    width: 100%;
+    height: auto;
+    max-height: none;
+    padding: .65rem .75rem;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--sidebar) 96%, transparent);
+    backdrop-filter: blur(14px);
   }
-
-  .file-toolbar > button,
-  .file-toolbar > code {
+  .sidebar > .brand { min-width: 0; }
+  .sidebar > .nav-list {
+    display: flex;
+    grid-template-columns: none;
     width: 100%;
     min-width: 0;
+    min-height: 0;
+    gap: .45rem;
+    margin: 0;
+    padding: .1rem 0 .35rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x proximity;
   }
+  .sidebar > .nav-list .nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: max-content;
+    min-height: 42px;
+    padding: .62rem .9rem;
+    scroll-snap-align: start;
+  }
+  .sidebar > .server-switcher {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: .5rem;
+    padding: .45rem 0 0;
+    border-top: 1px solid var(--line);
+  }
+  .sidebar > .server-switcher > .eyebrow,
+  .sidebar > .server-switcher > .server-list { display: none; }
+  .sidebar > .server-switcher .compact-select,
+  .sidebar > .server-switcher select { width: 100%; min-width: 0; }
+
+  body[data-nav-layout="top"] .sidebar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+  }
+  body[data-nav-layout="top"] .sidebar > .brand { grid-column: 1; }
+  body[data-nav-layout="top"] .sidebar > .server-switcher {
+    grid-column: 2;
+    grid-row: 1;
+    width: min(42vw, 190px);
+    border: 0;
+    padding: 0;
+  }
+  body[data-nav-layout="top"] .sidebar > .nav-list {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .file-toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+    gap: .55rem;
+    padding: .7rem;
+  }
+
+  .file-toolbar > button { width: 100%; min-width: 0; min-height: 42px; }
+  .file-toolbar > code { grid-column: 1 / -1; width: 100%; }
 
   .file-search-label {
     display: grid;
-    grid-template-columns: 1fr;
-    gap: .45rem;
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .55rem;
+    align-items: center;
     width: 100%;
     min-width: 0;
+    min-height: 0;
     padding: .7rem;
   }
+
+  .file-search-label > span { grid-column: 1 / -1; }
 
   .file-search-label select,
   .file-search-label input {
@@ -2198,6 +2278,7 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
     min-width: 0;
     min-height: 44px;
   }
+  .file-search-label input { grid-column: 1 / -1; }
 
   .file-list {
     max-height: min(68dvh, 720px);
@@ -2250,7 +2331,6 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
     min-width: 0;
   }
 
-  .nav-list,
   .quick-stats,
   .promise-strip,
   .field-grid,
@@ -3575,5 +3655,104 @@ body[data-nav-layout="top"] .layout-picker { min-width: 150px; }
   body[data-nav-layout="top"] .server-switcher {
     grid-column: 2;
     grid-row: 1;
+  }
+}
+
+/* Mobile rules intentionally come last so global form sizing, customizable
+   toolbar zoom, and the top-nav breakpoint cannot collapse critical controls. */
+@media (max-width: 620px) {
+  body .file-toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .55rem;
+    width: 100%;
+    max-width: 100%;
+    zoom: 1;
+  }
+  body .file-toolbar > * { min-width: 0; max-width: 100%; }
+  body .file-toolbar > button { width: 100%; }
+  body .file-toolbar > #fileLayoutButton,
+  body .file-toolbar > #filePathLabel,
+  body .file-toolbar > .file-search-label { grid-column: 1 / -1; }
+  body .file-toolbar > .file-search-label {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    min-width: 0;
+    padding: .7rem;
+  }
+  body .file-search-label > span,
+  body .file-search-label > #fileSearch { grid-column: 1 / -1; }
+  body .file-search-label > select { width: 100%; min-width: 0; }
+  body .file-search-label > input { width: 100%; min-width: 0; }
+
+  body .panel-shell { display: block; }
+  body .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+    gap: .5rem;
+    width: 100%;
+    height: auto;
+    max-height: none;
+    padding: .6rem .7rem;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  body .sidebar > .brand { min-width: 0; }
+  body .sidebar > .nav-list {
+    display: flex;
+    grid-template-columns: none;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    gap: .45rem;
+    margin: 0;
+    padding: .1rem 0 .35rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+  }
+  body .sidebar > .nav-list .nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: max-content;
+    min-height: 42px;
+    padding: .62rem .9rem;
+    white-space: nowrap;
+  }
+  body .sidebar > .server-switcher {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: .45rem;
+    padding: .4rem 0 0;
+    border-top: 1px solid var(--line);
+  }
+  body .sidebar > .server-switcher > .eyebrow,
+  body .sidebar > .server-switcher > .server-list { display: none; }
+  body .sidebar > .server-switcher .compact-select,
+  body .sidebar > .server-switcher select { width: 100%; min-width: 0; }
+
+  body[data-nav-layout="top"] .sidebar {
+    grid-template-columns: minmax(0, 1fr) minmax(110px, 38vw);
+    grid-template-rows: auto auto;
+  }
+  body[data-nav-layout="top"] .sidebar > .brand { grid-column: 1; }
+  body[data-nav-layout="top"] .sidebar > .server-switcher {
+    grid-column: 2;
+    grid-row: 1;
+    border: 0;
+    padding: 0;
+  }
+  body[data-nav-layout="top"] .sidebar > .nav-list {
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
 }

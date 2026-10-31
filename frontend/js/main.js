@@ -1752,7 +1752,7 @@ const hashWorkerPending = new Map();
 function ensureHashWorker() {
   if (hashWorker || typeof Worker === 'undefined') return hashWorker;
   try {
-    hashWorker = new Worker('/js/hash-worker.js?v=1.0.0');
+    hashWorker = new Worker('/js/hash-worker.js?v=1.0.6');
     hashWorker.addEventListener('message', (event) => {
       const { id, hash, error } = event.data || {};
       const pending = hashWorkerPending.get(id);
@@ -2922,11 +2922,34 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
   const focusedSelectionStart = typeof active?.selectionStart === 'number' ? active.selectionStart : null;
   const focusedSelectionEnd = typeof active?.selectionEnd === 'number' ? active.selectionEnd : null;
   const focusedScrollTop = active?.scrollTop || 0;
-  const existingRows = new Map(
-    [...list.querySelectorAll('[data-file-row]')].map((row) => [row.dataset.fileRow, row]),
-  );
-  const fragment = document.createDocumentFragment();
+  const existingRows = new Map([...list.querySelectorAll('[data-file-row]')].map((row) => [row.dataset.fileRow, row]));
+  const orderedRows = [];
   const seen = new Set();
+  const signatureMatches = entries.length === existingRows.size
+    && entries.every((entry) => {
+      const current = existingRows.get(String(entry?.path || ''));
+      return current && current.dataset.entrySignature === fileEntrySignature(entry);
+    });
+
+  if (signatureMatches) {
+    for (const entry of entries) {
+      const row = existingRows.get(String(entry.path));
+      const checkbox = row.querySelector('.file-pick');
+      if (checkbox) checkbox.checked = selectedPaths.has(String(entry.path));
+    }
+    return;
+  }
+
+  if (entries.length === 0 && existingRows.size === 0) {
+    let empty = list.querySelector(':scope > .empty-state');
+    if (!empty) {
+      empty = document.createElement('p');
+      empty.className = 'empty-state';
+      list.append(empty);
+    }
+    if (empty.textContent !== emptyText) empty.textContent = emptyText;
+    return;
+  }
 
   for (const entry of entries) {
     const path = String(entry?.path || '');
@@ -2941,7 +2964,7 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
       if (current.dataset.entrySignature === signature) {
         const checkbox = current.querySelector('.file-pick');
         if (checkbox) checkbox.checked = selectedPaths.has(path);
-        fragment.append(current);
+        orderedRows.push(current);
         continue;
       }
       const replacement = document.createElement('div');
@@ -2949,7 +2972,7 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
       const next = replacement.firstElementChild;
       if (next) {
         next.dataset.entrySignature = signature;
-        fragment.append(next);
+        orderedRows.push(next);
       }
       continue;
     }
@@ -2958,24 +2981,38 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
     const row = holder.firstElementChild;
     if (row) {
       row.dataset.entrySignature = fileEntrySignature(entry);
-      fragment.append(row);
+      orderedRows.push(row);
     }
   }
 
-  list.replaceChildren(fragment);
+  // Keep the list container and unchanged row nodes in place. Re-appending
+  // existing nodes to a fragment caused focus loss and scroll anchoring work
+  // on every refresh, even when the actual entries had not changed.
+  for (const row of existingRows.values()) {
+    if (!seen.has(row.dataset.fileRow)) row.remove();
+  }
+  for (let index = 0; index < orderedRows.length; index += 1) {
+    const row = orderedRows[index];
+    const current = list.children[index];
+    if (current !== row) list.insertBefore(row, current || null);
+  }
   if (!entries.length) {
-    const empty = document.createElement('p');
-    empty.className = 'empty-state';
+    let empty = list.querySelector(':scope > .empty-state');
+    if (!empty) {
+      empty = document.createElement('p');
+      empty.className = 'empty-state';
+      list.append(empty);
+    }
     empty.textContent = emptyText;
-    list.append(empty);
+  } else {
+    list.querySelector(':scope > .empty-state')?.remove();
   }
   applyFileManagerLayout();
   // Rows are reused in place, so restoring the exact offset keeps the view
   // perfectly still across live refreshes.
-  list.scrollTop = scrollTop;
+  if (list.scrollTop !== scrollTop) list.scrollTop = scrollTop;
   if (focusedRowPath && focusedAction) {
-    const nextFocus = [...list.querySelectorAll('[data-file-row]')]
-      .find((row) => row.dataset.fileRow === focusedRowPath)
+    const nextFocus = list.querySelector(`[data-file-row="${CSS.escape(focusedRowPath)}"]`)
       ?.querySelector(`[data-action="${CSS.escape(focusedAction)}"]`);
     if (nextFocus) {
       nextFocus.focus({ preventScroll: true });
@@ -4343,17 +4380,21 @@ function startRefreshLoop() {
       });
     }
     if (state.activeView === 'files' && now - state.uploadRefreshAt >= 1000 && !state.uploadRefreshInFlight) {
+      const fileInteraction = document.activeElement?.closest?.('#view-files');
+      const fileScrollActive = now - state.lastUserScrollAt < 1500;
+      if (!fileInteraction && !fileScrollActive) {
       state.uploadRefreshAt = now;
       state.uploadRefreshInFlight = true;
       renderUploadSessions().catch(() => {}).finally(() => {
         state.uploadRefreshInFlight = false;
       });
+      }
     }
     const userEditingOrInteracting = document.activeElement?.matches?.('input, textarea, select, button, summary, [contenteditable="true"]');
-    const activelyScrolling = now - state.lastUserScrollAt < 900;
+    const activelyScrolling = now - state.lastUserScrollAt < 1800;
     const fileSearchActive = state.activeView === 'files' && Boolean(fileSearchQuery.trim());
     if (state.activeView === 'tebex') return;
-    const sectionInterval = state.activeView === 'files' ? 1800 : 5000;
+    const sectionInterval = 5000;
     const suppressSectionRefresh = ['files', 'properties', 'whitelist', 'plugins', 'databases', 'allocations', 'admins', 'settings'].includes(state.activeView);
     if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !userEditingOrInteracting && !activelyScrolling && !fileSearchActive && !suppressSectionRefresh) {
       state.sectionRefreshAt = now;
@@ -4376,7 +4417,11 @@ function startRefreshLoop() {
 }
 
 document.addEventListener('scroll', (event) => {
-  if (event.isTrusted) state.lastUserScrollAt = Date.now();
+  const target = event.target;
+  if (event.isTrusted && (target === document || target === document.documentElement || target === document.body
+    || target?.matches?.('.workspace, .file-list, .nav-list, .sidebar, .console-box, .tebex-console'))) {
+    state.lastUserScrollAt = Date.now();
+  }
 }, { passive: true, capture: true });
 
 elements.loginForm.addEventListener('submit', async (event) => {
