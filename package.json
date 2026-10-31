@@ -1,6 +1,6 @@
 {
   "name": "nexuspanel",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Lightweight cross-platform Minecraft server panel with the ASF (Advanced Sandbox Fabric) isolation protocol, secure server management, and safe change planning.",
   "main": "backend/index.js",
   "bin": {

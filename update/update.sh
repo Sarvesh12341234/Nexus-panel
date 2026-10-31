@@ -13,8 +13,8 @@ if [ -z "$EDITION" ] && [ -f "$APP_DIR/data/edition" ]; then
 fi
 EDITION="${EDITION:-normal}"
 case "$EDITION" in
-  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.6}" ;;
-  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.6}" ;;
+  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.7}" ;;
+  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.7}" ;;
 esac
 case "$UPDATE_TAG" in
   *-v*) EXPECTED_VERSION="${UPDATE_TAG##*-v}" ;;

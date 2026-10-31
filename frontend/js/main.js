@@ -1752,7 +1752,7 @@ const hashWorkerPending = new Map();
 function ensureHashWorker() {
   if (hashWorker || typeof Worker === 'undefined') return hashWorker;
   try {
-    hashWorker = new Worker('/js/hash-worker.js?v=1.0.6');
+    hashWorker = new Worker('/js/hash-worker.js?v=1.0.7');
     hashWorker.addEventListener('message', (event) => {
       const { id, hash, error } = event.data || {};
       const pending = hashWorkerPending.get(id);
