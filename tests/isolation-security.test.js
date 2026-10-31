@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { preflightTiers, requireLaunchIsolation } = require('../backend/asf');
+const { preflightTiers, requireLaunchIsolation, systemdProperties } = require('../backend/asf');
 const { beginLiveServerFileOperation, beginServerFileOperation, startServer } = require('../backend/runtime');
 const { directoryTree, serverTreeAccessFindArgs, traversalPaths } = require('../backend/asf_identity');
 const { bundledJavaBinary } = require('../backend/java_runtime');
@@ -29,6 +29,17 @@ assert.throws(
 assert.doesNotThrow(() => requireLaunchIsolation('linux', { preflightPassed: true }, { available: true }));
 assert.deepEqual(preflightTiers(true), ['maximum', 'compatible', 'core']);
 assert.deepEqual(preflightTiers(false), ['compatible', 'core']);
+const gameUnitProperties = systemdProperties({
+  serverRoot: '/servers/1-test',
+  port: 25565,
+  memoryMaxMb: 2048,
+  startupCpuQuotaPercent: 200,
+  cpuQuotaPercent: 100,
+  bindPorts: [{ port: 19132, protocol: 'both' }],
+}, { systemdVersion: 249, controllers: [], cgroupV2: true }, 'maximum');
+assert.ok(gameUnitProperties.includes('SystemCallErrorNumber=EPERM'));
+assert.ok(gameUnitProperties.includes('SocketBindAllow=udp:19132'));
+assert.ok(gameUnitProperties.includes('SocketBindAllow=tcp:19132'));
 assert.throws(
   () => beginLiveServerFileOperation(987632),
   /Live file operations require the server to be running/,

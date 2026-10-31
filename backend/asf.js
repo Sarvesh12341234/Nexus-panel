@@ -174,16 +174,30 @@ function systemdProperties(profile, status, tier = 'maximum') {
   properties.push(
     'SystemCallArchitectures=native',
     'SystemCallFilter=~@mount @swap @reboot @raw-io @privileged',
+    // Preserve the deny policy but return EPERM for incompatible plugin/JVM
+    // calls instead of letting systemd terminate the entire server with SIGSYS.
+    'SystemCallErrorNumber=EPERM',
   );
   if (!profile.asfIdentity?.available) properties.push('PrivateUsers=yes');
   if (status.systemdVersion >= 254) properties.push('MemoryKSM=no');
   if (status.systemdVersion >= 257) properties.push('PrivatePIDs=yes');
   if (status.systemdVersion >= 249 && Number(profile.port) > 0) {
-    properties.push(
-      'SocketBindDeny=any',
-      `SocketBindAllow=tcp:${Number(profile.port)}`,
-      `SocketBindAllow=udp:${Number(profile.port)}`,
-    );
+    properties.push('SocketBindDeny=any');
+    const bindPorts = Array.isArray(profile.bindPorts) ? profile.bindPorts : [];
+    const allowed = new Map([[Number(profile.port), new Set(['tcp', 'udp'])]]);
+    for (const item of bindPorts) {
+      const port = Number(item?.port);
+      if (!Number.isSafeInteger(port) || port < 1 || port > 65535) continue;
+      const protocol = ['tcp', 'udp', 'both'].includes(item.protocol) ? item.protocol : '';
+      if (!protocol) continue;
+      const protocols = allowed.get(port) || new Set();
+      if (protocol === 'both' || protocol === 'tcp') protocols.add('tcp');
+      if (protocol === 'both' || protocol === 'udp') protocols.add('udp');
+      allowed.set(port, protocols);
+    }
+    for (const [port, protocols] of allowed) {
+      for (const protocol of protocols) properties.push(`SocketBindAllow=${protocol}:${port}`);
+    }
   }
   return properties;
 }
@@ -348,13 +362,29 @@ function wrapCommand(command, args, profile, options = {}) {
     ].filter(Boolean).join('; ');
     throw new Error(`Server launch is disabled: ${reasons}.`);
   }
-  const launchProfile = { ...profile, asfIdentity: identity };
+  const bindPorts = [{ port: Number(profile.port), protocol: 'both' }];
+  try {
+    const { db } = require('./db');
+    const allocations = db.prepare('SELECT port, protocol FROM network_allocations WHERE server_id = ?').all(Number(profile.serverId));
+    for (const allocation of allocations) {
+      const port = Number(allocation.port);
+      if (Number.isSafeInteger(port) && port >= 1 && port <= 65535
+        && ['tcp', 'udp', 'both'].includes(allocation.protocol)) {
+        bindPorts.push({ port, protocol: allocation.protocol });
+      }
+    }
+  } catch {}
+  const launchProfile = { ...profile, asfIdentity: identity, bindPorts };
   const nativeCommand = native.binary;
   const nativeArgs = [
     '--root', profile.serverRoot,
     '--port', String(Number(profile.port) || 25565),
     '--tier', status.tier === 'maximum' ? 'maximum' : status.tier === 'compatible' ? 'compatible' : 'core',
     '--uid', String(identity.uid), '--gid', String(identity.gid),
+    ...bindPorts.flatMap(({ port, protocol }) => [
+      ...(protocol === 'both' || protocol === 'tcp' ? ['--tcp-port', String(port)] : []),
+      ...(protocol === 'both' || protocol === 'udp' ? ['--udp-port', String(port)] : []),
+    ]),
     '--', command, ...args,
   ];
   clearStaleUnits(profile.serverId, spawnSync);
@@ -423,6 +453,7 @@ function spawnOptions(baseOptions, profile) {
 module.exports = {
   requireLaunchIsolation,
   profileForServer,
+  systemdProperties,
   spawnOptions,
   wrapCommand,
   writeProfile,

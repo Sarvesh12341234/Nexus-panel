@@ -244,7 +244,15 @@ static int add_path_rule(int ruleset, const char *path, uint64_t rights, int req
  *  compatible - reduced read-only map (JVM-critical paths only), net-port lock
  *  core       - server-root write scope only, no net-port rule (kernel < 6.7 safe)
  */
-static int apply_landlock(const char *root, unsigned int port, int tier) {
+static int apply_landlock(
+  const char *root,
+  unsigned int port,
+  const unsigned int *tcp_ports,
+  size_t tcp_port_count,
+  const unsigned int *udp_ports,
+  size_t udp_port_count,
+  int tier
+) {
   int abi = landlock_abi();
   if (abi < 1) {
     fprintf(stderr, "[ASF] Landlock is unavailable on this kernel: %s\n", strerror(errno));
@@ -315,22 +323,36 @@ static int apply_landlock(const char *root, unsigned int port, int tier) {
   if (add_path_rule(ruleset, root, rights, 1) < 0) goto fail;
 
   if (net_supported) {
-    struct asf_net_port_attr tcp_rule = {
-      .allowed_access = LANDLOCK_ACCESS_NET_BIND_TCP,
-      .port = (int)port,
-    };
-    if (landlock_add(ruleset, LANDLOCK_RULE_NET_PORT, &tcp_rule) < 0) {
-      fprintf(stderr, "[ASF] cannot restrict TCP bind port %u: %s\n", port, strerror(errno));
-      goto fail;
+    for (size_t i = 0; i <= tcp_port_count; i++) {
+      unsigned int allowed_port = i == 0 ? port : tcp_ports[i - 1];
+      struct asf_net_port_attr tcp_rule = {
+        .allowed_access = LANDLOCK_ACCESS_NET_BIND_TCP,
+        .port = (int)allowed_port,
+      };
+      if (landlock_add(ruleset, LANDLOCK_RULE_NET_PORT, &tcp_rule) < 0) {
+        fprintf(stderr, "[ASF] cannot restrict TCP bind port %u: %s\n", allowed_port, strerror(errno));
+        goto fail;
+      }
     }
     if (abi >= 10) {
-      struct asf_net_port_attr udp_rule = {
+      /* Keep the primary port available for existing installations. */
+      struct asf_net_port_attr primary_udp_rule = {
         .allowed_access = LANDLOCK_ACCESS_NET_BIND_UDP,
         .port = (int)port,
       };
-      if (landlock_add(ruleset, LANDLOCK_RULE_NET_PORT, &udp_rule) < 0) {
+      if (landlock_add(ruleset, LANDLOCK_RULE_NET_PORT, &primary_udp_rule) < 0) {
         fprintf(stderr, "[ASF] cannot restrict UDP bind port %u: %s\n", port, strerror(errno));
         goto fail;
+      }
+      for (size_t i = 0; i < udp_port_count; i++) {
+        struct asf_net_port_attr udp_rule = {
+          .allowed_access = LANDLOCK_ACCESS_NET_BIND_UDP,
+          .port = (int)udp_ports[i],
+        };
+        if (landlock_add(ruleset, LANDLOCK_RULE_NET_PORT, &udp_rule) < 0) {
+          fprintf(stderr, "[ASF] cannot restrict UDP bind port %u: %s\n", udp_ports[i], strerror(errno));
+          goto fail;
+        }
       }
       struct asf_net_port_attr udp_ephemeral = {
         .allowed_access = LANDLOCK_ACCESS_NET_BIND_UDP,
@@ -664,6 +686,7 @@ static void close_inherited_fds(void) {
 static void usage(const char *program) {
   fprintf(stderr,
     "Usage: %s --root <absolute-server-root> [--port <1-65535>] [--uid <uid> --gid <gid>]\n"
+    "          [--tcp-port <1-65535>]... [--udp-port <1-65535>]...\n"
     "          [--tier maximum|compatible|core] -- <program> [arguments...]\n"
     "       %s --probe\n",
     program, program);
@@ -688,6 +711,10 @@ int main(int argc, char **argv) {
 
   const char *root_arg = NULL;
   unsigned int port = 0;
+  unsigned int tcp_ports[64];
+  unsigned int udp_ports[64];
+  size_t tcp_port_count = 0;
+  size_t udp_port_count = 0;
   uid_t target_uid = 0;
   gid_t target_gid = 0;
   int tier = 2; /* maximum */
@@ -706,6 +733,28 @@ int main(int argc, char **argv) {
         return 64;
       }
       port = (unsigned int)parsed;
+      continue;
+    }
+    if ((strcmp(argv[i], "--tcp-port") == 0 || strcmp(argv[i], "--udp-port") == 0) && i + 1 < argc) {
+      int is_tcp = strcmp(argv[i], "--tcp-port") == 0;
+      char *end = NULL;
+      unsigned long parsed = strtoul(argv[++i], &end, 10);
+      if (!end || *end != '\0' || parsed < 1 || parsed > 65535) {
+        fprintf(stderr, "[ASF] invalid additional bind port\n");
+        return 64;
+      }
+      unsigned int value = (unsigned int)parsed;
+      unsigned int *ports = is_tcp ? tcp_ports : udp_ports;
+      size_t *count = is_tcp ? &tcp_port_count : &udp_port_count;
+      int duplicate = value == port;
+      for (size_t p = 0; p < *count; p++) if (ports[p] == value) duplicate = 1;
+      if (!duplicate) {
+        if (*count >= 64) {
+          fprintf(stderr, "[ASF] too many additional bind ports\n");
+          return 64;
+        }
+        ports[(*count)++] = value;
+      }
       continue;
     }
     if ((strcmp(argv[i], "--uid") == 0 || strcmp(argv[i], "--gid") == 0) && i + 1 < argc) {
@@ -814,7 +863,7 @@ int main(int argc, char **argv) {
   setenv("TEMP", private_tmp, 1);
 
   apply_resource_limits(target_uid != 0);
-  int abi = apply_landlock(resolved_root, port, tier);
+  int abi = apply_landlock(resolved_root, port, tcp_ports, tcp_port_count, udp_ports, udp_port_count, tier);
   if (abi < 0) return 77;
   if (apply_seccomp(target_uid != 0, tier) < 0) return 77;
   close_inherited_fds();
