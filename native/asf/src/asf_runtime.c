@@ -249,10 +249,12 @@ static int apply_landlock(const char *root, unsigned int port, int tier) {
     fprintf(stderr, "[ASF] Landlock is unavailable on this kernel: %s\n", strerror(errno));
     return -1;
   }
-  if (abi < 3) {
-    fprintf(stderr, "[ASF] Landlock ABI 3+ required (host ABI: %d)\n", abi);
-    return -1;
-  }
+  /*
+   * Landlock ABI 1 is sufficient for the path-based filesystem boundary.
+   * Newer ABIs add rights (TRUNCATE, network ports, scopes) that are enabled
+   * below only when the running kernel supports them. Do not reject older
+   * kernels solely because those optional controls are unavailable.
+   */
   uint64_t rights = supported_rights(abi);
   int net_supported = (abi >= 4) && port > 0;
   struct asf_ruleset_attr ruleset_attr = {
@@ -669,13 +671,16 @@ static void usage(const char *program) {
 int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--probe") == 0) {
     int abi = landlock_abi();
-    if (abi < 3) return 2;
+    if (abi < 1) {
+      fprintf(stderr, "[ASF] Landlock is unavailable: %s\n", strerror(errno));
+      return 2;
+    }
 #ifdef ASF_HARDENED_BUILD
-    printf("asf-runtime=1 landlock-abi=%d seccomp=1 linkage=static-pie hardening=maximum overhead=exec\n", abi);
+    printf("asf-runtime=1 landlock-abi=%d fs-truncate=%d net-port=%d scopes=%d seccomp=1 linkage=static-pie hardening=maximum overhead=exec\n", abi, abi >= 3, abi >= 4, abi >= 6);
 #elif defined(ASF_STATIC_BUILD)
-    printf("asf-runtime=1 landlock-abi=%d seccomp=1 linkage=static-pie hardening=compatible overhead=exec\n", abi);
+    printf("asf-runtime=1 landlock-abi=%d fs-truncate=%d net-port=%d scopes=%d seccomp=1 linkage=static-pie hardening=compatible overhead=exec\n", abi, abi >= 3, abi >= 4, abi >= 6);
 #else
-    printf("asf-runtime=1 landlock-abi=%d seccomp=1 linkage=dynamic-pie overhead=exec\n", abi);
+    printf("asf-runtime=1 landlock-abi=%d fs-truncate=%d net-port=%d scopes=%d seccomp=1 linkage=dynamic-pie overhead=exec\n", abi, abi >= 3, abi >= 4, abi >= 6);
 #endif
     return 0;
   }
