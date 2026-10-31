@@ -30,6 +30,8 @@ const state = {
   consoleStreamServerId: null,
   consoleStreamReady: false,
   consoleLineCache: {},
+  consolePendingLines: [],
+  consoleRenderFrame: 0,
   presenceAt: 0,
   serverStatusSignature: '',
   playitTerminalTimer: null,
@@ -2460,7 +2462,7 @@ function openConsoleStream(server) {
     lines.push(line);
     while (lines.length > 600) lines.shift();
     state.consoleLineCache[server.id] = lines;
-    appendConsoleImmediate(line);
+    appendConsoleImmediate(line, server.id);
     elements.consoleBox.dataset.serverId = String(server.id);
     if (payload.status && server.status !== payload.status) {
       server.status = payload.status;
@@ -2603,11 +2605,28 @@ async function loadPluginMarketplace({ featured = false } = {}) {
   }
 }
 
-function appendConsoleImmediate(line) {
+function appendConsoleImmediate(line, serverId = state.activeServerId) {
   if (!elements.consoleBox || !line) return;
-  elements.consoleBox.dataset.rendered = '';
-  elements.consoleBox.insertAdjacentHTML('beforeend', `<div>${escapeHtml(formatConsoleLine(line))}</div>`);
-  if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
+  state.consolePendingLines.push({ line: String(line), serverId: Number(serverId) });
+  if (state.consolePendingLines.length > 600) state.consolePendingLines.splice(0, state.consolePendingLines.length - 600);
+  if (state.consoleRenderFrame) return;
+  const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
+  state.consoleRenderFrame = schedule(() => {
+    state.consoleRenderFrame = 0;
+    const pending = state.consolePendingLines.splice(0)
+      .filter((item) => item.serverId === Number(state.activeServerId));
+    if (!pending.length || !elements.consoleBox || state.activeView !== 'console') return;
+    const fragment = document.createDocumentFragment();
+    for (const item of pending) {
+      const row = document.createElement('div');
+      row.textContent = formatConsoleLine(item.line);
+      fragment.append(row);
+    }
+    elements.consoleBox.dataset.rendered = '';
+    elements.consoleBox.append(fragment);
+    while (elements.consoleBox.childElementCount > 600) elements.consoleBox.firstElementChild?.remove();
+    if (consoleStickToBottom) elements.consoleBox.scrollTop = elements.consoleBox.scrollHeight;
+  });
 }
 
 async function renderPresence(server) {

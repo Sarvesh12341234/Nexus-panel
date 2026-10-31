@@ -4,6 +4,8 @@ const path = require('node:path');
 const workspaceRoot = path.resolve(__dirname, '..');
 const serversRoot = path.join(workspaceRoot, 'servers');
 const softwareRoot = path.join(workspaceRoot, 'software');
+const serverRootCache = new Map();
+const SERVER_ROOT_CACHE_MS = 30000;
 
 /**
  * External data root resolution order:
@@ -109,6 +111,13 @@ function serverRootScore(root) {
 }
 
 function findServerRoot(server) {
+  const id = Number(server.id);
+  const explicitPath = String(server.server_path || '');
+  const cached = serverRootCache.get(id);
+  if (cached && cached.name === String(server.name || '') && cached.explicitPath === explicitPath
+    && cached.expiresAt > Date.now() && fs.existsSync(cached.root)) {
+    return cached.root;
+  }
   const candidates = [];
   if (server.server_path) {
     try {
@@ -124,7 +133,14 @@ function findServerRoot(server) {
     }
   }
   const unique = [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
-  return unique.sort((a, b) => serverRootScore(b) - serverRootScore(a))[0] || serverPath(server.id, server.name);
+  const root = unique.sort((a, b) => serverRootScore(b) - serverRootScore(a))[0] || serverPath(server.id, server.name);
+  serverRootCache.set(id, {
+    root,
+    name: String(server.name || ''),
+    explicitPath,
+    expiresAt: Date.now() + SERVER_ROOT_CACHE_MS,
+  });
+  return root;
 }
 
 function ensureServerDirs(server) {

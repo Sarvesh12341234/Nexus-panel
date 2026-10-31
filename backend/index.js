@@ -7227,15 +7227,19 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
 
   if (stats.isDirectory()) {
     const entries = (await fs.promises.readdir(target.absolute, { withFileTypes: true }))
-      .filter((entry) => isUserVisibleServerEntry(path.posix.join(target.relative.replaceAll('\\', '/'), entry.name)));
+      .filter((entry) => !entry.isSymbolicLink()
+        && isUserVisibleServerEntry(path.posix.join(target.relative.replaceAll('\\', '/'), entry.name)));
     const payloadEntries = await Promise.all(entries.map(async (entry) => {
-      const entryPath = path.join(target.absolute, entry.name);
-      const entryStats = await fs.promises.stat(entryPath).catch(() => null);
+      // Dirent already gives the directory type. Avoid an extra filesystem
+      // stat for every folder; only regular files need size/mtime metadata.
+      const entryStats = entry.isDirectory()
+        ? null
+        : await fs.promises.stat(path.join(target.absolute, entry.name)).catch(() => null);
       return {
         name: entry.name,
         type: entry.isDirectory() ? 'directory' : 'file',
         path: path.posix.join(target.relative.replaceAll('\\', '/'), entry.name).replace(/^\/+/, ''),
-        size: entryStats && entryStats.isFile() ? entryStats.size : 0,
+        size: entryStats?.isFile() ? entryStats.size : 0,
         modifiedAt: entryStats ? entryStats.mtimeMs : 0,
         ...(entry.isDirectory() ? { extension: '', kind: 'folder', mime: '', editable: false, previewable: false } : fileDescriptor(entry.name, entryStats?.size || 0)),
       };
