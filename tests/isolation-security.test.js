@@ -69,6 +69,12 @@ const syscallDiagnostics = diagnoseRuntime([
 ]);
 assert.ok(syscallDiagnostics.some((diagnostic) => diagnostic.id === 'syscall-filter'));
 assert.ok(!syscallDiagnostics.some((diagnostic) => diagnostic.id === 'java-heap'));
+const javaThreadDiagnostics = diagnoseRuntime([
+  'Failed to start thread "GC Thread#0" - pthread_create failed (EPERM)',
+  'Failed to create worker thread',
+]);
+assert.ok(javaThreadDiagnostics.some((diagnostic) => diagnostic.id === 'java-thread-policy'));
+assert.ok(!javaThreadDiagnostics.some((diagnostic) => diagnostic.id === 'java-heap'));
 const worldSettingsDiagnostics = diagnoseRuntime([
   'Unable to read or access the world gen settings file for dimension minecraft:overworld.',
 ]);

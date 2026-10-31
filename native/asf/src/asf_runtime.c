@@ -144,15 +144,16 @@
 #define ASF_TIER_MAXIMUM 1
 #endif
 
+/* seccomp_data.args uses raw syscall order; clone() flags are argument 0. */
 #if defined(__x86_64__)
 #define ASF_AUDIT_ARCH AUDIT_ARCH_X86_64
-#define ASF_CLONE_FLAGS_ARGUMENT 1
+#define ASF_CLONE_FLAGS_ARGUMENT 0
 #elif defined(__i386__)
 #define ASF_AUDIT_ARCH AUDIT_ARCH_I386
 #define ASF_CLONE_FLAGS_ARGUMENT 0
 #elif defined(__aarch64__)
 #define ASF_AUDIT_ARCH AUDIT_ARCH_AARCH64
-#define ASF_CLONE_FLAGS_ARGUMENT 1
+#define ASF_CLONE_FLAGS_ARGUMENT 0
 #elif defined(__arm__)
 #define ASF_AUDIT_ARCH AUDIT_ARCH_ARM
 #define ASF_CLONE_FLAGS_ARGUMENT 0
