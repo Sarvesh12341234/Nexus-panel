@@ -2790,6 +2790,7 @@ async function renderFiles() {
     return;
   }
   const query = fileSearchQuery.trim();
+  const editorWasOpen = Boolean(editor && !editor.hidden);
   if (query) {
     if (elements.fileEditor) elements.fileEditor.hidden = true;
     if (elements.filePreview) elements.filePreview.hidden = true;
@@ -2804,8 +2805,11 @@ async function renderFiles() {
   }
   if (fileSearchController) fileSearchController.abort();
   fileSearchController = query ? new AbortController() : null;
+  const currentFolderPath = editorWasOpen
+    ? filePath.split('/').slice(0, -1).join('/')
+    : filePath;
   const searchScopePath = fileSearchScope === 'folder'
-    ? (filePath ? (filePath.split('/').slice(0, -1).join('/') || '') : '')
+    ? currentFolderPath
     : '';
   const endpoint = query
     ? `/api/servers/${server.id}/files/search?q=${encodeURIComponent(query)}&mode=${encodeURIComponent(fileSearchMode)}&path=${encodeURIComponent(searchScopePath)}`
