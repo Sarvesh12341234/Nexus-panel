@@ -2898,6 +2898,12 @@ async function renderFiles() {
 
 function fileEntryMarkup(entry, selectedPaths) {
   const matches = Array.isArray(entry.matches) ? entry.matches : [];
+  // Search returns paths relative to the server root so actions can use them
+  // directly. Show the path relative to the current folder, like normal browse
+  // mode, and never expose the internal server directory identifier in UI.
+  const displayPath = fileSearchQuery.trim()
+    ? String(entry.path || '').split('/').filter(Boolean).slice(-2).join('/')
+    : String(entry.path || '');
   const matchCount = Number(entry.matchCount || matches.length);
   const matchSummary = matches.length
     ? `<span class="file-match-summary">${matchCount} match${matchCount === 1 ? '' : 'es'} · line ${matches[0].line}</span>`
@@ -2917,7 +2923,7 @@ function fileEntryMarkup(entry, selectedPaths) {
       <span class="file-icon">${fileTypeIcon(entry)}</span>
       <span class="file-main"><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === 'directory' ? 'Folder' : `${escapeHtml(fileTypeLabel(entry))} · ${formatBytes(entry.size)}`}</small>${matchSummary}</span>
     </button>
-    <div class="file-meta"><code>${escapeHtml(entry.path)}</code><time>${entry.modifiedAt ? escapeHtml(formatPanelDate(entry.modifiedAt)) : ''}</time>${matchList}</div>
+    <div class="file-meta"><code title="${escapeHtml(displayPath)}">${escapeHtml(displayPath)}</code><time>${entry.modifiedAt ? escapeHtml(formatPanelDate(entry.modifiedAt)) : ''}</time>${matchList}</div>
     <button class="file-context-trigger" type="button" data-action="file-show-context" data-file-path="${escapeHtml(entry.path)}" aria-label="More actions for ${escapeHtml(entry.name)}" aria-haspopup="menu" aria-expanded="false">...</button>
   </div>`;
 }
