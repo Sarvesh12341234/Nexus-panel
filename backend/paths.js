@@ -60,14 +60,36 @@ function ensureWritableDir(directory) {
 ensureWritableDir(serversRoot);
 ensureWritableDir(softwareRoot);
 ensureWritableDir(backupsRoot);
-for (const legacyRoot of [legacyBackupsRoot, legacyBackupFolderRoot]) {
-  if (path.resolve(legacyRoot) !== path.resolve(backupsRoot) && fs.existsSync(legacyRoot)) {
-    try {
-      fs.cpSync(legacyRoot, backupsRoot, { recursive: true, force: false, errorOnExist: false });
-    } catch (error) {
-      console.error(`[NexusPanel] Legacy backup migration skipped (${error.code || error.message}).`);
+let legacyBackupMigrationPromise = null;
+
+function migrateLegacyBackups() {
+  if (legacyBackupMigrationPromise) return legacyBackupMigrationPromise;
+  const marker = path.join(externalDataRoot, '.legacy-backups-migrated');
+  if (fs.existsSync(marker)) return Promise.resolve(false);
+
+  legacyBackupMigrationPromise = (async () => {
+    let foundLegacyRoot = false;
+    for (const legacyRoot of [legacyBackupsRoot, legacyBackupFolderRoot]) {
+      if (path.resolve(legacyRoot) === path.resolve(backupsRoot) || !fs.existsSync(legacyRoot)) continue;
+      foundLegacyRoot = true;
+      await fs.promises.cp(legacyRoot, backupsRoot, {
+        recursive: true,
+        force: false,
+        errorOnExist: false,
+      });
     }
-  }
+    if (foundLegacyRoot) {
+      await fs.promises.writeFile(marker, `${Date.now()}\n`, { mode: 0o600 });
+      console.info('[NexusPanel] Legacy backups migrated to external storage.');
+    }
+    return foundLegacyRoot;
+  })().catch((error) => {
+    console.error(`[NexusPanel] Legacy backup migration incomplete; it will retry after the next start (${error.code || error.message}).`);
+    return false;
+  }).finally(() => {
+    legacyBackupMigrationPromise = null;
+  });
+  return legacyBackupMigrationPromise;
 }
 
 function slug(value) {
@@ -181,6 +203,7 @@ module.exports = {
   externalDataRoot,
   ensureServerDirs,
   findServerRoot,
+  migrateLegacyBackups,
   pluginTarget,
   serverPath,
   serversRoot,

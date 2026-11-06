@@ -19,7 +19,7 @@ const { audit: auditPermissions, repair: repairPermissions } = require('./permis
 const worldConverter = require('./world_converter');
 const { getUserTimezone, setUserTimezone, getAllTimezones } = require('./timezone');
 const { applyTweaks, optimizerStatus, planCommands } = require('./optimizer');
-const { assertInside, backupsRoot, displayPath, ensureServerDirs, findServerRoot, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
+const { assertInside, backupsRoot, displayPath, ensureServerDirs, findServerRoot, migrateLegacyBackups, pluginTarget, serverPath, serversRoot, softwareRoot } = require('./paths');
 const { clearSoftwareVersionCache, defaultSoftware, findSoftware, installedJavaMajor, pluginKindForFile, requiredJavaMajorForMinecraftVersion, resolveDownload, softwareCatalog, softwareVersions } = require('./software');
 const { builtinTemplates, findTemplate, nexuExample, normalizeNexuTemplate } = require('./templates');
 const { kernelStatus, nativeStatus, profileForServer, writeProfile } = require('./asf');
@@ -8179,6 +8179,7 @@ async function start() {
   setInterval(refreshWakeWatchers, 15000).unref();
   app.listen(port, () => {
     console.log(`NexusPanel running at http://localhost:${port}`);
+    void migrateLegacyBackups();
   });
 }
 
