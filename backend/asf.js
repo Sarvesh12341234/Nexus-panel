@@ -106,7 +106,11 @@ function profileForServer(server, nexu = null) {
       protectSystem: 'strict',
       protectProc: 'invisible-when-supported',
       capabilityBoundingSet: advancedIsolation ? '' : 'systemd-default',
-      addressFamilies: advancedIsolation ? ['AF_INET', 'AF_INET6'] : ['systemd-default'],
+    // AF_NETLINK is required by Linux getifaddrs() implementations for
+    // interface discovery. In particular, Geyser NetherNet/libdatachannel
+    // needs this to gather WebRTC ICE host candidates. It does not grant
+    // another IP transport or expand the assigned-port bind policy.
+    addressFamilies: advancedIsolation ? ['AF_INET', 'AF_INET6', 'AF_NETLINK'] : ['systemd-default'],
       systemCallFilter: advancedIsolation ? ['@system-service', '~@mount', '~@swap', '~@reboot', '~@raw-io', '~@privileged'] : ['systemd-default'],
     },
   };
@@ -136,7 +140,7 @@ function systemdProperties(profile, status, tier = 'maximum') {
     'UMask=0077',
     'LimitCORE=0',
     'CapabilityBoundingSet=',
-    'RestrictAddressFamilies=AF_INET AF_INET6',
+    'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK',
     'KillMode=control-group',
     'OOMScoreAdjust=500',
   ];

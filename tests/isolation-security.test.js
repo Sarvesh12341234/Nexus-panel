@@ -38,6 +38,7 @@ const gameUnitProperties = systemdProperties({
   bindPorts: [{ port: 19132, protocol: 'both' }],
 }, { systemdVersion: 249, controllers: [], cgroupV2: true }, 'maximum');
 assert.ok(gameUnitProperties.includes('SystemCallErrorNumber=EPERM'));
+assert.ok(gameUnitProperties.includes('RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK'));
 assert.ok(gameUnitProperties.includes('SocketBindAllow=udp:19132'));
 assert.ok(gameUnitProperties.includes('SocketBindAllow=tcp:19132'));
 assert.throws(
