@@ -7159,21 +7159,29 @@ app.get('/api/servers/:id/files', requirePermission(capabilities.FILES_MANAGE, p
     const entries = (await fs.promises.readdir(target.absolute, { withFileTypes: true }))
       .filter((entry) => !entry.isSymbolicLink()
         && isUserVisibleServerEntry(path.posix.join(target.relative.replaceAll('\\', '/'), entry.name)));
-    const payloadEntries = await Promise.all(entries.map(async (entry) => {
-      // Dirent already gives the directory type. Avoid an extra filesystem
-      // stat for every folder; only regular files need size/mtime metadata.
-      const entryStats = entry.isDirectory()
-        ? null
-        : await fs.promises.stat(path.join(target.absolute, entry.name)).catch(() => null);
-      return {
-        name: entry.name,
-        type: entry.isDirectory() ? 'directory' : 'file',
-        path: path.posix.join(target.relative.replaceAll('\\', '/'), entry.name).replace(/^\/+/, ''),
-        size: entryStats?.isFile() ? entryStats.size : 0,
-        modifiedAt: entryStats ? entryStats.mtimeMs : 0,
-        ...(entry.isDirectory() ? { extension: '', kind: 'folder', mime: '', editable: false, previewable: false } : fileDescriptor(entry.name, entryStats?.size || 0)),
-      };
-    }));
+    const payloadEntries = [];
+    // A large plugin folder can have thousands of files. Starting every stat
+    // simultaneously floods libuv's small filesystem pool and stalls unrelated
+    // panel work. Keep metadata I/O bounded while preserving the full listing.
+    const metadataBatchSize = 48;
+    for (let offset = 0; offset < entries.length; offset += metadataBatchSize) {
+      const batch = entries.slice(offset, offset + metadataBatchSize);
+      payloadEntries.push(...await Promise.all(batch.map(async (entry) => {
+        // Dirent already gives the directory type. Avoid an extra filesystem
+        // stat for every folder; only regular files need size/mtime metadata.
+        const entryStats = entry.isDirectory()
+          ? null
+          : await fs.promises.stat(path.join(target.absolute, entry.name)).catch(() => null);
+        return {
+          name: entry.name,
+          type: entry.isDirectory() ? 'directory' : 'file',
+          path: path.posix.join(target.relative.replaceAll('\\', '/'), entry.name).replace(/^\/+/, ''),
+          size: entryStats?.isFile() ? entryStats.size : 0,
+          modifiedAt: entryStats ? entryStats.mtimeMs : 0,
+          ...(entry.isDirectory() ? { extension: '', kind: 'folder', mime: '', editable: false, previewable: false } : fileDescriptor(entry.name, entryStats?.size || 0)),
+        };
+      })));
+    }
     return res.json({
       path: target.relative,
       type: 'directory',

@@ -1211,6 +1211,8 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   color: var(--text);
   text-align: left;
   contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 74px;
 }
 
 .file-row:hover {
