@@ -3163,14 +3163,28 @@ async function renderAiChat() {
   if (serial !== aiRenderSerial || state.activeView !== 'ai') return;
   state.aiConfig = config;
   if (!config.expiresAt || config.expiresAt <= Date.now()) {
-    panel.innerHTML = `<div class="section-head"><div><p class="eyebrow">Private session</p><h2>Unlock AI chat</h2></div></div><p class="muted">${config.passwordConfigured ? 'Enter your AI password.' : 'Choose an AI password for future sessions.'} The session and history expire after 10 minutes.</p><form id="aiUnlockForm" class="ai-form"><label>AI password <input name="password" type="password" minlength="12" maxlength="200" autocomplete="current-password" required></label><button type="submit">${config.passwordConfigured ? 'Unlock' : 'Set password and unlock'}</button></form>`;
+    panel.innerHTML = `<div class="ai-chat-shell"><div class="ai-chat-header"><div><p class="eyebrow">Private session</p><h2>Unlock AI chat</h2></div></div><div class="ai-chat-body"><p class="muted">${config.passwordConfigured ? 'Enter your AI password.' : 'Choose an AI password for future sessions.'} The session and history expire after 10 minutes.</p><form id="aiUnlockForm" class="ai-composer"><input name="password" type="password" minlength="12" maxlength="200" autocomplete="current-password" required placeholder="AI password"><button type="submit">${config.passwordConfigured ? 'Unlock' : 'Set password and unlock'}</button></form></div></div>`;
     return;
   }
   if (!server) { panel.innerHTML = '<p class="empty-state">Create or select a server to use AI chat.</p>'; return; }
   const history = await api(`/api/ai/history?serverId=${encodeURIComponent(server.id)}`);
   if (serial !== aiRenderSerial || state.activeView !== 'ai' || activeServer()?.id !== server.id) return;
-  panel.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHtml(config.provider)} · ${escapeHtml(config.model)}</p><h2>AI chat</h2><p class="muted">Selected server: ${escapeHtml(server.name)} · Session expires at ${escapeHtml(new Date(history.expiresAt).toLocaleTimeString())}</p></div><button type="button" class="secondary" data-action="ai-lock">Lock and clear</button></div><p class="muted">${config.fullAccess ? "Full access is enabled: the assistant can run shell commands with panel service privileges across the host." : "The assistant can read server files and logs, edit text files while stopped, send server console commands, and run limited diagnostics."} Content used in the chat is sent to your provider.</p><div class="ai-messages" id="aiMessages">${history.messages.length ? history.messages.map((entry) => `<article class="ai-message ${entry.role === 'user' ? 'is-user' : 'is-assistant'}"><strong>${entry.role === 'user' ? 'You' : 'AI'}</strong><div>${escapeHtml(entry.content)}</div>${entry.steps?.length ? `<details><summary>${entry.steps.length} operation(s)</summary><pre>${escapeHtml(entry.steps.map((step) => `${step.tool}: ${step.result}`).join('\n'))}</pre></details>` : ''}</article>`).join('') : '<p class="empty-state">Ask about this server or request a repair.</p>'}</div><form id="aiChatForm" class="ai-form"><label>Message <textarea name="message" rows="3" maxlength="12000" required placeholder="What would you like to do?"></textarea></label><button type="submit">Send</button></form>`;
+  const bubbles = history.messages.length ? history.messages.map((entry) => {
+    const isUser = entry.role === 'user';
+    const steps = entry.steps?.length ? `<details class="ai-steps"><summary>${entry.steps.length} operation(s)</summary><pre>${escapeHtml(entry.steps.map((step) => `${step.tool}: ${step.result}`).join('\n'))}</pre></details>` : '';
+    return `<div class="ai-row ${isUser ? 'is-user' : 'is-assistant'}"><span class="ai-avatar">${isUser ? 'You' : 'AI'}</span><div class="ai-bubble"><div class="ai-bubble-text">${escapeHtml(entry.content)}</div>${steps}</div></div>`;
+  }).join('') : '<div class="ai-empty"><p class="empty-state">Ask about this server or request a repair.</p></div>';
+  panel.innerHTML = `<div class="ai-chat-shell"><div class="ai-chat-header"><div><p class="eyebrow">${escapeHtml(config.provider)} · ${escapeHtml(config.model)}</p><h2>AI chat</h2><p class="muted">${escapeHtml(server.name)} · expires ${escapeHtml(new Date(history.expiresAt).toLocaleTimeString())}</p></div><button type="button" class="secondary" data-action="ai-lock">Lock and clear</button></div><p class="ai-notice muted">${config.fullAccess ? "Full access is enabled: the assistant can run shell commands with panel service privileges across the host." : "The assistant can read server files and logs, edit text files while stopped, send server console commands, and run limited diagnostics."} Content used in the chat is sent to your provider.</p><div class="ai-messages" id="aiMessages">${bubbles}</div><form id="aiChatForm" class="ai-composer"><textarea name="message" rows="1" maxlength="12000" required placeholder="Message AI… (Enter to send, Shift+Enter for a new line)"></textarea><button type="submit" aria-label="Send message">Send</button></form></div>`;
   const messages = panel.querySelector('#aiMessages'); if (messages) messages.scrollTop = messages.scrollHeight;
+  const composer = panel.querySelector('#aiChatForm textarea');
+  if (composer) {
+    const grow = () => { composer.style.height = 'auto'; composer.style.height = `${Math.min(160, composer.scrollHeight)}px`; };
+    composer.addEventListener('input', grow);
+    composer.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); composer.form.requestSubmit(); }
+    });
+    grow();
+  }
   clearTimeout(aiExpiryTimer);
   aiExpiryTimer = setTimeout(() => { if (state.activeView === 'ai') renderAiChat().catch((error) => showToast(error.message)); }, Math.max(0, history.expiresAt - Date.now()) + 50);
 }
