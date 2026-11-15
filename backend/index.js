@@ -126,6 +126,7 @@ app.use('/api/network/upload-test', express.raw({ type: 'application/octet-strea
 // captured as a buffer before JSON parsing — and they are exempt from the
 // CSRF header gate because Tebex's servers cannot send our custom header.
 app.use('/api/tebex/webhook/:serverId', express.raw({ type: '*/*', limit: '256kb' }));
+app.use('/api/ai/chat', express.json({ limit: '8mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(performanceMonitor.middleware());
 app.use((req, res, next) => {

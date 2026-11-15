@@ -124,7 +124,18 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
     if (session.busy) return res.status(409).json({ error: 'An AI request is already running.' });
     const message = String(req.body.message || '').trim();
     const attachedImage = req.body.attachedImage || null;
-    const attachedImageName = req.body.attachedImageName || null;
+    let imageUrl = null;
+    if (attachedImage) {
+      if (typeof attachedImage !== 'string' || attachedImage.length > Math.ceil(5 * 1024 * 1024 / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(attachedImage)) return res.status(400).json({ error: 'Invalid image or image exceeds 5 MB.' });
+      const bytes = Buffer.from(attachedImage, 'base64');
+      if (bytes.length > 5 * 1024 * 1024) return res.status(400).json({ error: 'Image exceeds 5 MB.' });
+      const mime = bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ? 'image/png'
+        : bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex')) ? 'image/jpeg'
+          : /^GIF8[79]a$/.test(bytes.subarray(0, 6).toString('ascii')) ? 'image/gif'
+            : bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP' ? 'image/webp' : null;
+      if (!mime) return res.status(400).json({ error: 'Use a PNG, JPEG, GIF, or WebP image.' });
+      imageUrl = `data:${mime};base64,${attachedImage}`;
+    }
     if (!message && !attachedImage) return res.status(400).json({ error: 'Enter a message or attach an image.' });
     if (message.length > 12000) return res.status(400).json({ error: 'Enter a message of up to 12,000 characters.' });
     let server; try { server = getServer(req.body.serverId, req.user); } catch (e) { return next(e); }
@@ -135,7 +146,7 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
     const originalLength = history.messages.length;
     session.busy = true;
     const userContent = attachedImage
-      ? [{ type: 'text', text: message || 'Analyze this image.' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${attachedImage}` } }]
+      ? [{ type: 'text', text: message || 'Analyze this image.' }, { type: 'image_url', image_url: { url: imageUrl } }]
       : message;
     history.messages.push({ role: 'user', content: userContent });
     try {
@@ -150,7 +161,12 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
         const isNvidia = settings.provider === 'nvidia';
         let payload;
         if (anthropic) {
-          payload = { model: settings.model, max_tokens: 2048, system, messages: history.messages, tools: availableTools };
+          const messages = history.messages.map((msg) => ({ ...msg, content: Array.isArray(msg.content) ? msg.content.map((part) => {
+            if (part.type !== 'image_url') return part;
+            const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/.exec(part.image_url?.url || '');
+            return match ? { type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } } : part;
+          }) : msg.content }));
+          payload = { model: settings.model, max_tokens: 2048, system, messages, tools: availableTools };
         } else if (isNvidia) {
           // NVIDIA Nemotron vision: convert image_url parts to the format they expect
           const messages = [{ role: 'system', content: system }, ...history.messages].map((msg) => {
@@ -197,7 +213,7 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
       }
       if (!finalText) { finalText = 'The operation limit was reached. Ask me to continue if needed.'; history.messages.push({ role: 'assistant', content: finalText }); }
       if (active(req) !== session) throw new Error('AI session expired.');
-      history.visible.push({ role: 'user', content: message }, { role: 'assistant', content: finalText, steps, thinking, images: attachedImage ? [attachedImage] : undefined });
+      history.visible.push({ role: 'user', content: message, images: imageUrl ? [imageUrl] : undefined }, { role: 'assistant', content: finalText, steps, thinking });
       if (history.visible.length > 60) history.visible.splice(0, history.visible.length - 60);
       session.histories.set(String(server.id), history);
       res.json({ reply: finalText, steps, thinking, expiresAt: session.expiresAt });

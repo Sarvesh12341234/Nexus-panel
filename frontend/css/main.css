@@ -1190,20 +1190,29 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 .ai-images img { max-width: 180px; max-height: 180px; border-radius: 8px; border: 1px solid var(--line); }
 .ai-empty { display: grid; place-items: center; min-height: 180px; }
 .ai-compose-toolbar { display: flex; align-items: center; gap: .5rem; padding: .3rem .4rem 0; }
-.ai-attach { background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: .3rem .5rem; color: var(--muted); cursor: pointer; font-size: 1.1rem; }
+.ai-attach { width: auto; flex: 0 0 auto; background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: .3rem .5rem; color: var(--muted); cursor: pointer; font-size: 1.1rem; }
 .ai-attach:hover { border-color: var(--cyan); color: var(--cyan); }
 .ai-model-badge { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .ai-composer { display: flex; flex-direction: column; gap: .4rem; padding: .55rem; border: 1px solid var(--line); border-radius: 18px; background: var(--panel-2); }
 .ai-composer:focus-within { border-color: rgba(94,216,255,.55); box-shadow: 0 0 0 3px rgba(94,216,255,.12); }
 .ai-composer textarea { width: 100%; min-height: 2.6rem; max-height: 160px; resize: none; border: 0; background: transparent; color: var(--text); outline: none; padding: .45rem .35rem; line-height: 1.45; }
 .ai-composer input { min-height: 2.6rem; border: 0; background: transparent; color: var(--text); outline: none; padding: .45rem .35rem; }
-.ai-composer button { align-self: flex-end; min-height: 2.6rem; padding: 0 1.1rem; border-radius: 12px; }
+.ai-composer > button[type="submit"] { align-self: flex-end; min-height: 2.6rem; padding: 0 1.1rem; border-radius: 12px; }
+.ai-compose-toolbar, .ai-model-badge, .ai-chat-header > div { min-width: 0; overflow-wrap: anywhere; }
+.ai-attachment-status { font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
 .ai-chat-body { display: flex; flex-direction: column; gap: .7rem; padding: .2rem .1rem; }
 .ai-unlock-form { display: flex; flex-direction: column; gap: .7rem; padding: .8rem; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); }
 .ai-unlock-form label { display: flex; flex-direction: column; gap: .4rem; font-size: .85rem; color: var(--muted); }
 .ai-unlock-form input { width: 100%; min-height: 2.8rem; font-size: 1rem; }
 .ai-unlock-form button { width: 100%; min-height: 2.8rem; }
-@media (max-width: 700px) { .ai-messages { max-height: 52dvh; } .ai-row { max-width: 96%; } .ai-compose-toolbar { flex-wrap: wrap; justify-content: space-between; } .ai-composer { display: flex !important; flex-direction: column !important; gap: .5rem !important; } .ai-composer textarea { width: 100% !important; min-height: 3rem !important; font-size: 1rem !important; } .ai-composer button { width: 100% !important; min-height: 3rem !important; font-size: 1rem !important; align-self: stretch !important; } .ai-compose-toolbar { display: flex !important; flex-wrap: wrap !important; justify-content: space-between !important; gap: .5rem !important; } }
+@media (max-width: 700px) {
+  .ai-messages { min-height: 160px; max-height: 44dvh; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .ai-row { max-width: 100%; min-width: 0; }
+  .ai-compose-toolbar { flex-wrap: wrap; gap: .5rem; }
+  .ai-composer textarea { min-height: 3rem; font-size: 1rem; }
+  .ai-composer > button[type="submit"] { width: 100%; min-height: 3rem; font-size: 1rem; align-self: stretch; }
+  .ai-attach { min-width: 44px; min-height: 44px; }
+}
 
 .file-list.is-dropping {
   outline: 2px dashed rgba(94, 216, 255, 0.72);

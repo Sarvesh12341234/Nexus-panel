@@ -80,6 +80,16 @@ const { runFullTerminal } = require('../backend/ai_full_terminal');
       assert.ok(providerCalls[0].url.includes(provider === 'nvidia' ? 'nvidia' : 'anthropic'));
       if (provider === 'anthropic') assert.equal(providerCalls[1].body.messages.at(-1).content[0].type, 'tool_result');
       else assert.equal(providerCalls[1].body.messages.at(-1).role, 'tool');
+      const jpeg = Buffer.from('ffd8ffe000000000', 'hex').toString('base64');
+      providerCalls = []; round = 0;
+      assert.equal((await request('/chat', 'POST', { serverId: 42, message: '', attachedImage: jpeg })).status, 200);
+      const imageMessage = providerCalls[0].body.messages.find((item) => Array.isArray(item.content) && item.content.some((part) => part.type === (provider === 'anthropic' ? 'image' : 'image_url')));
+      const image = imageMessage.content.find((part) => part.type === (provider === 'anthropic' ? 'image' : 'image_url'));
+      if (provider === 'anthropic') assert.equal(image.source.media_type, 'image/jpeg');
+      else assert.match(image.image_url.url, /^data:image\/jpeg;base64,/);
+      const history = (await request('/history?serverId=42')).body.messages;
+      assert.match(history.at(-2).images[0], /^data:image\/jpeg;base64,/);
+      assert.equal((await request('/chat', 'POST', { serverId: 42, message: '', attachedImage: 'invalid!' })).status, 400);
     }
     assert.equal((await request('/settings', 'PUT', { provider: 'anthropic', model: 'model-test', enabled: false })).status, 200);
     assert.equal((await request('/history?serverId=42')).status, 401);

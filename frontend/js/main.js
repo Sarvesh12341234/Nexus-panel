@@ -3183,10 +3183,28 @@ function applyFileManagerLayout() {
 let aiRenderSerial = 0;
 let aiExpiryTimer = 0;
 
-async function renderAiChat() {
+function updateAiAttachment(textarea) {
+  const form = textarea?.form;
+  if (!form) return;
+  form.querySelector('.ai-attachment-status')?.remove();
+  if (!textarea.dataset.attachedImage) { textarea.required = true; return; }
+  textarea.required = false;
+  const status = document.createElement('div');
+  status.className = 'ai-attachment-status';
+  status.textContent = `Attached: ${textarea.dataset.attachedImageName || 'image'} `;
+  const remove = document.createElement('button');
+  remove.type = 'button'; remove.className = 'secondary'; remove.textContent = 'Remove';
+  remove.addEventListener('click', () => { delete textarea.dataset.attachedImage; delete textarea.dataset.attachedImageName; updateAiAttachment(textarea); });
+  status.appendChild(remove); form.querySelector('.ai-compose-toolbar').after(status);
+}
+
+async function renderAiChat({ force = false } = {}) {
   const panel = document.querySelector('#aiChatPanel');
   const server = activeServer();
   if (!panel) return;
+  const previous = panel.querySelector('#aiChatForm textarea');
+  if (!force && previous && panel.dataset.aiServer === String(server?.id) && Number(panel.dataset.aiExpiresAt) > Date.now() && (document.activeElement === previous || previous.form.dataset.aiPending === '1')) return;
+  const draft = previous && panel.dataset.aiServer === String(server?.id) ? { text: previous.value, image: previous.dataset.attachedImage, name: previous.dataset.attachedImageName } : null;
   const serial = ++aiRenderSerial;
   const config = await api('/api/ai/settings');
   if (serial !== aiRenderSerial || state.activeView !== 'ai') return;
@@ -3206,22 +3224,26 @@ async function renderAiChat() {
       thinkingHtml = `<details class="ai-thinking" open><summary>💭 Thinking…</summary><div class="ai-thinking-content">${escapeHtml(entry.thinking)}</div></details>`;
     }
     const steps = entry.steps?.length ? `<details class="ai-steps"><summary>${entry.steps.length} tool call${entry.steps.length === 1 ? '' : 's'}</summary><div class="ai-steps-list">${entry.steps.map((step) => `<div class="ai-step"><span class="ai-step-tool">${escapeHtml(step.tool)}</span><pre class="ai-step-result">${escapeHtml(step.result)}</pre></div>`).join('')}</div></details>` : '';
-    const images = entry.images?.length ? `<div class="ai-images">${entry.images.map((img) => `<img src="data:image/png;base64,${img}" alt="attached" loading="lazy">`).join('')}</div>` : '';
+    const images = entry.images?.length ? `<div class="ai-images">${entry.images.filter((img) => /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(img)).map((img) => `<img src="${escapeHtml(img)}" alt="Attached image" loading="lazy">`).join('')}</div>` : '';
     return `<div class="ai-row ${isUser ? 'is-user' : 'is-assistant'}"><span class="ai-avatar">${isUser ? 'You' : 'AI'}</span><div class="ai-bubble">${thinkingHtml}<div class="ai-bubble-text">${escapeHtml(content)}</div>${images}${steps}</div></div>`;
   }).join('') : '<div class="ai-empty"><p class="empty-state">Ask about this server or request a repair.</p></div>';
   panel.innerHTML = `<div class="ai-chat-shell"><div class="ai-chat-header"><div><p class="eyebrow">${escapeHtml(config.provider)} · ${escapeHtml(config.model)}</p><h2>AI chat</h2><p class="muted">${escapeHtml(server.name)} · expires ${escapeHtml(new Date(history.expiresAt).toLocaleTimeString())}</p></div><button type="button" class="secondary" data-action="ai-lock">Lock and clear</button></div><p class="ai-notice muted">${config.fullAccess ? "Full access is enabled: the assistant can run shell commands with panel service privileges across the host." : "The assistant can read server files and logs, edit text files while stopped, send server console commands, and run limited diagnostics."} Content used in the chat is sent to your provider.</p><div class="ai-messages" id="aiMessages">${bubbles}</div><form id="aiChatForm" class="ai-composer"><div class="ai-compose-toolbar"><button type="button" class="ai-attach" data-action="ai-attach-image" aria-label="Attach image">📷</button><span class="ai-model-badge">${escapeHtml(config.provider)} · ${escapeHtml(config.model)}</span></div><textarea name="message" rows="1" maxlength="12000" required placeholder="Message AI… (Enter to send, Shift+Enter for a new line)"></textarea><button type="submit" aria-label="Send message">Send</button></form></div>`;
   const messages = panel.querySelector('#aiMessages'); if (messages) messages.scrollTop = messages.scrollHeight;
+  panel.dataset.aiServer = String(server.id);
+  panel.dataset.aiExpiresAt = String(history.expiresAt);
   const composer = panel.querySelector('#aiChatForm textarea');
   if (composer) {
+    if (draft) { composer.value = draft.text; if (draft.image) { composer.dataset.attachedImage = draft.image; composer.dataset.attachedImageName = draft.name || 'image'; composer.required = false; } }
+    updateAiAttachment(composer);
     const grow = () => { composer.style.height = 'auto'; composer.style.height = `${Math.min(160, composer.scrollHeight)}px`; };
     composer.addEventListener('input', grow);
     composer.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); composer.form.requestSubmit(); }
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && window.matchMedia('(hover: hover) and (pointer: fine)').matches) { event.preventDefault(); composer.form.requestSubmit(); }
     });
     grow();
   }
   clearTimeout(aiExpiryTimer);
-  aiExpiryTimer = setTimeout(() => { if (state.activeView === 'ai') renderAiChat().catch((error) => showToast(error.message)); }, Math.max(0, history.expiresAt - Date.now()) + 50);
+  aiExpiryTimer = setTimeout(() => { if (state.activeView === 'ai') renderAiChat({ force: true }).catch((error) => showToast(error.message)); }, Math.max(0, history.expiresAt - Date.now()) + 50);
 }
 
 function renderSettings() {
@@ -3443,22 +3465,31 @@ document.addEventListener('submit', async (event) => {
       const attachedImage = textarea.dataset.attachedImage || null;
       const attachedImageName = textarea.dataset.attachedImageName || null;
       if (button) button.textContent = 'Thinking…';
+      form.dataset.aiPending = '1';
+      textarea.readOnly = true;
+      const attachButton = form.querySelector('[data-action="ai-attach-image"]');
+      if (attachButton) attachButton.disabled = true;
       await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
+      textarea.value = '';
       delete textarea.dataset.attachedImage;
       delete textarea.dataset.attachedImageName;
-      if (state.activeView === 'ai' && activeServer()?.id === server.id) await renderAiChat();
+      if (state.activeView === 'ai' && activeServer()?.id === server.id) await renderAiChat({ force: true });
     }
   } catch (error) {
     showToast(error.message);
-    if (error.status === 401 && form.id === 'aiChatForm') renderAiChat().catch(() => {});
+    if (error.status === 401 && form.id === 'aiChatForm') renderAiChat({ force: true }).catch(() => {});
   } finally {
     if (button) { button.disabled = false; if (form.id === 'aiChatForm') button.textContent = 'Send'; }
+    if (form.id === 'aiChatForm' && form.elements.message) {
+      delete form.dataset.aiPending; form.elements.message.readOnly = false;
+      const attachButton = form.querySelector('[data-action="ai-attach-image"]'); if (attachButton) attachButton.disabled = false;
+    }
   }
 });
 
 document.addEventListener('click', async (event) => {
   if (!event.target.closest('[data-action="ai-lock"]')) return;
-  try { await api('/api/ai/lock', { method: 'POST', body: '{}' }); await renderAiChat(); }
+  try { await api('/api/ai/lock', { method: 'POST', body: '{}' }); await renderAiChat({ force: true }); }
   catch (error) { showToast(error.message); }
 });
 
@@ -3469,12 +3500,13 @@ document.addEventListener('click', async (event) => {
   if (!form) return;
   const input = document.createElement('input');
   input.type = 'file';
-  input.accept = 'image/*';
+  input.accept = 'image/png,image/jpeg,image/gif,image/webp';
   input.style.display = 'none';
   input.addEventListener('change', async () => {
     const file = input.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith('image/')) { showToast('Please select an image file.'); return; }
+    input.remove();
+    if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) { showToast('Select a PNG, JPEG, GIF, or WebP image.'); return; }
     if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5 MB.'); return; }
     const base64 = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -3483,15 +3515,14 @@ document.addEventListener('click', async (event) => {
       reader.readAsDataURL(file);
     });
     const textarea = form.querySelector('textarea[name="message"]');
-    const marker = `\n![attached image](${file.name})\n`;
-    textarea.value += marker;
     textarea.dataset.attachedImage = base64;
     textarea.dataset.attachedImageName = file.name;
+    updateAiAttachment(textarea);
     textarea.dispatchEvent(new Event('input'));
   });
   document.body.appendChild(input);
   input.click();
-  document.body.removeChild(input);
+  input.addEventListener('cancel', () => input.remove(), { once: true });
 });
 
 document.addEventListener('paste', async (event) => {
@@ -3514,10 +3545,10 @@ document.addEventListener('paste', async (event) => {
         reader.onerror = reject;
         reader.readAsDataURL(file);
       });
-      const marker = `\n![attached image](${file.name || 'pasted-image.png'})\n`;
-      textarea.value += marker;
+      if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) { showToast('Paste a PNG, JPEG, GIF, or WebP image.'); return; }
       textarea.dataset.attachedImage = base64;
       textarea.dataset.attachedImageName = file.name || 'pasted-image.png';
+      updateAiAttachment(textarea);
       textarea.dispatchEvent(new Event('input'));
       break;
     }

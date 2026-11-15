@@ -88,6 +88,11 @@ with tempfile.TemporaryDirectory(prefix='nexuspanel-smoke-', dir='/tmp') as temp
             call('POST', '/api/ai/unlock', {'password': 'disposable-ai-password'})
             history, _ = call('GET', '/api/ai/history?serverId=' + str(server['server']['id']))
             assert history['messages'] == []
+            try:
+                call('POST', '/api/ai/chat', {'serverId': server['server']['id'], 'message': '', 'attachedImage': 'A' * (1100 * 1024)})
+                raise AssertionError('Invalid image should be rejected')
+            except urllib.error.HTTPError as error:
+                assert error.code == 400, f'Large image request was not validated: HTTP {error.code}'
             call('POST', '/api/ai/lock', {})
             call('PUT', '/api/ai/settings', {'provider': 'openai', 'model': 'test-model', 'enabled': False})
             prefix = '/api/servers/' + str(server['server']['id'])
