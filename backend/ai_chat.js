@@ -148,20 +148,29 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
         if (active(req) !== session || !config().enabled) throw new Error('AI session expired.');
         const anthropic = settings.provider === 'anthropic';
         const isNvidia = settings.provider === 'nvidia';
-        const payload = anthropic
-          ? { model: settings.model, max_tokens: 2048, system, messages: history.messages, tools: availableTools }
-          : { model: settings.model, max_tokens: 2048, messages: [{ role: 'system', content: system }, ...history.messages], tools: availableTools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })) };
-        // NVIDIA Nemotron expects image_url format compatible with OpenAI vision
-        if (isNvidia) {
-          for (const msg of payload.messages) {
+        let payload;
+        if (anthropic) {
+          payload = { model: settings.model, max_tokens: 2048, system, messages: history.messages, tools: availableTools };
+        } else if (isNvidia) {
+          // NVIDIA Nemotron vision: convert image_url parts to the format they expect
+          const messages = [{ role: 'system', content: system }, ...history.messages].map((msg) => {
             if (Array.isArray(msg.content)) {
-              for (const part of msg.content) {
-                if (part.type === 'image_url' && part.image_url?.url?.startsWith('data:')) {
-                  // NVIDIA accepts data URLs directly
-                }
-              }
+              return {
+                ...msg,
+                content: msg.content.map((part) => {
+                  if (part.type === 'image_url' && part.image_url?.url?.startsWith('data:')) {
+                    // NVIDIA expects the image directly in image_url.url as data URI
+                    return { type: 'image_url', image_url: { url: part.image_url.url } };
+                  }
+                  return part;
+                })
+              };
             }
-          }
+            return msg;
+          });
+          payload = { model: settings.model, max_tokens: 2048, messages, tools: availableTools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })) };
+        } else {
+          payload = { model: settings.model, max_tokens: 2048, messages: [{ role: 'system', content: system }, ...history.messages], tools: availableTools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })) };
         }
         const headers = anthropic ? { 'x-api-key': secret, 'anthropic-version': '2023-06-01' } : { Authorization: `Bearer ${secret}` };
         const response = await fetchImpl(PROVIDERS[settings.provider], { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(Math.max(1, Math.min(60000, session.expiresAt - Date.now()))) });
