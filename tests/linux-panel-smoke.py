@@ -81,6 +81,11 @@ with tempfile.TemporaryDirectory(prefix='nexuspanel-smoke-', dir='/tmp') as temp
             settings, _ = call('PUT', '/api/ai/settings', {'provider': 'openai', 'model': 'test-model', 'apiKey': 'disposable-test-key', 'enabled': True})
             assert settings['enabled'] and settings['keyConfigured'] and 'disposable-test-key' not in json.dumps(settings)
             call('POST', '/api/ai/unlock', {'password': 'disposable-ai-password'})
+            full, _ = call('PUT', '/api/ai/full-access', {'enabled': True, 'password': 'disposable-ai-password'})
+            assert full['fullAccess']
+            full, _ = call('PUT', '/api/ai/full-access', {'enabled': False})
+            assert not full['fullAccess']
+            call('POST', '/api/ai/unlock', {'password': 'disposable-ai-password'})
             history, _ = call('GET', '/api/ai/history?serverId=' + str(server['server']['id']))
             assert history['messages'] == []
             call('POST', '/api/ai/lock', {})

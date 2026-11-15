@@ -4315,7 +4315,11 @@ async function ensureSoftwareRequirements(software, serverId, onProgress, versio
 const aiChat = createAiChat({
   db, dataDir: path.resolve(process.env.NEXUSPANEL_DATA_DIR || process.env.NEXUSPANEL_DATA_ROOT || dataRoot),
   hashPassword, verifyPassword, requireAuth, getServer: getServerOr404,
-  executeTool: async (name, args, server, user) => {
+  executeTool: async (name, args, server, user, context) => {
+    if (name === 'full_terminal') {
+      logFixed({ serverId: server.id, category: 'security', title: 'AI full-access command', detail: 'A shell command was executed with panel service privileges.', source: 'ai-chat', actorUserId: user.id });
+      return require('./ai_full_terminal').runFullTerminal(args.command, ensureServerDirs(server), context);
+    }
     if (name === 'server_info') return { server: serverPayload(server), status: runtimeDetails(server.id), panelVersion: PANEL_VERSION, edition: panelEdition() };
     if (name === 'console_logs') { const lines = consoleLogs(server.id).slice(-150); return { lines, diagnostics: diagnoseRuntime(lines) }; }
     if (name === 'panel_events') return { events: db.prepare('SELECT category, title, detail, created_at FROM fixed_logs WHERE server_id = ? OR server_id IS NULL ORDER BY created_at DESC LIMIT 30').all(server.id) };

@@ -78,6 +78,14 @@ charges. Terminal access is limited to diagnostics, and repairs depend on the
 model and available tools; successful repair is not guaranteed. This optional
 cloud feature is separate from the local Needle repair model.
 
+Owners can optionally enable **AI full access** in Settings using the AI chat
+password. It allows the assistant to run shell commands with the panel service
+account's privileges, starting in the selected server directory. On a standard
+Linux installation the service runs as root, so those commands can access and
+modify the entire VPS, including panel settings and other servers. Enable it
+only for a trusted provider. Disabling AI chat also disables full access;
+changing the full-access setting locks current AI sessions.
+
 ## Update and administration
 
 ```bash

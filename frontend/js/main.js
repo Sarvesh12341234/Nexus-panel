@@ -3169,7 +3169,7 @@ async function renderAiChat() {
   if (!server) { panel.innerHTML = '<p class="empty-state">Create or select a server to use AI chat.</p>'; return; }
   const history = await api(`/api/ai/history?serverId=${encodeURIComponent(server.id)}`);
   if (serial !== aiRenderSerial || state.activeView !== 'ai' || activeServer()?.id !== server.id) return;
-  panel.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHtml(config.provider)} · ${escapeHtml(config.model)}</p><h2>AI chat</h2><p class="muted">Selected server: ${escapeHtml(server.name)} · Session expires at ${escapeHtml(new Date(history.expiresAt).toLocaleTimeString())}</p></div><button type="button" class="secondary" data-action="ai-lock">Lock and clear</button></div><p class="muted">The assistant can read server files and logs, edit text files while stopped, send server console commands, and run limited diagnostics. Content used in the chat is sent to your provider.</p><div class="ai-messages" id="aiMessages">${history.messages.length ? history.messages.map((entry) => `<article class="ai-message ${entry.role === 'user' ? 'is-user' : 'is-assistant'}"><strong>${entry.role === 'user' ? 'You' : 'AI'}</strong><div>${escapeHtml(entry.content)}</div>${entry.steps?.length ? `<details><summary>${entry.steps.length} operation(s)</summary><pre>${escapeHtml(entry.steps.map((step) => `${step.tool}: ${step.result}`).join('\n'))}</pre></details>` : ''}</article>`).join('') : '<p class="empty-state">Ask about this server or request a repair.</p>'}</div><form id="aiChatForm" class="ai-form"><label>Message <textarea name="message" rows="3" maxlength="12000" required placeholder="What would you like to do?"></textarea></label><button type="submit">Send</button></form>`;
+  panel.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHtml(config.provider)} · ${escapeHtml(config.model)}</p><h2>AI chat</h2><p class="muted">Selected server: ${escapeHtml(server.name)} · Session expires at ${escapeHtml(new Date(history.expiresAt).toLocaleTimeString())}</p></div><button type="button" class="secondary" data-action="ai-lock">Lock and clear</button></div><p class="muted">${config.fullAccess ? "Full access is enabled: the assistant can run shell commands with panel service privileges across the host." : "The assistant can read server files and logs, edit text files while stopped, send server console commands, and run limited diagnostics."} Content used in the chat is sent to your provider.</p><div class="ai-messages" id="aiMessages">${history.messages.length ? history.messages.map((entry) => `<article class="ai-message ${entry.role === 'user' ? 'is-user' : 'is-assistant'}"><strong>${entry.role === 'user' ? 'You' : 'AI'}</strong><div>${escapeHtml(entry.content)}</div>${entry.steps?.length ? `<details><summary>${entry.steps.length} operation(s)</summary><pre>${escapeHtml(entry.steps.map((step) => `${step.tool}: ${step.result}`).join('\n'))}</pre></details>` : ''}</article>`).join('') : '<p class="empty-state">Ask about this server or request a repair.</p>'}</div><form id="aiChatForm" class="ai-form"><label>Message <textarea name="message" rows="3" maxlength="12000" required placeholder="What would you like to do?"></textarea></label><button type="submit">Send</button></form>`;
   const messages = panel.querySelector('#aiMessages'); if (messages) messages.scrollTop = messages.scrollHeight;
   clearTimeout(aiExpiryTimer);
   aiExpiryTimer = setTimeout(() => { if (state.activeView === 'ai') renderAiChat().catch((error) => showToast(error.message)); }, Math.max(0, history.expiresAt - Date.now()) + 50);
@@ -3265,6 +3265,11 @@ function renderSettings() {
       <label>API key <input name="apiKey" type="password" autocomplete="new-password" placeholder="${state.aiConfig?.keyConfigured ? 'Saved — leave blank to keep' : 'Paste provider API key'}"></label>
       <button type="submit">Save AI settings</button>
     </form>` : ''}
+    ${state.user?.role === 'owner' ? `
+    <form class="settings-group ai-settings" id="aiFullAccessForm">
+      <div><strong>AI full access: ${state.aiConfig?.fullAccess ? 'Enabled' : 'Disabled'}</strong><p class="muted">Full access lets the AI run shell commands with the panel service account’s privileges. On a typical Linux installation this is root, so it can read, change or delete files and settings across the VPS. Commands and results may be sent to your AI provider. Enable this only when you trust the provider and understand this access.</p></div>
+      ${state.aiConfig?.fullAccess ? '<button type="submit" class="secondary">Disable full access</button>' : '<label>AI chat password <input name="password" type="password" autocomplete="current-password" required></label><button type="submit">Enable full access</button>'}
+    </form>` : ''}
     ${server?.type === 'java' && canManageServer ? `
     <form class="settings-group startup-settings" id="javaStartupFlagsForm" data-server-id="${Number(server.id)}">
       <div><strong>Java startup options</strong><p class="muted">Server: ${escapeHtml(server.name)}. Add one JVM flag per line. NexusPanel controls the memory limit and Java runtime paths. Changes apply after the next restart.</p></div>
@@ -3352,7 +3357,7 @@ function renderSettings() {
 
 document.addEventListener('submit', async (event) => {
   const form = event.target;
-  if (!['aiSettingsForm', 'aiUnlockForm', 'aiChatForm'].includes(form.id)) return;
+  if (!['aiSettingsForm', 'aiFullAccessForm', 'aiUnlockForm', 'aiChatForm'].includes(form.id)) return;
   event.preventDefault();
   const button = form.querySelector('button[type="submit"]');
   if (button) button.disabled = true;
@@ -3361,6 +3366,11 @@ document.addEventListener('submit', async (event) => {
       state.aiConfig = await api('/api/ai/settings', { method: 'PUT', body: JSON.stringify(formData(form)) });
       showToast('AI settings saved.');
       await refresh();
+    } else if (form.id === 'aiFullAccessForm') {
+      const enabled = !state.aiConfig?.fullAccess;
+      state.aiConfig = await api('/api/ai/full-access', { method: 'PUT', body: JSON.stringify({ enabled, password: enabled ? form.elements.password.value : '' }) });
+      showToast(`AI full access ${enabled ? 'enabled' : 'disabled'}. Unlock AI chat again.`);
+      renderSettings();
     } else if (form.id === 'aiUnlockForm') {
       await api('/api/ai/unlock', { method: 'POST', body: JSON.stringify({ password: form.elements.password.value }) });
       await renderAiChat();
