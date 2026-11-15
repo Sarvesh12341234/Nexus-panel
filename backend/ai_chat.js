@@ -85,7 +85,7 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
     if (apiKey) set('ai_chat_key', encrypt(apiKey));
     set('ai_chat_provider', provider); set('ai_chat_model', model); set('ai_chat_enabled', req.body.enabled ? '1' : '0');
     if (!req.body.enabled) set('ai_chat_full_access', '0');
-    if (Number.isInteger(maxRounds) && maxRounds >= 1 && maxRounds <= 50) set('ai_chat_max_rounds', String(maxRounds));
+    if (Number.isInteger(maxRounds) && maxRounds >= 1 && maxRounds <= 10000) set('ai_chat_max_rounds', String(maxRounds));
     closeSessions(); res.json(config());
   });
   router.post('/unlock', (req, res) => {

@@ -3192,7 +3192,7 @@ async function renderAiChat() {
   if (serial !== aiRenderSerial || state.activeView !== 'ai') return;
   state.aiConfig = config;
   if (!config.expiresAt || config.expiresAt <= Date.now()) {
-    panel.innerHTML = `<div class="ai-chat-shell"><div class="ai-chat-header"><div><p class="eyebrow">Private session</p><h2>Unlock AI chat</h2></div></div><div class="ai-chat-body"><p class="muted">${config.passwordConfigured ? 'Enter your AI password.' : 'Choose an AI password for future sessions.'} The session and history expire after 10 minutes of inactivity.</p><form id="aiUnlockForm" class="ai-composer"><input name="password" type="password" minlength="12" maxlength="200" autocomplete="current-password" required placeholder="AI password"><button type="submit">${config.passwordConfigured ? 'Unlock' : 'Set password and unlock'}</button></form></div></div>`;
+    panel.innerHTML = `<div class="ai-chat-shell"><div class="ai-chat-header"><div><p class="eyebrow">Private session</p><h2>Unlock AI chat</h2></div></div><div class="ai-chat-body"><p class="muted">${config.passwordConfigured ? 'Enter your AI password.' : 'Choose an AI password for future sessions.'} The session and history expire after 10 minutes of inactivity.</p><form id="aiUnlockForm" class="ai-unlock-form"><label>AI password <input name="password" type="password" minlength="12" maxlength="200" autocomplete="current-password" required placeholder="AI password"></label><button type="submit">${config.passwordConfigured ? 'Unlock' : 'Set password and unlock'}</button></form></div></div>`;
     return;
   }
   if (!server) { panel.innerHTML = '<p class="empty-state">Create or select a server to use AI chat.</p>'; return; }
