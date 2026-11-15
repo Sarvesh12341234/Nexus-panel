@@ -15,6 +15,7 @@ const REQUEST_TIMEOUT_MS = 15000;
 const registry = readRegistry();
 const workers = new Map();
 let nextRequestId = 1;
+let lastWorkerError = '';
 
 function readRegistry() {
   try {
@@ -103,7 +104,10 @@ function createWorker(serverId) {
     pendingTimer: null,
   };
   workers.set(serverId, worker);
-  worker.startTimer = setTimeout(() => removeWorker(serverId, worker), START_TIMEOUT_MS);
+  worker.startTimer = setTimeout(() => {
+    lastWorkerError = 'Needle worker did not start before the timeout.';
+    removeWorker(serverId, worker);
+  }, START_TIMEOUT_MS);
   worker.startTimer.unref?.();
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
@@ -118,8 +122,14 @@ function createWorker(serverId) {
       try { message = JSON.parse(line); } catch { continue; }
       if (message.ready === true) {
         worker.ready = true;
+        lastWorkerError = '';
         clearTimeout(worker.startTimer);
         worker.startTimer = null;
+        continue;
+      }
+      if (message.ready === false) {
+        const errorType = /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(String(message.error || '')) ? message.error : 'UnknownError';
+        lastWorkerError = `Needle worker could not initialize (${errorType}).`;
         continue;
       }
       const resolve = worker.pending.get(Number(message.requestId));
@@ -133,8 +143,14 @@ function createWorker(serverId) {
     }
   });
   child.stderr.on('data', () => {});
-  child.on('error', () => removeWorker(serverId, worker, false));
-  child.on('exit', () => removeWorker(serverId, worker, false));
+  child.on('error', () => {
+    lastWorkerError = 'Needle Python process could not be started.';
+    removeWorker(serverId, worker, false);
+  });
+  child.on('exit', () => {
+    if (!worker.ready && !lastWorkerError) lastWorkerError = 'Needle worker exited before it was ready.';
+    removeWorker(serverId, worker, false);
+  });
   return worker;
 }
 
@@ -212,7 +228,33 @@ async function requestWorkerResult(serverId, input) {
   return { result, text, evidence };
 }
 
+function matchDocumentedIssue(input) {
+  const text = redact(input);
+  const lower = text.toLowerCase();
+  const matches = [];
+  for (const [id, issue] of Object.entries(registry)) {
+    const error = String(issue.error || '').trim();
+    if (error.length < 16) continue;
+    const offset = lower.lastIndexOf(error.toLowerCase());
+    if (offset >= 0) matches.push({ id, evidence: text.slice(offset, offset + error.length) });
+  }
+  if (matches.length !== 1) return null;
+  return matches[0];
+}
+
 async function classify(serverId, input) {
+  if (!enabled() || !Number.isSafeInteger(Number(serverId)) || Number(serverId) <= 0) return null;
+  const exact = matchDocumentedIssue(input);
+  if (exact) {
+    const issue = registry[exact.id];
+    return {
+      issueId: exact.id, evidence: exact.evidence,
+      cause: String(issue.cause || '').slice(0, 1200),
+      fix: String(issue.fix || '').slice(0, 1200),
+      error: String(issue.error || '').slice(0, 500),
+      source: 'documented-exact-match', verified: false, executable: false,
+    };
+  }
   const response = await requestWorkerResult(serverId, input);
   if (!response) return null;
   const { result, evidence } = response;
@@ -256,6 +298,7 @@ function status() {
     documentedIssues: Object.keys(registry).length,
     isolatedServerWorkers: workers.size,
     maxWorkers: MAX_WORKERS,
+    runtimeError: lastWorkerError || null,
     mode: 'read-only-advisory',
   };
 }
@@ -266,4 +309,4 @@ process.once('exit', () => {
   }
 });
 
-module.exports = { classify, suggestRepairTool, enabled, status };
+module.exports = { classify, suggestRepairTool, enabled, status, matchDocumentedIssue };

@@ -11,18 +11,30 @@ import sys
 REPAIR_CONTRACT = json.loads((Path(__file__).resolve().parents[1] / "ai" / "needle2" / "repair-tools.json").read_text(encoding="utf-8"))
 ALLOWED_TOOLS = set(REPAIR_CONTRACT["tool"]["parameters"]["properties"]["tool"]["enum"])
 ISSUE_TOOL_MAP = REPAIR_CONTRACT.get("issueMap", {})
+# Keep inference schemas identical to the compact schemas used for training.
+# Contract validation below and in Node remains authoritative.
 TOOLS = [{
     "name": "lookup_documented_issue",
-    "description": "Identify one NexusPanel issue by its stable documentation ID. This tool only classifies supplied text. It cannot execute repairs, commands, or API operations.",
     "parameters": {
         "type": "object",
         "properties": {
-            "id": {"type": "string", "description": "Exact issue ID in the NexusPanel documentation."},
-            "evidence": {"type": "string", "description": "A short exact excerpt from the input log."},
+            "id": {"type": "string"},
+            "evidence": {"type": "string"},
         },
         "required": ["id", "evidence"],
     },
-}, REPAIR_CONTRACT["tool"]]
+}, {
+    "name": "request_repair_tool",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string"},
+            "issueId": {"type": "string"},
+            "evidence": {"type": "string"},
+        },
+        "required": ["tool", "issueId", "evidence"],
+    },
+}]
 
 
 def main() -> int:
@@ -30,7 +42,9 @@ def main() -> int:
         import needle
 
         model_path = sys.argv[1]
-        agent = needle.Needle(tools=TOOLS, weights=model_path)
+        # The trainer serializes tool schemas compactly. Passing a list makes
+        # the runtime insert whitespace, changing the model's token prefix.
+        agent = needle.Needle(tools=json.dumps(TOOLS, separators=(",", ":"), ensure_ascii=False), weights=model_path)
     except Exception as exc:  # report only the error type, not environment secrets
         print(json.dumps({"ready": False, "error": type(exc).__name__}), flush=True)
         return 2

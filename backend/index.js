@@ -6403,9 +6403,8 @@ app.post('/api/servers/:id/poggit/install', requirePermission(capabilities.PLUGI
 }));
 
 app.get('/api/servers/:id/console', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const id = Number(req.params.id);
-  const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
-  if (!target) return res.status(404).json({ error: 'Server not found.' });
+  const target = getServerOr404(req.params.id, req.user);
+  const id = target.id;
   res.setHeader('Cache-Control', 'no-store');
   const details = runtimeDetails(id);
   res.json({ status: details.status, players: details.players, lines: consoleLogs(id).slice(-300) });
@@ -6454,9 +6453,8 @@ function hostMetricsPayload() {
 }
 
 app.get('/api/servers/:id/console/stream', requirePermission(capabilities.CONSOLE_VIEW, permissions.VIEW_CONSOLE), (req, res) => {
-  const id = Number(req.params.id);
-  const target = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
-  if (!target) return res.status(404).json({ error: 'Server not found.' });
+  const target = getServerOr404(req.params.id, req.user);
+  const id = target.id;
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-store, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -6466,10 +6464,12 @@ app.get('/api/servers/:id/console/stream', requirePermission(capabilities.CONSOL
     res.write(`event: ${event}\n`);
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
-  writeEvent('snapshot', { status: runtimeStatus(id), players: runtimeDetails(id).players, lines: consoleLogs(id).slice(-300) });
+  const initialDetails = runtimeDetails(id);
+  writeEvent('snapshot', { status: initialDetails.status, players: initialDetails.players, lines: consoleLogs(id).slice(-300) });
   const unsubscribe = subscribeConsole(id, (line) => {
-    const details = runtimeDetails(id);
-    writeEvent('line', { line, status: details.status, players: details.players });
+    // Status and player counts arrive with the periodic metrics event. Avoid
+    // querying systemd for every log line during a busy startup.
+    writeEvent('line', { line });
   });
   const heartbeat = setInterval(() => writeEvent('metrics', {
     at: Date.now(),
@@ -7234,6 +7234,7 @@ app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MA
   let truncated = false;
 
   while (queue.length && results.length < maxResults && visited < maxVisited) {
+    if (res.destroyed) return;
     const directory = queue.shift();
     if (directory.depth > maxDepth) {
       truncated = true;
@@ -7241,6 +7242,27 @@ app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MA
     }
     const children = await fs.promises.readdir(directory.absolute, { withFileTypes: true }).catch(() => []);
     const candidates = [];
+    const metadata = new Map();
+    const metadataChildren = children.slice(0, Math.max(0, maxVisited - visited)).filter((child) => {
+      if (child.isSymbolicLink()) return false;
+      const relative = path.posix.join(directory.relative, child.name).replace(/^\.\//, '');
+      if (!isUserVisibleServerEntry(relative)) return false;
+      return mode === 'name'
+        ? relative.toLocaleLowerCase().includes(needle)
+        : child.isFile() && fileDescriptor(child.name, 0).editable;
+    });
+    if (mode === 'name' && metadataChildren.length > maxResults - results.length + 48) {
+      // Only 250 matches can be returned. Keep a small allowance for entries
+      // that disappear during the scan instead of statting a huge folder.
+      metadataChildren.length = maxResults - results.length + 48;
+      truncated = true;
+    }
+    for (let offset = 0; offset < metadataChildren.length; offset += 48) {
+      if (res.destroyed) return;
+      const batch = metadataChildren.slice(offset, offset + 48);
+      const stats = await Promise.all(batch.map((child) => fs.promises.stat(path.join(directory.absolute, child.name)).catch(() => null)));
+      batch.forEach((child, index) => metadata.set(child.name, stats[index]));
+    }
     for (const child of children) {
       if (++visited > maxVisited) {
         truncated = true;
@@ -7254,7 +7276,7 @@ app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MA
       // Name searches need metadata only for results, not every visited file.
       if (mode === 'name' && !relative.toLocaleLowerCase().includes(needle)) continue;
       if (mode === 'content' && (!child.isFile() || !fileDescriptor(child.name, 0).editable)) continue;
-      const stats = await fs.promises.stat(absolute).catch(() => null);
+      const stats = metadata.get(child.name);
       if (!stats) continue;
       const descriptor = child.isDirectory()
         ? { extension: '', kind: 'folder', mime: '', editable: false, previewable: false }
@@ -7271,7 +7293,7 @@ app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MA
         if (relative.toLocaleLowerCase().includes(needle)) results.push(base);
       } else if (child.isFile() && descriptor.editable && stats.size <= maxContentBytes) {
         candidates.push({ absolute, base });
-      } else if (mode === 'content' && child.isFile() && descriptor.editable && stats.size > maxContentBytes) {
+      } else if (mode === 'content' && child.isFile() && stats.size > maxContentBytes) {
         skippedFiles += 1;
         truncated = true;
       }
@@ -7280,8 +7302,9 @@ app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MA
 
     // Read candidate files concurrently in small batches so content search is
     // responsive without opening thousands of descriptors at once.
-    for (let index = 0; index < candidates.length && results.length < maxResults; index += 8) {
-      const batch = candidates.slice(index, index + 8);
+    for (let index = 0; index < candidates.length && results.length < maxResults; index += 24) {
+      if (res.destroyed) return;
+      const batch = candidates.slice(index, index + 24);
       let reservedBatchBytes = 0;
       const inspected = await Promise.all(batch.map(async (candidate) => {
         if (candidate.base.size > maxScannedBytes - scannedBytes - reservedBatchBytes) return { skipped: true };
@@ -7324,7 +7347,7 @@ app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MA
     }
   }
 
-  if (queue.length || visited >= maxVisited) truncated = true;
+  if (queue.length || visited >= maxVisited || results.length >= maxResults) truncated = true;
   results.sort((left, right) => left.path.localeCompare(right.path));
   res.json({
     query,

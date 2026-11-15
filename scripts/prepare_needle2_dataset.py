@@ -134,7 +134,7 @@ def main() -> int:
     # Needle's local trainer truncates from the right. Keep both function names
     # present in every prompt so the model learns when to classify and when to
     # request a repair. Compact schemas keep all labels within 256 tokens;
-    # runtime still supplies the full schemas and validates requests in Node.
+    # runtime uses the same schemas and validates requests in Python and Node.
     lookup_tool = {
         "name": "lookup_documented_issue",
         "parameters": {

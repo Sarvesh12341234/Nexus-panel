@@ -31,7 +31,9 @@ function runSystemctl(args) {
 
 function serviceUser() {
   if (process.env.NEXUSPANEL_SERVICE_USER) return process.env.NEXUSPANEL_SERVICE_USER;
-  if (process.env.SUDO_USER && process.env.SUDO_USER !== 'root') return process.env.SUDO_USER;
+  // ASF identity provisioning currently requires the panel process to be root.
+  // Using SUDO_USER here silently installed an unusable non-root service.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return 'root';
   return os.userInfo().username;
 }
 
@@ -182,6 +184,9 @@ function install({ start = true } = {}) {
   assertSupportedNode();
   requireLinuxSystemd();
   requireRoot();
+  if (serviceUser() !== 'root') {
+    console.warn('NexusPanel will run as a non-root user; game-server starts require root for ASF identity provisioning.');
+  }
   ensureRuntimePermissions();
   const { build: buildHostAgent } = require('./host_agent');
   buildHostAgent();

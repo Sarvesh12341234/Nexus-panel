@@ -214,6 +214,7 @@ require_service_user() {
     if ! id "$SERVICE_USER" >/dev/null 2>&1; then
         die "Service user '$SERVICE_USER' does not exist."
     fi
+    warn "The panel will run as $SERVICE_USER, but ASF game-server starts currently require the panel service to run as root."
 }
 
 remote_branch_exists() {
@@ -453,7 +454,7 @@ build_components() {
     if npm run build:asf; then
         info "ASF runtime build completed."
     else
-        warn "ASF runtime build failed. Continuing with fallback mode."
+        warn "ASF runtime build failed. Game-server starts will remain disabled until ASF is built and its preflight passes."
     fi
     if npm run build:host-agent; then
         info "Host agent build completed."

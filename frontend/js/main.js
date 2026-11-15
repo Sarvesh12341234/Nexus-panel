@@ -1276,7 +1276,9 @@ function apiCacheKey(path, options = {}) {
 async function api(path, options = {}) {
   const { timeoutMs = 0, cacheTtlMs = 0, ...fetchOptions } = options;
   const method = String(fetchOptions.method || 'GET').toUpperCase();
-  const key = apiCacheKey(path, options);
+  // Requests with a caller-owned signal must not share an in-flight fetch:
+  // canceling an older search would also cancel a newer identical search.
+  const key = fetchOptions.signal ? '' : apiCacheKey(path, options);
   if (key && cacheTtlMs > 0) {
     const cached = apiCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.data;
@@ -1286,9 +1288,16 @@ async function api(path, options = {}) {
   const request = (async () => {
     let timeout = 0;
     let controller = null;
-    if (timeoutMs && !fetchOptions.signal) {
+    let timedOut = false;
+    let abortFromCaller = null;
+    if (timeoutMs) {
       controller = new AbortController();
-      timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+      if (fetchOptions.signal) {
+        abortFromCaller = () => controller.abort();
+        if (fetchOptions.signal.aborted) abortFromCaller();
+        else fetchOptions.signal.addEventListener('abort', abortFromCaller, { once: true });
+      }
+      timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     }
     try {
       const headers = {
@@ -1335,7 +1344,7 @@ async function api(path, options = {}) {
       return data;
     } catch (error) {
       if (error.name === 'AbortError') {
-        if (fetchOptions.signal) throw error;
+        if (!timedOut && fetchOptions.signal) throw error;
         const timeoutError = new Error('Request timed out.');
         timeoutError.code = 'timeout';
         throw timeoutError;
@@ -1343,6 +1352,7 @@ async function api(path, options = {}) {
       throw error;
     } finally {
       if (timeout) window.clearTimeout(timeout);
+      if (abortFromCaller) fetchOptions.signal.removeEventListener('abort', abortFromCaller);
     }
   })();
   if (key) apiInFlight.set(key, request);
@@ -2809,6 +2819,8 @@ async function renderFiles() {
     return;
   }
   const query = fileSearchQuery.trim();
+  if (fileSearchController) fileSearchController.abort();
+  fileSearchController = null;
   const editorWasOpen = Boolean(editor && !editor.hidden);
   if (query) {
     if (elements.fileEditor) elements.fileEditor.hidden = true;
@@ -2822,7 +2834,6 @@ async function renderFiles() {
     }
     return;
   }
-  if (fileSearchController) fileSearchController.abort();
   fileSearchController = query ? new AbortController() : null;
   const currentFolderPath = editorWasOpen
     ? filePath.split('/').slice(0, -1).join('/')
@@ -6009,6 +6020,11 @@ document.addEventListener('click', async (event) => {
         .map((item) => `- ${item.source}: ${item.title}${item.codeSnippets?.length ? ` (${item.codeSnippets.length} redacted code snippet(s))` : ''}\n  ${item.url}`)
         .join('\n');
       const advanced = result.agent?.advancedReasoning || '';
+      const suggestion = result.agent?.modelSuggestion;
+      const advisory = suggestion
+        ? `${suggestion.source === 'documented-exact-match' ? 'Documented match' : 'Needle suggestion'} (unverified): ${suggestion.issueId}\nCause: ${suggestion.cause || 'Unknown'}\nSuggested check: ${suggestion.fix || 'Inspect the server log.'}`
+        : '';
+      const modelError = result.agent?.model?.runtimeError || '';
       const advancedSuggestions = (result.agent?.advancedSuggestions || []).slice(0, 6)
         .map((item) => {
           const command = item.command ? `${item.command} ${(item.args || []).join(' ')}`.trim() : `${item.tool}${item.path ? ` ${item.path}` : ''}`;
@@ -6017,6 +6033,8 @@ document.addEventListener('click', async (event) => {
         .join('\n');
       const summary = [
         diagnoses || `No known cause matched ${result.knowledge?.diagnosticSignals || 0} signals.`,
+        advisory ? `\n\n${advisory}` : '',
+        modelError ? `\n\nNeedle unavailable: ${modelError}` : '',
         actions ? `\nSafe plan:\n${actions}` : '',
         advanced ? `\nAdvanced AI:\n${advanced}` : '',
         advancedSuggestions ? `\nSuggested audited commands/tools:\n${advancedSuggestions}` : '',
@@ -6436,10 +6454,16 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       const target = elements.fileEditor.path.value;
       if (!target || !confirm(`Delete ${target}?`)) return;
-      await api(`/api/servers/${server.id}/files?path=${encodeURIComponent(target)}`, { method: 'DELETE' });
-      filePath = target.split('/').slice(0, -1).join('/');
-      showToast('Deleted.');
-      await renderFiles();
+      actionTarget.disabled = true;
+      showToast('Deleting...');
+      try {
+        await api(`/api/servers/${server.id}/files?path=${encodeURIComponent(target)}`, { method: 'DELETE' });
+        filePath = target.split('/').slice(0, -1).join('/');
+        showToast('Deleted.');
+        await renderFiles();
+      } finally {
+        actionTarget.disabled = false;
+      }
       return;
     }
     if (action === 'file-delete-selected') {
@@ -6448,16 +6472,22 @@ document.addEventListener('click', async (event) => {
       const selected = contextFilePaths();
       if (!selected.length) return showToast('Select files or folders first.');
       if (!confirm(`Delete ${selected.length} selected item(s)?`)) return;
-      const result = await api(`/api/servers/${server.id}/files/delete-batch`, {
-        method: 'POST',
-        body: JSON.stringify({ paths: selected }),
-      });
-      const deleted = Array.isArray(result.deleted) ? result.deleted.length : 0;
-      const failed = Array.isArray(result.failed) ? result.failed.length : 0;
-      showToast(failed
-        ? `Deleted ${deleted} item(s); ${failed} could not be removed.`
-        : `Deleted ${deleted} item(s).`);
-      await renderFiles();
+      actionTarget.disabled = true;
+      showToast('Deleting...');
+      try {
+        const result = await api(`/api/servers/${server.id}/files/delete-batch`, {
+          method: 'POST',
+          body: JSON.stringify({ paths: selected }),
+        });
+        const deleted = Array.isArray(result.deleted) ? result.deleted.length : 0;
+        const failed = Array.isArray(result.failed) ? result.failed.length : 0;
+        showToast(failed
+          ? `Deleted ${deleted} item(s); ${failed} could not be removed.`
+          : `Deleted ${deleted} item(s).`);
+        await renderFiles();
+      } finally {
+        actionTarget.disabled = false;
+      }
       return;
     }
     if (action === 'file-download-selected') {

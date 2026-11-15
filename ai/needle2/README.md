@@ -21,6 +21,15 @@ Some entries are stale or refer to features that do not exist in the current
 1.0.3 code. An AI result must therefore remain advisory until cross-checked
 against current deterministic diagnostics. Unknown errors should return no
 match and be added to the corpus only after they are reproduced and verified.
+When the model is enabled, an unambiguous exact match against a documented error
+returns a clearly labeled advisory immediately. It does not invoke a repair or
+count as a model prediction; all other input still goes through the worker.
+
+Run `python scripts/evaluate_needle2.py /path/to/model.cact --require-quality`
+with the Needle runtime installed before replacing a model. The check exercises
+documented errors embedded in log lines, unrelated text, and mapped repair
+requests. It is a smoke test using the project corpus, not an independent
+measurement of generalization to unseen incidents.
 
 ## Local training on the RTX GPU (WSL2)
 
@@ -102,5 +111,8 @@ NEXUSPANEL_NEEDLE2_PYTHON=/path/to/venv/bin/python
 NEXUSPANEL_NEEDLE2_MODEL=/path/to/nexuspanel-needle2.cact
 ```
 
-Set those variables in the NexusPanel service environment. Leaving either
-unset disables Needle and keeps deterministic repair behavior unchanged.
+Set those variables in the NexusPanel service environment to override the
+defaults. When unset, the panel looks for `data/needle2/nexuspanel-needle2.cact`
+and runs `python3` on Linux or `python` on Windows. The Python environment must
+have the runtime installed. The model status reports a worker startup error if
+initialization fails; deterministic repair behavior remains available.

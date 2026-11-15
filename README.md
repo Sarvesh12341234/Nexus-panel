@@ -41,6 +41,10 @@ The Linux release installers are in [`installers/`](installers/):
 
 Both installers use the `v1.0.4` source tag by default. Windows users can run
 [`install.bat`](install.bat) from the extracted release source.
+To install the current `main` branch on a VPS, download the normal installer
+from the `main` branch and set `NEXUSPANEL_REF=main` when running it. A
+versioned installer downloaded from the `v1.0.4` tag remains pinned to that
+release and does not receive later fixes automatically.
 
 Game-server execution is supported only on Linux hosts where the per-server
 locked identity and ASF systemd isolation preflight succeed. Launch fails closed
@@ -48,6 +52,10 @@ if either isolation prerequisite is unavailable; it never falls back to running
 tenant code as the panel service account. The legacy Windows SYSTEM startup task
 is removed by the Windows service installer; server starts are disabled on
 Windows until an equivalent per-server isolation boundary is available.
+On Linux, the panel service currently needs to run as root to provision the
+locked per-server identities and ACLs; the game servers run under those
+separate identities. An explicitly configured non-root panel service can serve
+the interface, but cannot start game servers with the current ASF integration.
 
 The file manager remains available while a server is running for browsing and
 downloading. Plugin configuration files under `plugins/<plugin>/` can also be
