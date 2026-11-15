@@ -11,7 +11,8 @@ const PROVIDERS = {
   anthropic: 'https://api.anthropic.com/v1/messages',
 };
 const TOOLS = [
-  ['server_info', 'Get the selected server status and non-secret panel settings.', {}],
+  ['server_info', 'Get a concise summary of the selected server only: name, type, version, status, memory and path. Do not return nested isolation profiles or raw configuration.', {}],
+  ['plugin_inventory', 'List installed plugins for the selected server, including names, kinds, file names and enabled status.', {}],
   ['list_files', 'List files in a directory inside the selected server.', { path: { type: 'string' } }],
   ['read_file', 'Read a small text file inside the selected server.', { path: { type: 'string' } }],
   ['write_file', 'Write a text file inside the selected server while it is stopped.', { path: { type: 'string' }, content: { type: 'string' } }],

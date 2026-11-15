@@ -3223,7 +3223,11 @@ async function renderAiChat({ force = false } = {}) {
     if (!isUser && entry.thinking) {
       thinkingHtml = `<details class="ai-thinking" open><summary>💭 Thinking…</summary><div class="ai-thinking-content">${escapeHtml(entry.thinking)}</div></details>`;
     }
-    const steps = entry.steps?.length ? `<details class="ai-steps"><summary>${entry.steps.length} tool call${entry.steps.length === 1 ? '' : 's'}</summary><div class="ai-steps-list">${entry.steps.map((step) => `<div class="ai-step"><span class="ai-step-tool">${escapeHtml(step.tool)}</span><pre class="ai-step-result">${escapeHtml(step.result)}</pre></div>`).join('')}</div></details>` : '';
+    const steps = entry.steps?.length ? `<details class="ai-steps"><summary>Show work (${entry.steps.length} operation${entry.steps.length === 1 ? '' : 's'})</summary><div class="ai-steps-list">${entry.steps.map((step) => {
+      let result = step.result;
+      try { result = JSON.stringify(JSON.parse(result), null, 2); } catch {}
+      return `<div class="ai-step"><span class="ai-step-tool">${escapeHtml(step.tool.replaceAll('_', ' '))}</span><pre class="ai-step-result">${escapeHtml(result)}</pre></div>`;
+    }).join('')}</div></details>` : '';
     const images = entry.images?.length ? `<div class="ai-images">${entry.images.filter((img) => /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(img)).map((img) => `<img src="${escapeHtml(img)}" alt="Attached image" loading="lazy">`).join('')}</div>` : '';
     return `<div class="ai-row ${isUser ? 'is-user' : 'is-assistant'}"><span class="ai-avatar">${isUser ? 'You' : 'AI'}</span><div class="ai-bubble">${thinkingHtml}<div class="ai-bubble-text">${escapeHtml(content)}</div>${images}${steps}</div></div>`;
   }).join('') : '<div class="ai-empty"><p class="empty-state">Ask about this server or request a repair.</p></div>';

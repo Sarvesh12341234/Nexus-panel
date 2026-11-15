@@ -4321,7 +4321,16 @@ const aiChat = createAiChat({
       logFixed({ serverId: server.id, category: 'security', title: 'AI full-access command', detail: 'A shell command was executed with panel service privileges.', source: 'ai-chat', actorUserId: user.id });
       return require('./ai_full_terminal').runFullTerminal(args.command, ensureServerDirs(server), context);
     }
-    if (name === 'server_info') return { server: serverPayload(server), status: runtimeDetails(server.id), panelVersion: PANEL_VERSION, edition: panelEdition() };
+    if (name === 'server_info') return { server: { id: server.id, name: server.name, type: server.type, status: runtimeStatus(server.id), version: server.software_version || 'unknown', software: server.software_key || '', memoryMb: server.max_memory_mb, path: displayPath(server.server_path || serverPath(server.id, server.name)) }, panelVersion: PANEL_VERSION, edition: panelEdition() };
+    if (name === 'plugin_inventory') {
+      const plugins = pluginRows(server.id).map(({ name, kind, fileName, enabled, relativePath }) => ({ name, kind, fileName, enabled, relativePath }));
+      let pluginFiles = [];
+      try {
+        const root = safeServerFile(server, 'plugins');
+        pluginFiles = (await fs.promises.readdir(root.absolute, { withFileTypes: true })).filter((entry) => entry.isFile() && !entry.isSymbolicLink() && isUserVisibleServerEntry(path.posix.join('plugins', entry.name))).map((entry) => entry.name);
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      return { count: plugins.length, plugins, pluginFiles };
+    }
     if (name === 'console_logs') { const lines = consoleLogs(server.id).slice(-150); return { lines, diagnostics: diagnoseRuntime(lines) }; }
     if (name === 'panel_events') return { events: db.prepare('SELECT category, title, detail, created_at FROM fixed_logs WHERE server_id = ? OR server_id IS NULL ORDER BY created_at DESC LIMIT 30').all(server.id) };
     if (name === 'console_command') { const rate = consumeCommandRateLimit(user.id, server.id); if (!rate.allowed) throw new Error('Console command rate limit reached.'); return sendCommand(server.id, args.command); }

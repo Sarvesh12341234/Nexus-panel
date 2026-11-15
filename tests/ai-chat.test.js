@@ -44,6 +44,7 @@ const { runFullTerminal } = require('../backend/ai_full_terminal');
     assert.equal((await request('/unlock', 'POST', { password: 'wrong-password' }, { 'x-session': 'two' })).status, 401);
     assert.equal((await request('/chat', 'POST', { serverId: 42, message: 'Check it' })).body.reply, 'Server checked.');
     assert.equal(operations[0].server.id, 42);
+    assert.ok(providerCalls[0].body.tools.some((tool) => tool.function?.name === 'plugin_inventory' || tool.name === 'plugin_inventory'));
     assert.equal(providerCalls[0].headers.Authorization, 'Bearer secret-key');
     assert.equal((await request('/history?serverId=42')).body.messages.length, 2);
     assert.equal((await request('/history?serverId=43')).body.messages.length, 0);
