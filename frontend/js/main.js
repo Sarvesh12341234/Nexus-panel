@@ -2402,7 +2402,8 @@ function renderPlugins() {
   elements.pluginList.innerHTML = plugins.map((plugin) => {
     return `
       <div class="plugin-row" data-plugin-id="${plugin.id}">
-        <div><strong>${escapeHtml(plugin.name)}</strong><div class="muted">${escapeHtml(plugin.kind)} | ${escapeHtml(plugin.relativePath)}</div></div>
+        ${plugin.iconUrl ? `<img class="plugin-icon" src="${escapeHtml(plugin.iconUrl)}" alt="">` : ''}
+        <div class="plugin-info"><strong>${escapeHtml(plugin.name)}</strong><div class="muted">${escapeHtml(plugin.kind)} | ${escapeHtml(plugin.relativePath)}</div></div>
         <div class="user-actions"><button class="secondary" type="button" data-action="toggle-plugin">${plugin.enabled ? 'Disable' : 'Enable'}</button><button class="danger" type="button" data-action="delete-plugin">Delete</button></div>
       </div>
     `;

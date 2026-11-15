@@ -1703,6 +1703,7 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   min-height: 260px;
 }
 
+.modrinth-card { position: relative; }
 .plugin-icon {
   position: absolute;
   right: 1rem;
@@ -1713,6 +1714,12 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   object-fit: cover;
   border: 1px solid var(--line);
 }
+.plugin-row { display: flex; align-items: center; gap: .8rem; padding: .7rem .9rem; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.03); }
+.plugin-row .plugin-icon { position: static; width: 36px; height: 36px; border-radius: 6px; object-fit: cover; border: 1px solid var(--line); flex: 0 0 auto; }
+.plugin-row .plugin-info { flex: 1 1 auto; min-width: 0; }
+.plugin-row .plugin-info strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plugin-row .plugin-info .muted { font-size: .82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plugin-row .user-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
 
 .console-metrics {
   display: grid;
