@@ -1173,17 +1173,29 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 .ai-row.is-user .ai-bubble { background: rgba(94,216,255,.1); border-color: rgba(94,216,255,.32); border-bottom-right-radius: 6px; }
 .ai-row.is-assistant .ai-bubble { border-bottom-left-radius: 6px; }
 .ai-bubble-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.ai-thinking { margin-bottom: .6rem; border: 1px dashed var(--cyan); border-radius: 10px; background: rgba(94,216,255,.06); }
+.ai-thinking summary { cursor: pointer; padding: .5rem .8rem; font-weight: 600; color: var(--cyan); }
+.ai-thinking-content { padding: 0 .8rem .6rem; font-family: "Cascadia Code", Consolas, monospace; font-size: .8rem; line-height: 1.5; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ai-steps { margin-top: .6rem; border-top: 1px dashed var(--line); padding-top: .45rem; }
 .ai-steps summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
-.ai-steps pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: .4rem 0 0; font-size: .78rem; background: rgba(0,0,0,.2); border-radius: 8px; padding: .5rem; }
+.ai-steps-list { display: flex; flex-direction: column; gap: .5rem; padding-top: .5rem; }
+.ai-step { border: 1px solid var(--line); border-radius: 8px; background: rgba(0,0,0,.15); overflow: hidden; }
+.ai-step-tool { display: block; padding: .4rem .7rem; background: var(--panel-2); border-bottom: 1px solid var(--line); font-weight: 600; font-size: .8rem; color: var(--cyan); }
+.ai-step-result { margin: 0; padding: .5rem .7rem; max-height: 200px; overflow: auto; font-family: "Cascadia Code", Consolas, monospace; font-size: .75rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-images { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
+.ai-images img { max-width: 180px; max-height: 180px; border-radius: 8px; border: 1px solid var(--line); }
 .ai-empty { display: grid; place-items: center; min-height: 180px; }
-.ai-composer { display: flex; align-items: flex-end; gap: .6rem; padding: .55rem; border: 1px solid var(--line); border-radius: 18px; background: var(--panel-2); }
+.ai-compose-toolbar { display: flex; align-items: center; gap: .5rem; padding: .3rem .4rem 0; }
+.ai-attach { background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: .3rem .5rem; color: var(--muted); cursor: pointer; font-size: 1.1rem; }
+.ai-attach:hover { border-color: var(--cyan); color: var(--cyan); }
+.ai-model-badge { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.ai-composer { display: flex; flex-direction: column; gap: .4rem; padding: .55rem; border: 1px solid var(--line); border-radius: 18px; background: var(--panel-2); }
 .ai-composer:focus-within { border-color: rgba(94,216,255,.55); box-shadow: 0 0 0 3px rgba(94,216,255,.12); }
-.ai-composer textarea { flex: 1; width: 100%; min-height: 2.6rem; max-height: 160px; resize: none; border: 0; background: transparent; color: var(--text); outline: none; padding: .45rem .35rem; line-height: 1.45; }
-.ai-composer input { flex: 1; min-height: 2.6rem; border: 0; background: transparent; color: var(--text); outline: none; padding: .45rem .35rem; }
-.ai-composer button { flex: 0 0 auto; min-height: 2.6rem; padding: 0 1.1rem; border-radius: 12px; }
+.ai-composer textarea { width: 100%; min-height: 2.6rem; max-height: 160px; resize: none; border: 0; background: transparent; color: var(--text); outline: none; padding: .45rem .35rem; line-height: 1.45; }
+.ai-composer input { min-height: 2.6rem; border: 0; background: transparent; color: var(--text); outline: none; padding: .45rem .35rem; }
+.ai-composer button { align-self: flex-end; min-height: 2.6rem; padding: 0 1.1rem; border-radius: 12px; }
 .ai-chat-body { display: flex; flex-direction: column; gap: .7rem; padding: .2rem .1rem; }
-@media (max-width: 700px) { .ai-messages { max-height: 52dvh; } .ai-row { max-width: 96%; } .ai-composer button { width: 100%; } }
+@media (max-width: 700px) { .ai-messages { max-height: 52dvh; } .ai-row { max-width: 96%; } .ai-compose-toolbar { flex-wrap: wrap; } .ai-composer button { width: 100%; } }
 
 .file-list.is-dropping {
   outline: 2px dashed rgba(94, 216, 255, 0.72);
