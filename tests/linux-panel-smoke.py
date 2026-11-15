@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix='nexuspanel-smoke-', dir='/tmp') as temp
         (panel / directory).mkdir(parents=True, exist_ok=True)
     varlib = root / 'varlib'
     varlib.mkdir()
-    installer = (repo / 'installers/nexuspanel-normal-v1.0.4-linux-installer.sh').read_text()
+    installer = (repo / 'installers/nexuspanel-normal-v1.0.0-linux-installer.sh').read_text()
     function = installer.split('repair_install_permissions() {', 1)[1].split('\n}\n', 1)[0]
     function = 'repair_install_permissions() {' + function + '\n}\n'
     function = function.replace('/var/lib/nexuspanel', str(varlib)).replace('/usr/local/bin/nexuspanel', str(root / 'cli'))

@@ -29,12 +29,15 @@ try {
   fs.mkdirSync(source, { recursive: true });
   fs.mkdirSync(path.join(source, 'backend'), { recursive: true });
   fs.mkdirSync(path.join(source, 'update'), { recursive: true });
+  fs.mkdirSync(path.join(source, 'models'), { recursive: true });
   fs.writeFileSync(path.join(source, 'package.json'), JSON.stringify({
     name: 'nexuspanel-update-fixture',
     version: '1.0.4',
   }));
   fs.writeFileSync(path.join(source, 'backend', 'marker.js'), 'module.exports = "new";\n');
   fs.writeFileSync(path.join(source, 'update', 'update.sh'), '# fixture update script\n');
+  fs.writeFileSync(path.join(source, 'models', 'nexuspanel-needle2-repair.cact'),
+    `version https://git-lfs.github.com/spec/v1\noid sha256:${'a'.repeat(64)}\nsize 1000\n`);
 
   run('git', ['init', '-q', source]);
   run('git', ['-C', source, 'config', 'user.email', 'test@example.invalid']);
@@ -50,6 +53,8 @@ try {
   fs.mkdirSync(path.join(install, 'update'), { recursive: true });
   fs.mkdirSync(path.join(install, 'data'), { recursive: true });
   fs.mkdirSync(path.join(install, 'servers', 'world'), { recursive: true });
+  fs.mkdirSync(path.join(install, 'models'), { recursive: true });
+  fs.writeFileSync(path.join(install, 'models', 'nexuspanel-needle2-repair.cact'), 'existing model');
   fs.writeFileSync(path.join(install, 'package.json'), JSON.stringify({ name: 'nexuspanel-old', version: '1.0.0' }));
   fs.writeFileSync(path.join(install, 'backend', 'marker.js'), 'module.exports = "old";\n');
   fs.writeFileSync(path.join(install, 'update', 'update.sh'), fs.readFileSync(updater));
@@ -75,6 +80,8 @@ try {
   assert.equal(fs.readFileSync(path.join(install, 'servers', 'world', 'level.dat'), 'utf8'), 'keep world');
   assert.equal(fs.readFileSync(path.join(install, '.env'), 'utf8'), 'SECRET=keep\n');
   assert.equal(fs.readFileSync(path.join(install, 'local-config.json'), 'utf8'), '{"keep":true}\n');
+  assert.equal(fs.readFileSync(path.join(install, 'models', 'nexuspanel-needle2-repair.cact'), 'utf8'), 'existing model',
+    'an unresolved LFS pointer must not overwrite the installed model');
 
   const snapshot = fs.readdirSync(path.join(install, 'update', 'backups'))
     .find((name) => name.startsWith('code-') && name.endsWith('.tar.gz'));

@@ -13,7 +13,7 @@ SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
 SERVICE_NAME="${NEXUSPANEL_SERVICE_NAME:-nexuspanel}"
 EDITION="${NEXUSPANEL_EDITION:-normal}"
 REF="${NEXUSPANEL_REF:-v1.0.0}"
-INSTALL_AI="${NEXUSPANEL_INSTALL_AI:-ask}"
+INSTALL_AI="${NEXUSPANEL_INSTALL_AI:-yes}"
 SKIP_TUNNELS="${NEXUSPANEL_SKIP_TUNNELS:-no}"
 MAX_RETRIES="${NEXUSPANEL_MAX_RETRIES:-3}"
 LOG_DIR="/var/log/nexuspanel-installer"
@@ -96,17 +96,20 @@ repair_install_permissions() {
     # Do NOT chmod 777 recursively. That would expose credentials and panel data.
     # Directories need traversal; regular files need read/write. Executable bits
     # are restored only for known launchers and native binaries.
-    find "$INSTALL_DIR" -type d -exec chmod u+rwx,g+rx,o-rwx {} + 2>/dev/null || true
-    find "$INSTALL_DIR" -type f -exec chmod u+rw,g+r,o-rwx {} + 2>/dev/null || true
-    find "$INSTALL_DIR" -type f \( -name '*.sh' -o -name '*.bin' \) -exec chmod u+rwx,g+rx,o-rwx {} + 2>/dev/null || true
+    # Server trees contain isolated identities and ACLs; never rewrite them.
+    find "$INSTALL_DIR" -path "$INSTALL_DIR/servers" -prune -o -type d -exec chmod u+rwx,g+rx,o-rwx {} +
+    find "$INSTALL_DIR" -path "$INSTALL_DIR/servers" -prune -o -type f -exec chmod u+rw,g+r,o-rwx {} +
+    find "$INSTALL_DIR" -path "$INSTALL_DIR/servers" -prune -o -type f \( -name '*.sh' -o -name '*.bin' \) -exec chmod u+rwx,g+rx,o-rwx {} +
     for file in "$INSTALL_DIR/backend/cli.js" "$INSTALL_DIR/backend/index.js" "$INSTALL_DIR/backend/launcher.js" "$INSTALL_DIR/backend/service.js" "$INSTALL_DIR/backend/host_agent.js" "$INSTALL_DIR/backend/asf_native.js"; do
         [ -f "$file" ] && chmod 750 "$file" || true
     done
     chmod 600 "$INSTALL_DIR/data/setup_token" "$INSTALL_DIR/data/cookie_secret" 2>/dev/null || true
-    chmod 750 /usr/local/bin/nexuspanel 2>/dev/null || true
+    chmod 755 /usr/local/bin/nexuspanel 2>/dev/null || true
     if [ "$SERVICE_USER" != "root" ]; then
         local group="$(id -gn "$SERVICE_USER")"
-        chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/servers" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel 2>/dev/null || true
+        find "$INSTALL_DIR" -path "$INSTALL_DIR/servers" -prune -o -exec chgrp "$group" {} +
+        chown "$SERVICE_USER:$group" "$INSTALL_DIR/servers"
+        chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel
     fi
     # Verify the service identity can traverse and write its mutable roots.
     if [ "$SERVICE_USER" != "root" ]; then
@@ -147,7 +150,7 @@ install_system_packages() {
             info "Updating APT..."
             retry apt-get update || die "APT update failed."
             info "Installing required packages..."
-            retry apt-get install -y curl ca-certificates git unzip tar xz-utils libarchive-tools build-essential systemd acl passwd util-linux procps iproute2 rsync file jq openssl python3 python3-minimal || die "Ubuntu dependency installation failed."
+            retry apt-get install -y curl ca-certificates git unzip tar xz-utils libarchive-tools build-essential systemd acl passwd util-linux procps iproute2 rsync file jq openssl python3 python3-minimal python3-venv || die "Ubuntu dependency installation failed."
             ;;
         dnf)
             retry dnf makecache || true
@@ -166,20 +169,26 @@ install_system_packages() {
             ;;
         *) die "Unsupported Linux distribution/package manager." ;;
     esac
+    if ! command_exists git-lfs; then
+        case "$pm" in
+            apt) retry apt-get install -y git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+            dnf) retry dnf install -y git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+            yum) retry yum install -y git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+            zypper) retry zypper --non-interactive install git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+            pacman) retry pacman -S --noconfirm --needed git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+        esac
+    fi
 }
 
-node_major() {
-    node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
+node_supported() {
+    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major > 22 && major < 25) || (major === 22 && minor >= 5) ? 0 : 1)' >/dev/null 2>&1
 }
 
 ensure_node() {
-    if command_exists node; then
-        local current_major="$(node_major)"
-        if [ "$current_major" -ge 24 ]; then
-            NODE_PATH="$(command -v node)"
-            info "Node.js $("$NODE_PATH" --version) detected."
-            return 0
-        fi
+    if command_exists node && node_supported; then
+        NODE_PATH="$(command -v node)"
+        info "Node.js $("$NODE_PATH" --version) detected."
+        return 0
     fi
     local pm="$(detect_pm)"
     if [ "$pm" = "apt" ]; then
@@ -200,9 +209,8 @@ ensure_node() {
         die "Cannot determine package manager for Node.js."
     fi
     command_exists node || die "Node.js was not installed."
-    local major="$(node_major)"
-    if [ "$major" -lt 24 ]; then
-        die "Node.js 24+ is required. Detected: $(node --version)"
+    if ! node_supported; then
+        die "Node.js >=22.5.0 and <25.0.0 is required. Detected: $(node --version)"
     fi
     NODE_PATH="$(command -v node)"
     info "Node.js installed successfully."
@@ -215,6 +223,7 @@ require_service_user() {
     if ! id "$SERVICE_USER" >/dev/null 2>&1; then
         die "Service user '$SERVICE_USER' does not exist."
     fi
+    warn "The panel will run as $SERVICE_USER, but ASF game-server starts currently require the panel service to run as root."
 }
 
 remote_branch_exists() {
@@ -412,7 +421,6 @@ npm_install_with_recovery() {
     configure_npm
     if retry npm install --omit=optional --no-audit --no-fund; then
         info "npm dependencies installed."
-        npm install --include=optional --no-audit --no-fund || warn "Optional npm dependencies failed."
         return 0
     fi
     warn "npm install failed."
@@ -455,7 +463,7 @@ build_components() {
     if npm run build:asf; then
         info "ASF runtime build completed."
     else
-        warn "ASF runtime build failed. Continuing with fallback mode."
+        warn "ASF runtime build failed. Game-server starts will remain disabled until ASF is built and its preflight passes."
     fi
     if npm run build:host-agent; then
         info "Host agent build completed."
@@ -472,20 +480,18 @@ ask_ai() {
     esac
     echo
     echo "=================================================="
-    echo " NexusPanel Advanced AI"
+    echo " NexusPanel Needle repair model"
     echo "=================================================="
     echo
-    echo "Optional local coding/diagnostic AI."
-    echo "Model: Qwen2.5-Coder-0.5B-Instruct"
-    echo "AI is NOT required for the normal panel."
-    echo "It may require additional disk space and time."
+    echo "Optional local model for routing confirmed repair diagnostics."
+    echo "The panel still checks server state and repair permissions."
     echo
     if [ ! -t 0 ]; then
         warn "Installer input is not interactive. Skipping AI automatically."
         return 1
     fi
     while true; do
-        printf "Install Advanced AI now? [y/N]: "
+        printf "Install the Needle runtime now? [y/N]: "
         if ! read -r answer; then
             warn "Could not read input. Skipping Advanced AI."
             return 1
@@ -499,9 +505,33 @@ ask_ai() {
 }
 
 install_advanced_ai() {
-    # Advanced AI was removed in NexusPanel 1.0.0. Kept as a no-op so the
-    # install step numbering stays stable for existing scripts.
-    info "[5/9] Advanced AI setup skipped (removed in 1.0.0)."
+    info "[5/9] Preparing the local Needle repair runtime..."
+    if ! ask_ai; then
+        info "Needle runtime installation skipped. Deterministic repair remains available."
+        return 0
+    fi
+    local runtime="$INSTALL_DIR/data/needle2/runtime-linux"
+    local model="$INSTALL_DIR/models/nexuspanel-needle2-repair.cact"
+    mkdir -p "$INSTALL_DIR/data/needle2"
+    if ! python3 -m venv "$runtime"; then
+        warn "Could not create the Needle Python environment. Install python3-venv and retry."
+        return 0
+    fi
+    if ! "$runtime/bin/python" -m pip install 'cactus-needle==2.0.15'; then
+        warn "Could not install the Needle runtime. Deterministic repair remains available."
+        return 0
+    fi
+    if [ ! -f "$model" ] || [ "$(wc -c < "$model")" -lt 1024 ]; then
+        warn "The Needle repair model is missing or is a Git LFS pointer. Run git lfs pull and retry."
+        return 0
+    fi
+    local probe
+    probe="$(NEEDLE_TELEMETRY=0 timeout 90 "$runtime/bin/python" "$INSTALL_DIR/backend/needle2_worker.py" "$model" </dev/null 2>/dev/null)" || true
+    if [[ "$probe" != *'"ready": true'* ]]; then
+        warn "Needle could not initialize. Check Python and the model/runtime download."
+        return 0
+    fi
+    info "Needle repair model initialized successfully."
     return 0
 }
 
@@ -523,7 +553,8 @@ prepare_paths() {
     chmod 750 data servers software backups backupfolder update/backups /var/lib/nexuspanel /var/lib/nexuspanel/backups /var/lib/nexuspanel/logs /var/lib/nexuspanel/asf 2>/dev/null || true
     if [ "$SERVICE_USER" != "root" ]; then
         local group="$(id -gn "$SERVICE_USER")"
-        chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/servers" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel 2>/dev/null || true
+        chown "$SERVICE_USER:$group" "$INSTALL_DIR/servers"
+        chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel
     fi
     repair_install_permissions
 }
@@ -785,6 +816,9 @@ main() {
     ensure_node
     install_tunnel_tools
     clone_or_update
+    if command_exists git-lfs; then
+        (cd "$INSTALL_DIR" && git lfs pull) || warn "Git LFS model download failed; the panel will use deterministic repair until it is fixed."
+    fi
     npm_install_with_recovery
     build_components
     install_advanced_ai

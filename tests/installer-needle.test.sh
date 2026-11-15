@@ -25,7 +25,7 @@ echo 'venv' >> "$RECORD"
 PYTHON
 chmod 755 "$test_root/bin/python3"
 export PATH="$test_root/bin:$PATH"
-tr -d '\r' < "$repo/installers/nexuspanel-normal-v1.0.4-linux-installer.sh" | \
+tr -d '\r' < "$repo/installers/nexuspanel-normal-v1.0.0-linux-installer.sh" | \
   awk '/^ask_ai\(\) \{/ || /^install_advanced_ai\(\) \{/ {copy=1} copy {print} copy && /^}$/ {copy=0}' > "$test_root/functions.sh"
 info() { :; }
 warn() { echo "$*" >&2; }

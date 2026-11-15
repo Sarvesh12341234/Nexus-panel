@@ -13,4 +13,4 @@ Write-Host 'Running NexusPanel first-run setup preparation...'
 & node backend/cli.js setup-url
 Write-Host ''
 Write-Host 'Start NexusPanel with: npm start'
-Write-Host 'Windows uses the portable process/path guard; Linux uses native Nexus-Mark isolation when supported.'
+Write-Host 'Windows supports panel management; game-server starts require Linux with ASF isolation.'

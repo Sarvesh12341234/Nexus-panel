@@ -1,184 +1,130 @@
-# NexusPanel 1.0.4
+# NexusPanel 1.0.0
 
-Linux-native Minecraft server panel with the **ASF (Advanced Sandbox Fabric)**
-kernel isolation protocol — our own Landlock + seccomp + cgroup v2 sandbox that
-outperforms Docker on speed, memory, and version compatibility.
+NexusPanel is a Minecraft server management panel with a web console, file
+manager, backups, server configuration, and local repair tools. Linux game
+servers run under the ASF (Advanced Sandbox Fabric) isolation system, using
+per-server identities and kernel controls.
+
+## Install on a Linux VPS
+
+Use a supported systemd-based Linux host. The installer installs dependencies,
+downloads the panel and its Git LFS model, sets up the service, and prints a
+first-run setup URL. It installs the local Needle repair runtime by default.
+
+**Normal edition:**
+
+```bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/latest/download/nexuspanel-normal-v1.0.0-linux-installer.sh -o nexuspanel-install.sh
+sudo bash nexuspanel-install.sh
+```
+
+**Host edition:**
+
+```bash
+curl -fsSL https://github.com/Sarvesh12341234/Nexus-panel/releases/latest/download/nexuspanel-host-v1.0.0-linux-installer.sh -o nexuspanel-host-install.sh
+sudo bash nexuspanel-host-install.sh
+```
+
+Open the setup URL printed by the installer to create the owner account. The
+panel listens on port **3000** by default; configure your firewall and reverse
+proxy for your deployment. To skip the optional Needle runtime, run the
+installer with `sudo env NEXUSPANEL_INSTALL_AI=no bash nexuspanel-install.sh`.
+
+The release installers use the `v1.0.0` source tag by default. The Linux panel
+service currently runs as root to provision separate locked server identities
+and ACLs; game servers run under those separate identities. Starts fail closed
+when the required ASF isolation or identity checks do not succeed.
 
 ## Requirements
 
-- Ubuntu / Debian / other systemd Linux (x86_64 or ARM64)
-- Node.js ≥ 22.5.0 and < 25.0.0 (Node.js 24 is recommended)
-- Python 3 for safe extraction of bundled Java runtimes
-- A C compiler for the ASF sandbox (`apt install -y build-essential`)
-- `acl` for per-server identities (`apt install -y acl`)
+- Linux with systemd for isolated game-server execution.
+- Node.js `>=22.5.0` and `<25`, and npm `>=10` for manual installation.
+- Git LFS for the bundled model, Python 3 and a virtual environment for
+  Needle, a C compiler for ASF, and POSIX ACL tools. The installer attempts
+  to install the required packages.
+- Windows can run the panel for management, but game-server starts are
+  disabled until equivalent per-server isolation is available. Run
+  [`install.bat`](install.bat) from a checkout with Node.js installed.
 
-## Quick start
+## Features
 
-```bash
-# 1. Clone and install
-git clone <repo> nexuspanel && cd nexuspanel
-npm install
+- Manage servers and view the live console, status, and resource metrics.
+- Browse files, search names and text, edit supported files, upload in chunks,
+  and manage archives. Browsing and downloading remain available while a
+  server runs; most file changes require it to be stopped. Plugin configuration
+  files under `plugins/<plugin>/` can be edited live, subject to plugin behavior.
+- Manage software, server properties, whitelist, plugins, backups, network
+  allocations, database connections, admins, and panel settings.
+- Provision per-server databases on an existing MySQL/MariaDB host; NexusPanel
+  does not install or host the database server for you.
+- Use the repair preview and bounded repair tools. The local Needle repair
+  model routes confirmed diagnostic candidates; it is not an unrestricted
+  autonomous repair agent. See [Needle setup and limitations](ai/needle2/README.md).
 
-# 2. Install the systemd service
-sudo npm run service:install
-
-# 3. Create the owner account
-sudo nexuspanel setup-url
-# Open the printed URL in a browser
-```
-
-Check `node --version` before installing manually. The supported range is
-Node.js `>=22.5.0` and `<25.0.0`; Node.js 25 and newer are rejected until the
-SQLite adapter is verified on that major version. If the version is outside
-that range, install Node.js 24 and rerun the installation.
-
-## Installers
-
-The Linux release installers are in [`installers/`](installers/):
-
-- `nexuspanel-normal-v1.0.4-linux-installer.sh` installs the normal edition.
-- `nexuspanel-host-v1.0.4-linux-installer.sh` installs the host edition.
-
-Both installers use the `v1.0.4` source tag by default. Windows users can run
-[`install.bat`](install.bat) from the extracted release source.
-To install the current `main` branch on a VPS, download the normal installer
-from the `main` branch and set `NEXUSPANEL_REF=main` when running it. A
-versioned installer downloaded from the `v1.0.4` tag remains pinned to that
-release and does not receive later fixes automatically.
+## Update and administration
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sarvesh12341234/Nexus-panel/main/installers/nexuspanel-normal-v1.0.4-linux-installer.sh -o nexuspanel-install.sh
-sudo env NEXUSPANEL_REF=main bash nexuspanel-install.sh
+sudo nexuspanel status
+sudo nexuspanel logs
+sudo nexuspanel doctor
+sudo nexuspanel asf status
+sudo nexuspanel restart
+sudo nexuspanel setup-url       # only before the first owner is created
+sudo nexuspanel update
+nexuspanel help
 ```
 
-This installs the local Needle repair runtime by default; set
-`NEXUSPANEL_INSTALL_AI=no` to skip it. See [the Needle documentation](ai/needle2/README.md)
-for model limits and configuration.
+The updater preserves server files, panel data, backups, and configuration.
+See [updater documentation](update/README.md) for details and tag overrides.
+Installations created from a source archive need Git and Git LFS to retrieve
+the bundled repair model.
 
-Game-server execution is supported only on Linux hosts where the per-server
-locked identity and ASF systemd isolation preflight succeed. Launch fails closed
-if either isolation prerequisite is unavailable; it never falls back to running
-tenant code as the panel service account. The legacy Windows SYSTEM startup task
-is removed by the Windows service installer; server starts are disabled on
-Windows until an equivalent per-server isolation boundary is available.
-On Linux, the panel service currently needs to run as root to provision the
-locked per-server identities and ACLs; the game servers run under those
-separate identities. An explicitly configured non-root panel service can serve
-the interface, but cannot start game servers with the current ASF integration.
-
-The file manager remains available while a server is running for browsing and
-downloading. Plugin configuration files under `plugins/<plugin>/` can also be
-edited live; whether changes apply immediately depends on the plugin, and many
-require a plugin reload or server restart. Uploads, deletes, moves, extraction,
-and other file changes require the server to be stopped.
-
-## Per-server database provisioning
-
-NexusPanel can provision a dedicated MySQL/MariaDB database and random user for
-each game server on an existing database host. It does not install or host
-MariaDB itself. The panel keeps its own application database separate.
-
-Configure the existing database host for the systemd service:
-
-```bash
-sudo install -d -m 0750 /etc/nexuspanel
-sudo install -m 0600 /dev/null /etc/nexuspanel/database.env
-sudoedit /etc/nexuspanel/database.env
-```
-
-Add the following settings, replacing the host, admin user, and password:
+To configure database provisioning, create `/etc/nexuspanel/database.env`:
 
 ```ini
 NEXUSPANEL_DB_HOST=127.0.0.1
 NEXUSPANEL_DB_PORT=3306
 NEXUSPANEL_DB_USER=nexuspanel_admin
 NEXUSPANEL_DB_PASSWORD=replace-with-a-long-random-secret
-NEXUSPANEL_DB_ALLOWED_HOST=%
-NEXUSPANEL_DB_PUBLIC_HOST=127.0.0.1
+NEXUSPANEL_DB_ALLOWED_HOST=trusted-game-server-host
+NEXUSPANEL_DB_PUBLIC_HOST=database-address-visible-to-game-servers
 ```
 
-The database admin account needs privileges to create/drop databases and users,
-alter generated users, and grant privileges on newly created databases. The
-default allowed host `%` matches the screenshot but permits access from any
-source accepted by the database server; replace it with a trusted game-server
-IP/host where possible. Set `NEXUSPANEL_DB_PUBLIC_HOST` to the address the game
-server should use if it cannot reach the host via `127.0.0.1`. Then restart
-NexusPanel with `sudo systemctl restart nexuspanel`.
+Restrict access to that file and restart the service. The database admin needs
+permission to create and remove the databases and users NexusPanel provisions.
+Rotating a database password requires updating the game-server configuration.
 
-Open a server's **Databases** view and choose **Create database**. **Details**
-shows its endpoint, allowed source, username, password, and JDBC URL. Passwords
-are encrypted at rest; rotating one changes the database user password, so
-update the game-server configuration afterwards. Deleting a provisioned entry
-also drops its database and user. Existing external connections can still be
-saved separately without provisioning.
-
-## The ASF protocol
-
-ASF isolates every Minecraft server with kernel-enforced rules — no Docker
-daemon, no images, no overlayfs:
-
-| Layer | Mechanism |
-|---|---|
-| Identity | Locked system user `asf-s<id>` + POSIX ACLs |
-| Landlock | Filesystem scope + net-port bind lock (ABI 4+) |
-| Seccomp BPF | Denies mount/swap/reboot/raw-io/privileged syscalls |
-| Cgroup v2 | MemoryMax, CPUQuota, TasksMax, IOWeight |
-| Supervisor | `asf_runtime` static-PIE binary, exit-code contract |
-
-Full spec: [`docs/ASF-PROTOCOL.md`](docs/ASF-PROTOCOL.md)
-
-## CLI
+## Manual development setup
 
 ```bash
-nexuspanel status            # service status
-nexuspanel doctor            # full diagnostic
-nexuspanel asf status        # kernel isolation status
-nexuspanel asf rebuild       # rebuild the sandbox binary
-nexuspanel permissions repair # fix file ownership/modes
-nexuspanel update            # safe self-update with rollback
-nexuspanel help               # everything else
+git lfs install
+git clone https://github.com/Sarvesh12341234/Nexus-panel.git
+cd Nexus-panel
+git lfs pull
+npm ci
+npm run foreground
 ```
 
-## Security model
+For a Linux systemd service, run `sudo npm run service:install` and then
+`sudo nexuspanel setup-url`. The repair model needs the pinned Python runtime;
+see the [Needle documentation](ai/needle2/README.md) for setup and evaluation.
 
-- Sessions: HMAC-signed cookies, 12 h TTL, 2 h idle, UA binding
-- CSRF: `x-nexuspanel-request` header on every mutating call
-- Headers: CSP, HSTS, nosniff, Referrer-Policy, Permissions-Policy
-- Files: path-traversal guard, symlink walk block, Zip Slip protection
-- SSRF: private-address blocking + DNS pinning (rebinding-proof)
-- Uploads: SHA-256 chunk verification, size caps
-- Archives: ZIP, TAR, GZ, BZ2, XZ, ZST, 7Z, and RAR extraction; 7Z/RAR need libarchive (`bsdtar`)
-- CSRF: mutating cookie-authenticated requests require the custom header and reject cross-site/same-site origins
-- Auth: scrypt password hashing, login throttling, constant-time OTP compare
-- Errors: no stack traces or internal paths leak to clients
-
-## Testing
+## Testing and project layout
 
 ```bash
-npm test               # full suite
-npm run test:exploit   # 90+ adversarial attack simulations
-npm run build:asf      # build the sandbox
-sudo npm run audit:asf # root sandbox-escape audit
-npm run benchmark:asf  # launch overhead benchmark
+npm test
+npm run test:exploit
+npm run build:asf
+sudo npm run audit:asf
 ```
 
-## AI training corpus
-
-[`docs/AI-TRAINING-CORPUS.md`](docs/AI-TRAINING-CORPUS.md) — 408 coded error
-records, full route registry, CLI reference, Linux command reference, and
-SFT/RAG training formats for the NexusPanel support AI.
-
-## Layout
-
-```
-backend/    Express API, ASF engine, runtime supervisor
-native/     asf_runtime.c sandbox + host agent (C)
-frontend/   Vanilla JS SPA
-tests/      Unit + adversarial security suites
-installers/ Linux install scripts
-update/     Safe updater with rollback
-```
+`backend/` contains the API and runtime, `frontend/` the web interface,
+`native/` the ASF and host-agent sources, `models/` the repair model,
+`tests/` the regression tests, and `installers/` and `update/` the deployment
+scripts. See the [ASF protocol](docs/ASF-PROTOCOL.md) for isolation details.
 
 ## License
 
-MIT
+NexusPanel is MIT licensed. The repair model is derived from
+[Cactus Compute Needle 2](https://huggingface.co/Cactus-Compute/needle2); see
+its upstream license and the [model documentation](ai/needle2/README.md).

@@ -22,7 +22,7 @@ before="$(stat -c '%u:%g:%a' "$INSTALL_DIR/servers/isolated/game.dat")"
 
 # Redirect the two host-wide paths into the fixture before sourcing the
 # function, keeping the production function itself otherwise unchanged.
-tr -d '\r' < "$repo/installers/nexuspanel-normal-v1.0.4-linux-installer.sh" | \
+tr -d '\r' < "$repo/installers/nexuspanel-normal-v1.0.0-linux-installer.sh" | \
   awk '/^repair_install_permissions\(\) \{/ {copy=1} copy {print} copy && /^}$/ {exit}' | \
   sed "s|/var/lib/nexuspanel|$test_root/varlib|g; s|/usr/local/bin/nexuspanel|$test_root/cli|g" > "$test_root/function.sh"
 info() { :; }

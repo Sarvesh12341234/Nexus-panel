@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 
 const projectRoot = path.join(__dirname, '..');
 const installer = fs.readFileSync(path.join(projectRoot, 'installers', 'nexuspanel-normal-v1.0.0-linux-installer.sh'), 'utf8');
+const hostInstaller = fs.readFileSync(path.join(projectRoot, 'installers', 'nexuspanel-host-v1.0.0-linux-installer.sh'), 'utf8');
 const currentInstaller = fs.readFileSync(path.join(projectRoot, 'installers', 'nexuspanel-normal-v1.0.4-linux-installer.sh'), 'utf8');
 const currentHostInstaller = fs.readFileSync(path.join(projectRoot, 'installers', 'nexuspanel-host-v1.0.4-linux-installer.sh'), 'utf8');
 const index = fs.readFileSync(path.join(projectRoot, 'backend', 'index.js'), 'utf8');
@@ -17,6 +18,10 @@ assert.match(installer, /setup_token/);
 assert.match(installer, /First-run setup:/);
 assert.match(installer, /setup_owner\(\)/);
 assert.match(installer, /Web account setup is ready/);
+assert.match(installer, /NEXUSPANEL_REF:-v1\.0\.0/);
+assert.match(installer, /cactus-needle==2\.0\.15/);
+assert.match(hostInstaller, /nexuspanel-normal-v1\.0\.0-linux-installer\.sh/);
+assert.match(hostInstaller, /NEXUSPANEL_REF:-v1\.0\.0/);
 assert.doesNotMatch(installer, /Owner Setup.*\n.*read -r/si);
 assert.match(currentInstaller, /node_supported\(\)/);
 assert.match(currentInstaller, /major < 25/);

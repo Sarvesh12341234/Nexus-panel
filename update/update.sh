@@ -13,8 +13,8 @@ if [ -z "$EDITION" ] && [ -f "$APP_DIR/data/edition" ]; then
 fi
 EDITION="${EDITION:-normal}"
 case "$EDITION" in
-  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.8}" ;;
-  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.8}" ;;
+  host|host-v*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.0}" ;;
+  normal|normal-v*|*) UPDATE_TAG="${NEXUSPANEL_UPDATE_TAG:-v1.0.0}" ;;
 esac
 case "$UPDATE_TAG" in
   *-v*) EXPECTED_VERSION="${UPDATE_TAG##*-v}" ;;
@@ -98,6 +98,9 @@ if command -v git >/dev/null 2>&1 && [ -d .git ]; then
   fi
   git reset --hard "$TARGET_COMMIT"
   UPDATE_SWITCHED=1
+  if git lfs version >/dev/null 2>&1; then
+    git lfs pull --include='models/nexuspanel-needle2-repair.cact' || echo '[NexusPanel] Needle model download failed; deterministic repair remains available.' >&2
+  fi
   INSTALLED_COMMIT="$(git rev-parse HEAD)"
   if [ "$INSTALLED_COMMIT" != "$TARGET_COMMIT" ]; then
     echo "[NexusPanel] Update verification failed: expected $TARGET_COMMIT, got $INSTALLED_COMMIT." >&2
@@ -130,7 +133,19 @@ else
     echo "[NexusPanel] Downloaded release version $SOURCE_VERSION; expected $EXPECTED_VERSION." >&2
     exit 1
   fi
+  if git lfs version >/dev/null 2>&1; then
+    git -C "$TEMP_DIR/repository" lfs pull --include='models/nexuspanel-needle2-repair.cact' || echo '[NexusPanel] Needle model download failed; deterministic repair remains available.' >&2
+  fi
   git -C "$TEMP_DIR/repository" archive --format=tar HEAD | tar -xf - -C "$TEMP_DIR/source"
+  if [ -f "$TEMP_DIR/repository/models/nexuspanel-needle2-repair.cact" ]; then
+    mkdir -p "$TEMP_DIR/source/models"
+    if head -c 80 "$TEMP_DIR/repository/models/nexuspanel-needle2-repair.cact" | grep -q '^version https://git-lfs.github.com/spec/v1'; then
+      rm -f "$TEMP_DIR/source/models/nexuspanel-needle2-repair.cact"
+      echo '[NexusPanel] Needle model is an unresolved Git LFS pointer; preserving any existing model.' >&2
+    else
+      cp -a "$TEMP_DIR/repository/models/nexuspanel-needle2-repair.cact" "$TEMP_DIR/source/models/"
+    fi
+  fi
   UPDATE_SWITCHED=1
   shopt -s dotglob nullglob
   for source_path in "$TEMP_DIR/source"/*; do
@@ -146,7 +161,7 @@ fi
 
 if [ -f package.json ]; then
   npm install --no-audit --no-fund
-  npm run build:asf || echo "[NexusPanel] Native ASF build unavailable; keeping systemd isolation fallback."
+  npm run build:asf || echo "[NexusPanel] Native ASF build unavailable; server starts remain disabled until isolation is available."
   npm run build:host-agent || echo "[NexusPanel] Native host agent build unavailable; restart the service installer after installing a C compiler."
 fi
 echo "[NexusPanel][85%] Dependencies verified."
