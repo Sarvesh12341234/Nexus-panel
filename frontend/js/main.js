@@ -3280,6 +3280,13 @@ function renderSettings() {
       <button type="submit">Save AI settings</button>
     </form>` : ''}
     ${state.user?.role === 'owner' ? `
+    <form class="settings-group ai-settings" id="aiPasswordForm">
+      <div><strong>Reset AI chat password</strong><p class="muted">Enter your current AI password and a new one. Resetting closes all active AI sessions.</p></div>
+      <label>Current AI password <input name="currentPassword" type="password" autocomplete="current-password" required></label>
+      <label>New AI password <input name="newPassword" type="password" minlength="12" maxlength="200" autocomplete="new-password" required></label>
+      <button type="submit" class="secondary">Reset AI password</button>
+    </form>` : ''}
+    ${state.user?.role === 'owner' ? `
     <form class="settings-group ai-settings" id="aiFullAccessForm">
       <div><strong>AI full access: ${state.aiConfig?.fullAccess ? 'Enabled' : 'Disabled'}</strong><p class="muted">Full access lets the AI run shell commands with the panel service account’s privileges. On a typical Linux installation this is root, so it can read, change or delete files and settings across the VPS. Commands and results may be sent to your AI provider. Enable this only when you trust the provider and understand this access.</p></div>
       ${state.aiConfig?.fullAccess ? '<button type="submit" class="secondary">Disable full access</button>' : '<label>AI chat password <input name="password" type="password" autocomplete="current-password" required></label><button type="submit">Enable full access</button>'}
@@ -3371,7 +3378,7 @@ function renderSettings() {
 
 document.addEventListener('submit', async (event) => {
   const form = event.target;
-  if (!['aiSettingsForm', 'aiFullAccessForm', 'aiUnlockForm', 'aiChatForm'].includes(form.id)) return;
+  if (!['aiSettingsForm', 'aiFullAccessForm', 'aiPasswordForm', 'aiUnlockForm', 'aiChatForm'].includes(form.id)) return;
   event.preventDefault();
   const button = form.querySelector('button[type="submit"]');
   if (button) button.disabled = true;
@@ -3384,6 +3391,10 @@ document.addEventListener('submit', async (event) => {
       const enabled = !state.aiConfig?.fullAccess;
       state.aiConfig = await api('/api/ai/full-access', { method: 'PUT', body: JSON.stringify({ enabled, password: enabled ? form.elements.password.value : '' }) });
       showToast(`AI full access ${enabled ? 'enabled' : 'disabled'}. Unlock AI chat again.`);
+      renderSettings();
+    } else if (form.id === 'aiPasswordForm') {
+      await api('/api/ai/reset-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.elements.currentPassword.value, newPassword: form.elements.newPassword.value }) });
+      showToast('AI password reset. Unlock AI chat again.');
       renderSettings();
     } else if (form.id === 'aiUnlockForm') {
       await api('/api/ai/unlock', { method: 'POST', body: JSON.stringify({ password: form.elements.password.value }) });
