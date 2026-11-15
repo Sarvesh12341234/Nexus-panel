@@ -273,6 +273,7 @@ const viewTitles = {
   tebex: ['Store', 'Tebex Ranks'],
   admins: ['Owner', 'Admin Access'],
   security: ['Security', 'Health, Audit and Repairs'],
+  ai: ['Server', 'AI Chat'],
   settings: ['Panel', 'Settings'],
 };
 const viewAccess = {
@@ -292,6 +293,7 @@ const viewAccess = {
   tebex: { keys: [CAPABILITIES.SERVER_MANAGE], level: 'MANAGE_SERVERS' },
   admins: { keys: [CAPABILITIES.ADMINS_MANAGE], level: 'MANAGE_ADMINS' },
   security: { keys: [CAPABILITIES.SECURITY_VIEW], level: 'MANAGE_ADMINS' },
+  ai: { keys: [], level: 'VIEW_ONLY' },
   settings: { keys: [CAPABILITIES.SETTINGS_MANAGE, CAPABILITIES.TIMEZONE_MANAGE], level: 'MANAGE_ADMINS' },
 };
 const defaultNavOrder = Object.keys(viewTitles);
@@ -1451,6 +1453,7 @@ function can(capability, legacyLevel = 0) {
 
 function canView(view) {
   if (!state.user || !Object.hasOwn(viewAccess, view)) return false;
+  if (view === 'ai') return state.user.role === 'owner' && Boolean(state.settings?.aiChatEnabled);
   if (view === 'templates' && state.settings?.edition !== 'host') return false;
   const access = viewAccess[view];
   if (!access.keys.length) return true;
@@ -2292,6 +2295,7 @@ async function renderActiveView({ shellScroll = null } = {}) {
     if (view === 'tebex') await renderTebex();
     if (view === 'admins') renderAdmins();
     if (view === 'security') await renderSecurity();
+    if (view === 'ai') await renderAiChat();
     if (view === 'settings') renderSettings();
     reapplyDynamicLayout();
   } finally {
@@ -3147,6 +3151,30 @@ function applyFileManagerLayout() {
   }
 }
 
+let aiRenderSerial = 0;
+let aiExpiryTimer = 0;
+
+async function renderAiChat() {
+  const panel = document.querySelector('#aiChatPanel');
+  const server = activeServer();
+  if (!panel) return;
+  const serial = ++aiRenderSerial;
+  const config = await api('/api/ai/settings');
+  if (serial !== aiRenderSerial || state.activeView !== 'ai') return;
+  state.aiConfig = config;
+  if (!config.expiresAt || config.expiresAt <= Date.now()) {
+    panel.innerHTML = `<div class="section-head"><div><p class="eyebrow">Private session</p><h2>Unlock AI chat</h2></div></div><p class="muted">${config.passwordConfigured ? 'Enter your AI password.' : 'Choose an AI password for future sessions.'} The session and history expire after 10 minutes.</p><form id="aiUnlockForm" class="ai-form"><label>AI password <input name="password" type="password" minlength="12" maxlength="200" autocomplete="current-password" required></label><button type="submit">${config.passwordConfigured ? 'Unlock' : 'Set password and unlock'}</button></form>`;
+    return;
+  }
+  if (!server) { panel.innerHTML = '<p class="empty-state">Create or select a server to use AI chat.</p>'; return; }
+  const history = await api(`/api/ai/history?serverId=${encodeURIComponent(server.id)}`);
+  if (serial !== aiRenderSerial || state.activeView !== 'ai' || activeServer()?.id !== server.id) return;
+  panel.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHtml(config.provider)} · ${escapeHtml(config.model)}</p><h2>AI chat</h2><p class="muted">Selected server: ${escapeHtml(server.name)} · Session expires at ${escapeHtml(new Date(history.expiresAt).toLocaleTimeString())}</p></div><button type="button" class="secondary" data-action="ai-lock">Lock and clear</button></div><p class="muted">The assistant can read server files and logs, edit text files while stopped, send server console commands, and run limited diagnostics. Content used in the chat is sent to your provider.</p><div class="ai-messages" id="aiMessages">${history.messages.length ? history.messages.map((entry) => `<article class="ai-message ${entry.role === 'user' ? 'is-user' : 'is-assistant'}"><strong>${entry.role === 'user' ? 'You' : 'AI'}</strong><div>${escapeHtml(entry.content)}</div>${entry.steps?.length ? `<details><summary>${entry.steps.length} operation(s)</summary><pre>${escapeHtml(entry.steps.map((step) => `${step.tool}: ${step.result}`).join('\n'))}</pre></details>` : ''}</article>`).join('') : '<p class="empty-state">Ask about this server or request a repair.</p>'}</div><form id="aiChatForm" class="ai-form"><label>Message <textarea name="message" rows="3" maxlength="12000" required placeholder="What would you like to do?"></textarea></label><button type="submit">Send</button></form>`;
+  const messages = panel.querySelector('#aiMessages'); if (messages) messages.scrollTop = messages.scrollHeight;
+  clearTimeout(aiExpiryTimer);
+  aiExpiryTimer = setTimeout(() => { if (state.activeView === 'ai') renderAiChat().catch((error) => showToast(error.message)); }, Math.max(0, history.expiresAt - Date.now()) + 50);
+}
+
 function renderSettings() {
   if (!elements.settingsPanel) return;
   const settings = state.settings || {};
@@ -3156,6 +3184,10 @@ function renderSettings() {
   const canManageServer = Boolean(server) && can(CAPABILITIES.SERVER_MANAGE, state.permissions.MANAGE_SERVERS);
   const canManageSettings = can(CAPABILITIES.SETTINGS_MANAGE, state.permissions.MANAGE_ADMINS);
   const selectedZone = settings.timeZone || 'UTC';
+  if (state.user?.role === 'owner' && !state.aiConfig && !state.aiConfigLoading) {
+    state.aiConfigLoading = true;
+    api('/api/ai/settings').then((config) => { state.aiConfig = config; if (state.activeView === 'settings') renderSettings(); }).catch((error) => showToast(error.message)).finally(() => { state.aiConfigLoading = false; });
+  }
   const zoneOptions = timeZones.map((zone) => `<option value="${escapeHtml(zone)}" ${zone === selectedZone ? 'selected' : ''}>${escapeHtml(zone)}</option>`).join('');
   const visibleNavOrder = [...document.querySelectorAll('.nav-list [data-view]')].map((button) => ({
     key: button.dataset.view,
@@ -3224,6 +3256,15 @@ function renderSettings() {
       </div>
       ${canManageSettings ? '<button class="save-wide" type="submit">Save Panel Settings</button>' : ''}
     </form>
+    ${state.user?.role === 'owner' ? `
+    <form class="settings-group ai-settings" id="aiSettingsForm">
+      <div><strong>AI chat</strong><p class="muted">Optional owner-only chat. Messages, selected server files and logs used by the assistant are sent to your chosen provider. Sessions and chat history expire after 10 minutes.</p></div>
+      <label class="switch"><input name="enabled" type="checkbox" ${state.aiConfig?.enabled ? 'checked' : ''}><span></span>Enable AI chat</label>
+      <label>Provider <select name="provider"><option value="openai" ${state.aiConfig?.provider === 'openai' ? 'selected' : ''}>OpenAI</option><option value="nvidia" ${state.aiConfig?.provider === 'nvidia' ? 'selected' : ''}>NVIDIA</option><option value="anthropic" ${state.aiConfig?.provider === 'anthropic' ? 'selected' : ''}>Claude / Anthropic</option></select></label>
+      <label>Model ID <input name="model" value="${escapeHtml(state.aiConfig?.model || '')}" placeholder="Enter a model supported by your provider" required></label>
+      <label>API key <input name="apiKey" type="password" autocomplete="new-password" placeholder="${state.aiConfig?.keyConfigured ? 'Saved — leave blank to keep' : 'Paste provider API key'}"></label>
+      <button type="submit">Save AI settings</button>
+    </form>` : ''}
     ${server?.type === 'java' && canManageServer ? `
     <form class="settings-group startup-settings" id="javaStartupFlagsForm" data-server-id="${Number(server.id)}">
       <div><strong>Java startup options</strong><p class="muted">Server: ${escapeHtml(server.name)}. Add one JVM flag per line. NexusPanel controls the memory limit and Java runtime paths. Changes apply after the next restart.</p></div>
@@ -3308,6 +3349,42 @@ function renderSettings() {
     </details>
   `;
 }
+
+document.addEventListener('submit', async (event) => {
+  const form = event.target;
+  if (!['aiSettingsForm', 'aiUnlockForm', 'aiChatForm'].includes(form.id)) return;
+  event.preventDefault();
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    if (form.id === 'aiSettingsForm') {
+      state.aiConfig = await api('/api/ai/settings', { method: 'PUT', body: JSON.stringify(formData(form)) });
+      showToast('AI settings saved.');
+      await refresh();
+    } else if (form.id === 'aiUnlockForm') {
+      await api('/api/ai/unlock', { method: 'POST', body: JSON.stringify({ password: form.elements.password.value }) });
+      await renderAiChat();
+    } else {
+      const server = activeServer();
+      if (!server) throw new Error('Select a server first.');
+      const message = form.elements.message.value;
+      if (button) button.textContent = 'Thinking…';
+      await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message }) });
+      if (state.activeView === 'ai' && activeServer()?.id === server.id) await renderAiChat();
+    }
+  } catch (error) {
+    showToast(error.message);
+    if (error.status === 401 && form.id === 'aiChatForm') renderAiChat().catch(() => {});
+  } finally {
+    if (button) { button.disabled = false; if (form.id === 'aiChatForm') button.textContent = 'Send'; }
+  }
+});
+
+document.addEventListener('click', async (event) => {
+  if (!event.target.closest('[data-action="ai-lock"]')) return;
+  try { await api('/api/ai/lock', { method: 'POST', body: '{}' }); await renderAiChat(); }
+  catch (error) { showToast(error.message); }
+});
 function updateSettingsLiveStatus() {
   if (state.activeView !== 'settings') return;
   const update = state.settings?.updateStatus || {};

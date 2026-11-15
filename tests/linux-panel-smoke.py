@@ -76,6 +76,15 @@ with tempfile.TemporaryDirectory(prefix='nexuspanel-smoke-', dir='/tmp') as temp
                 raise RuntimeError('Panel did not start')
             call('POST', '/api/login', {'email': env['NEXUSPANEL_OWNER_EMAIL'], 'password': env['NEXUSPANEL_OWNER_PASSWORD']})
             server, create_ms = call('POST', '/api/servers', {'name': 'Smoke Test', 'type': 'java'})
+            settings, _ = call('GET', '/api/ai/settings')
+            assert not settings['enabled']
+            settings, _ = call('PUT', '/api/ai/settings', {'provider': 'openai', 'model': 'test-model', 'apiKey': 'disposable-test-key', 'enabled': True})
+            assert settings['enabled'] and settings['keyConfigured'] and 'disposable-test-key' not in json.dumps(settings)
+            call('POST', '/api/ai/unlock', {'password': 'disposable-ai-password'})
+            history, _ = call('GET', '/api/ai/history?serverId=' + str(server['server']['id']))
+            assert history['messages'] == []
+            call('POST', '/api/ai/lock', {})
+            call('PUT', '/api/ai/settings', {'provider': 'openai', 'model': 'test-model', 'enabled': False})
             prefix = '/api/servers/' + str(server['server']['id'])
             call('POST', prefix + '/files/mkdir', {'path': 'sample'})
             call('PUT', prefix + '/files', {'path': 'sample/example.txt', 'content': 'hello world'})

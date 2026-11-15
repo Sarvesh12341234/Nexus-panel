@@ -61,6 +61,23 @@ when the required ASF isolation or identity checks do not succeed.
   model routes confirmed diagnostic candidates; it is not an unrestricted
   autonomous repair agent. See [Needle setup and limitations](ai/needle2/README.md).
 
+## Optional AI chat
+
+The owner can enable AI chat in Settings, select OpenAI, NVIDIA or Anthropic,
+and enter a provider model ID and API key. The key is encrypted on the panel;
+keep the panel data directory and its `ai-chat.secret` file together in backups.
+On the first visit to the AI section, choose a separate password of at least
+12 characters. Unlocks and in-memory chat history expire after ten minutes.
+
+The assistant works on the selected server: it can inspect text files, logs,
+server status and panel events, edit text files while the server is stopped,
+send server console commands, and run a small set of diagnostic commands.
+These operations can change server data. The provider receives chat messages
+and any file or log content the assistant reads, and provider usage may incur
+charges. Terminal access is limited to diagnostics, and repairs depend on the
+model and available tools; successful repair is not guaranteed. This optional
+cloud feature is separate from the local Needle repair model.
+
 ## Update and administration
 
 ```bash

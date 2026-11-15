@@ -1153,6 +1153,15 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
   transition: border-color 0.16s ease, background 0.16s ease;
 }
 
+.ai-settings, .ai-form { display: grid; gap: .85rem; }
+.ai-messages { display: grid; align-content: start; gap: .8rem; max-height: min(58vh, 620px); overflow-y: auto; margin: 1rem 0; padding: .3rem; }
+.ai-message { min-width: 0; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.035); }
+.ai-message.is-user { border-color: rgba(94,216,255,.35); }
+.ai-message > div, .ai-message pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-message pre { max-height: 240px; overflow: auto; }
+.ai-form textarea { width: 100%; resize: vertical; }
+@media (max-width: 700px) { .ai-messages { max-height: 48dvh; } .ai-form button { width: 100%; min-height: 44px; } }
+
 .file-list.is-dropping {
   outline: 2px dashed rgba(94, 216, 255, 0.72);
   outline-offset: 6px;

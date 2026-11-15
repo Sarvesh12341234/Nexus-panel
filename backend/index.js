@@ -48,6 +48,7 @@ const tebex = require('./tebex');
 const hosting = require('./hosting');
 const hostAgent = require('./host_agent');
 const { requestSecurityError } = require('./request_security');
+const { createAiChat } = require('./ai_chat');
 const { PerformanceMonitor } = require('./performance_monitor');
 const {
   SESSION_COOKIE,
@@ -370,6 +371,7 @@ function panelSettingsPayload(user = null) {
     nexuExample: edition === 'host' ? nexuExample() : null,
     hostMaintenanceMode: edition === 'host' && settingValue('host_maintenance_mode', '0') === '1',
     hostServerQuota: edition === 'host' ? clampNumber(settingValue('host_server_quota', '10'), 1, 500, 10) : 0,
+    aiChatEnabled: user?.role === 'owner' && settingValue('ai_chat_enabled', '0') === '1',
   };
 }
 
@@ -4309,6 +4311,47 @@ async function ensureSoftwareRequirements(software, serverId, onProgress, versio
   }
   return { ok: true, message: 'No external runtime required.' };
 }
+
+const aiChat = createAiChat({
+  db, dataDir: path.resolve(process.env.NEXUSPANEL_DATA_DIR || process.env.NEXUSPANEL_DATA_ROOT || dataRoot),
+  hashPassword, verifyPassword, requireAuth, getServer: getServerOr404,
+  executeTool: async (name, args, server, user) => {
+    if (name === 'server_info') return { server: serverPayload(server), status: runtimeDetails(server.id), panelVersion: PANEL_VERSION, edition: panelEdition() };
+    if (name === 'console_logs') { const lines = consoleLogs(server.id).slice(-150); return { lines, diagnostics: diagnoseRuntime(lines) }; }
+    if (name === 'panel_events') return { events: db.prepare('SELECT category, title, detail, created_at FROM fixed_logs WHERE server_id = ? OR server_id IS NULL ORDER BY created_at DESC LIMIT 30').all(server.id) };
+    if (name === 'console_command') { const rate = consumeCommandRateLimit(user.id, server.id); if (!rate.allowed) throw new Error('Console command rate limit reached.'); return sendCommand(server.id, args.command); }
+    if (name === 'terminal') {
+      const allowed = { ls: [[], ['-la']], pwd: [[]], df: [[], ['-h']], free: [[], ['-m']], uptime: [[]], uname: [[], ['-a']], id: [[]], java: [['-version']] };
+      const command = String(args.command || '').toLowerCase(), argv = Array.isArray(args.args) ? args.args : [];
+      if (!Object.hasOwn(allowed, command) || !allowed[command].some((permitted) => JSON.stringify(permitted) === JSON.stringify(argv))) throw new Error('Only fixed diagnostic terminal commands are available.');
+      return require('./agent_terminal').runAgentTerminal(db, repairAgentSecret(), { command: args.command, args: args.args, server, purpose: 'ai-chat', timeoutMs: 8000 });
+    }
+    if (['list_files', 'read_file', 'write_file'].includes(name)) {
+      const target = safeServerFile(server, args.path || '');
+      if (name === 'list_files') {
+        const entries = await fs.promises.readdir(target.absolute, { withFileTypes: true });
+        return { path: target.relative, entries: entries.filter((entry) => !entry.isSymbolicLink() && isUserVisibleServerEntry(path.posix.join(target.relative.replaceAll('\\', '/'), entry.name))).slice(0, 300).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' : 'file' })) };
+      }
+      if (!target.relative) throw new Error('Choose a file inside the server directory.');
+      if (name === 'read_file') {
+        const stats = await fs.promises.stat(target.absolute);
+        if (!stats.isFile() || !fileDescriptor(target.relative, stats.size).editable || stats.size > 128 * 1024) throw new Error('Only text files up to 128 KB can be read.');
+        return { path: target.relative, content: (await fs.promises.readFile(target.absolute, 'utf8')).slice(0, 16000), truncated: stats.size > 16000 };
+      }
+      const content = String(args.content ?? '');
+      if (Buffer.byteLength(content) > 128 * 1024 || !fileDescriptor(target.relative, Buffer.byteLength(content)).editable) throw new Error('Only text files up to 128 KB can be written.');
+      const release = beginServerFileOperation(server.id);
+      try {
+        await fs.promises.mkdir(path.dirname(target.absolute), { recursive: true });
+        await fs.promises.writeFile(target.absolute, content, 'utf8');
+        logFixed({ serverId: server.id, category: 'files', title: 'AI edited file', detail: target.relative, source: 'ai-chat' });
+        return { ok: true, path: target.relative };
+      } finally { release(); }
+    }
+    throw new Error('Unknown AI operation.');
+  },
+});
+app.use('/api/ai', aiChat.router);
 
 app.get('/api/overview', (req, res) => {
   const payload = {
