@@ -1203,7 +1203,7 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 .ai-unlock-form label { display: flex; flex-direction: column; gap: .4rem; font-size: .85rem; color: var(--muted); }
 .ai-unlock-form input { width: 100%; min-height: 2.8rem; font-size: 1rem; }
 .ai-unlock-form button { width: 100%; min-height: 2.8rem; }
-@media (max-width: 700px) { .ai-messages { max-height: 52dvh; } .ai-row { max-width: 96%; } .ai-compose-toolbar { flex-wrap: wrap; } .ai-composer button { width: 100%; } }
+@media (max-width: 700px) { .ai-messages { max-height: 52dvh; } .ai-row { max-width: 96%; } .ai-compose-toolbar { flex-wrap: wrap; } .ai-composer { flex-direction: column; } .ai-composer button { width: 100%; } .ai-compose-toolbar { justify-content: space-between; } }
 
 .file-list.is-dropping {
   outline: 2px dashed rgba(94, 216, 255, 0.72);
