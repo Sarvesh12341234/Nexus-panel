@@ -164,7 +164,7 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
             const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/.exec(part.image_url?.url || '');
             return match ? { type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } } : part;
           }) : msg.content }));
-          payload = { model: settings.model, max_tokens: 2048, system, messages, tools: availableTools };
+          payload = { model: settings.model, max_tokens: 4096, system, messages, tools: availableTools };
         } else if (isNvidia) {
           // NVIDIA Nemotron vision: convert image_url parts to the format they expect
           const messages = [{ role: 'system', content: system }, ...history.messages].map((msg) => {
@@ -182,9 +182,9 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
             }
             return msg;
           });
-          payload = { model: settings.model, max_tokens: 2048, messages, tools: availableTools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })) };
+          payload = { model: settings.model, max_tokens: 4096, messages, tools: availableTools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })) };
         } else {
-          payload = { model: settings.model, max_tokens: 2048, messages: [{ role: 'system', content: system }, ...history.messages], tools: availableTools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })) };
+          payload = { model: settings.model, max_tokens: 4096, messages: [{ role: 'system', content: system }, ...history.messages], tools: availableTools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })) };
         }
         const headers = anthropic ? { 'x-api-key': secret, 'anthropic-version': '2023-06-01' } : { Authorization: `Bearer ${secret}` };
         const response = await fetchImpl(PROVIDERS[settings.provider], { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(Math.max(1, Math.min(60000, session.expiresAt - Date.now()))) });
@@ -192,12 +192,21 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
         let data; try { data = JSON.parse(raw); } catch { throw new Error('AI provider returned invalid JSON.'); }
         if (!response.ok) throw new Error(`AI provider request failed (${response.status}): ${String(data.error?.message || 'Check provider settings.').slice(0, 250).replaceAll(secret, '[redacted]')}`);
         const assistant = anthropic ? { role: 'assistant', content: data.content || [] } : data.choices?.[0]?.message;
-        if (!assistant) throw new Error('AI provider returned no response.');
+        if (!assistant) throw new Error(`AI provider returned no response (finish reason: ${data.choices?.[0]?.finish_reason || data.stop_reason || 'unknown'}).`);
         const calls = anthropic ? (assistant.content || []).filter((x) => x.type === 'tool_use').map((x) => ({ id: x.id, name: x.name, args: x.input })) : (assistant.tool_calls || []).map((x) => ({ id: x.id, name: x.function?.name, args: x.function?.arguments }));
         if (calls.length > 8) throw new Error('AI requested too many operations.');
         const thinking = anthropic ? (assistant.content || []).filter((x) => x.type === 'thinking').map((x) => x.thinking || x.text || '').join('\n') : (assistant.content?.filter?.((x) => x.type === 'thinking').map((x) => x.thinking || x.text || '').join('\n') || '');
         history.messages.push(assistant);
-        if (!calls.length) { finalText = anthropic ? (assistant.content || []).filter((x) => x.type === 'text').map((x) => x.text).join('\n') : String(assistant.content ?? ''); break; }
+        if (!calls.length) {
+          finalText = anthropic ? (assistant.content || []).filter((x) => x.type === 'text').map((x) => x.text).join('\n').trim() : String(assistant.content ?? '').trim();
+          if (!finalText) {
+            const inventory = steps.findLast((step) => step.tool === 'plugin_inventory');
+            let parsed;
+            try { parsed = inventory && JSON.parse(inventory.result); } catch {}
+            finalText = Number.isFinite(Number(parsed?.count)) ? `This server has ${Number(parsed.count)} registered plugin${Number(parsed.count) === 1 ? '' : 's'}.${parsed.pluginFiles?.length ? ` I also found ${parsed.pluginFiles.length} plugin file${parsed.pluginFiles.length === 1 ? '' : 's'} in its plugins folder.` : ''}` : `The AI provider returned an empty reply${data.choices?.[0]?.finish_reason ? ` (${data.choices[0].finish_reason})` : ''}. Please try again or use a different model.`;
+          }
+          break;
+        }
         const results = [];
         for (const call of calls) {
           if (active(req) !== session || !config().enabled) throw new Error('AI session expired.');

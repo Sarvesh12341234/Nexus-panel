@@ -14,7 +14,7 @@ const { runFullTerminal } = require('../backend/ai_full_terminal');
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE panel_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)');
   let now = Date.now(); const originalNow = Date.now; Date.now = () => now;
-  let providerCalls = [], operations = [], round = 0, requestedTool = 'server_info';
+  let providerCalls = [], operations = [], round = 0, requestedTool = 'server_info', blankFinal = false;
   const fetchImpl = async (url, options) => {
     const body = JSON.parse(options.body); providerCalls.push({ url, body, headers: options.headers });
     const anthropic = url.includes('anthropic');
@@ -22,7 +22,7 @@ const { runFullTerminal } = require('../backend/ai_full_terminal');
     if (round++ % 2 === 0) data = anthropic
       ? { content: [{ type: 'tool_use', id: 'call1', name: requestedTool, input: {} }] }
       : { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'call1', type: 'function', function: { name: requestedTool, arguments: '{}' } }] } }] };
-    else data = anthropic ? { content: [{ type: 'text', text: 'Server checked.' }] } : { choices: [{ message: { role: 'assistant', content: 'Server checked.' } }] };
+    else data = anthropic ? { content: [{ type: 'text', text: blankFinal ? '' : 'Server checked.' }] } : { choices: [{ message: { role: 'assistant', content: blankFinal ? '' : 'Server checked.' } }] };
     return { ok: true, text: async () => JSON.stringify(data) };
   };
   const app = express(); app.use(express.json());
@@ -48,6 +48,9 @@ const { runFullTerminal } = require('../backend/ai_full_terminal');
     assert.equal(providerCalls[0].headers.Authorization, 'Bearer secret-key');
     assert.equal((await request('/history?serverId=42')).body.messages.length, 2);
     assert.equal((await request('/history?serverId=43')).body.messages.length, 0);
+    requestedTool = 'plugin_inventory'; blankFinal = true; round = 0;
+    assert.match((await request('/chat', 'POST', { serverId: 42, message: 'How many plugins?' })).body.reply, /AI provider returned an empty reply/);
+    requestedTool = 'server_info'; blankFinal = false;
     assert.equal((await request('/full-access', 'PUT', { enabled: true, password: 'wrong-password' })).status, 401);
     assert.equal((await request('/settings')).body.fullAccess, false);
     assert.equal((await request('/full-access', 'PUT', { enabled: true, password: 'correct-password' }, { 'x-role': 'admin' })).status, 403);
