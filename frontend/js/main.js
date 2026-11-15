@@ -3312,7 +3312,7 @@ function renderSettings() {
       <label>Provider <select name="provider"><option value="openai" ${state.aiConfig?.provider === 'openai' ? 'selected' : ''}>OpenAI</option><option value="nvidia" ${state.aiConfig?.provider === 'nvidia' ? 'selected' : ''}>NVIDIA</option><option value="anthropic" ${state.aiConfig?.provider === 'anthropic' ? 'selected' : ''}>Claude / Anthropic</option></select></label>
       <label>Model ID <input name="model" value="${escapeHtml(state.aiConfig?.model || '')}" placeholder="Enter a model supported by your provider" required></label>
       <label>API key <input name="apiKey" type="password" autocomplete="new-password" placeholder="${state.aiConfig?.keyConfigured ? 'Saved — leave blank to keep' : 'Paste provider API key'}"></label>
-      <label>Max tool rounds <input name="maxRounds" type="number" min="1" max="50" value="${escapeHtml(state.aiConfig?.maxRounds || 25)}" placeholder="1-50"></label>
+      <label>Max tool rounds <input name="maxRounds" type="number" min="1" max="10000" value="${escapeHtml(state.aiConfig?.maxRounds || 25)}" placeholder="1-10000"></label>
       <button type="submit">Save AI settings</button>
     </form>` : ''}
     ${state.user?.role === 'owner' ? `

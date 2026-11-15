@@ -48,7 +48,7 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
     const cipher = crypto.createDecipheriv('aes-256-gcm', key(), iv); cipher.setAuthTag(tag);
     return Buffer.concat([cipher.update(data), cipher.final()]).toString('utf8');
   }
-  function config() { return { enabled: get('ai_chat_enabled') === '1', fullAccess: get('ai_chat_full_access') === '1', provider: get('ai_chat_provider') || 'openai', model: get('ai_chat_model'), keyConfigured: Boolean(get('ai_chat_key')), passwordConfigured: Boolean(get('ai_chat_password')), maxRounds: Math.max(1, Math.min(50, Number(get('ai_chat_max_rounds') || 25))) }; }
+  function config() { return { enabled: get('ai_chat_enabled') === '1', fullAccess: get('ai_chat_full_access') === '1', provider: get('ai_chat_provider') || 'openai', model: get('ai_chat_model'), keyConfigured: Boolean(get('ai_chat_key')), passwordConfigured: Boolean(get('ai_chat_password')), maxRounds: Math.max(1, Math.min(10000, Number(get('ai_chat_max_rounds') || 25))) }; }
   function active(req) {
     const id = req.user.session_id;
     const session = sessions.get(id);
