@@ -2974,12 +2974,9 @@ function fileEntryMarkup(entry, selectedPaths) {
 }
 
 /**
- * Render the file list with keyed row updates.
- *
- * A full innerHTML replacement on every live refresh caused scroll bounce,
- * layout shift, and input lag on large folders. Rows are now reused by path
- * and only changed rows are replaced, so the scroll position and the DOM
- * structure stay stable between refreshes.
+ * Render the file list with virtual scrolling for large folders.
+ * Only visible rows (+ buffer) are mounted; others are unmounted to keep DOM small.
+ * Row reuse + signature diffing prevents re-renders when data hasn't changed.
  */
 function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a file or paste config here.') {
   const list = elements.fileList;
@@ -3021,51 +3018,65 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
     return;
   }
 
-  for (const entry of entries) {
+  // Virtual scrolling: only render visible window + buffer
+  const ROW_HEIGHT = 44; // approximate row height in px
+  const VIEWPORT_HEIGHT = list.clientHeight || 400;
+  const VISIBLE_COUNT = Math.ceil(VIEWPORT_HEIGHT / ROW_HEIGHT) + 1;
+  const BUFFER = 8;
+  const scrollIndex = Math.floor(scrollTop / ROW_HEIGHT);
+  const startIdx = Math.max(0, scrollIndex - BUFFER);
+  const endIdx = Math.min(entries.length, scrollIndex + VISIBLE_COUNT + BUFFER);
+
+  // Build row elements for visible range only
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     const path = String(entry?.path || '');
     if (!path) continue;
     seen.add(path);
-    const markup = fileEntryMarkup(entry, selectedPaths);
+    const signature = fileEntrySignature(entry);
     const current = existingRows.get(path);
-    if (current) {
-      // Reuse the row when nothing visible changed; this keeps the DOM node,
-      // its scroll anchoring, and any focused control intact.
-      const signature = fileEntrySignature(entry);
-      if (current.dataset.entrySignature === signature) {
-        const checkbox = current.querySelector('.file-pick');
-        if (checkbox) checkbox.checked = selectedPaths.has(path);
-        orderedRows.push(current);
-        continue;
-      }
+    let row;
+    if (current && current.dataset.entrySignature === signature) {
+      const checkbox = current.querySelector('.file-pick');
+      if (checkbox) checkbox.checked = selectedPaths.has(path);
+      row = current;
+    } else if (current) {
       const replacement = document.createElement('div');
-      replacement.innerHTML = markup;
-      const next = replacement.firstElementChild;
-      if (next) {
-        next.dataset.entrySignature = signature;
-        orderedRows.push(next);
-      }
-      continue;
+      replacement.innerHTML = fileEntryMarkup(entry, selectedPaths);
+      row = replacement.firstElementChild;
+      if (row) row.dataset.entrySignature = signature;
+    } else {
+      const holder = document.createElement('div');
+      holder.innerHTML = fileEntryMarkup(entry, selectedPaths);
+      row = holder.firstElementChild;
+      if (row) row.dataset.entrySignature = signature;
     }
-    const holder = document.createElement('div');
-    holder.innerHTML = markup;
-    const row = holder.firstElementChild;
     if (row) {
-      row.dataset.entrySignature = fileEntrySignature(entry);
+      // Mark visibility range
+      row.dataset.virtualIndex = String(i);
+      row.style.display = (i >= startIdx && i < endIdx) ? '' : 'none';
       orderedRows.push(row);
     }
   }
 
-  // Keep the list container and unchanged row nodes in place. Re-appending
-  // existing nodes to a fragment caused focus loss and scroll anchoring work
-  // on every refresh, even when the actual entries had not changed.
+  // Remove rows no longer in data
   for (const row of existingRows.values()) {
     if (!seen.has(row.dataset.fileRow)) row.remove();
   }
-  for (let index = 0; index < orderedRows.length; index += 1) {
+
+  // Insert/reorder only visible rows; hidden rows stay detached
+  const fragment = document.createDocumentFragment();
+  for (let index = 0; index < orderedRows.length; index++) {
     const row = orderedRows[index];
-    const current = list.children[index];
-    if (current !== row) list.insertBefore(row, current || null);
+    const virtualIdx = Number(row.dataset.virtualIndex);
+    const shouldShow = virtualIdx >= startIdx && virtualIdx < endIdx;
+    row.style.display = shouldShow ? '' : 'none';
+    if (shouldShow) fragment.appendChild(row);
   }
+  // Replace list contents with fragment (only visible rows)
+  list.innerHTML = '';
+  list.appendChild(fragment);
+
   if (!entries.length) {
     let empty = list.querySelector(':scope > .empty-state');
     if (!empty) {
@@ -3078,8 +3089,6 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
     list.querySelector(':scope > .empty-state')?.remove();
   }
   applyFileManagerLayout();
-  // Rows are reused in place, so restoring the exact offset keeps the view
-  // perfectly still across live refreshes.
   if (list.scrollTop !== scrollTop) list.scrollTop = scrollTop;
   if (focusedRowPath && focusedAction) {
     const nextFocus = list.querySelector(`[data-file-row="${CSS.escape(focusedRowPath)}"]`)
@@ -3091,6 +3100,25 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
       }
       nextFocus.scrollTop = focusedScrollTop;
     }
+  }
+
+  // Scroll listener for virtual window updates (debounced)
+  if (!list.dataset.virtualListener) {
+    list.dataset.virtualListener = '1';
+    let scrollTimer = 0;
+    list.addEventListener('scroll', () => {
+      clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(() => {
+        const newScrollTop = list.scrollTop;
+        const newScrollIndex = Math.floor(newScrollTop / ROW_HEIGHT);
+        const newStart = Math.max(0, newScrollIndex - BUFFER);
+        const newEnd = Math.min(entries.length, newScrollIndex + VISIBLE_COUNT + BUFFER);
+        for (const row of list.querySelectorAll('[data-virtual-index]')) {
+          const idx = Number(row.dataset.virtualIndex);
+          row.style.display = (idx >= newStart && idx < newEnd) ? '' : 'none';
+        }
+      }, 16); // ~1 frame
+    }, { passive: true });
   }
 }
 
