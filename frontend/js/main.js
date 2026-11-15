@@ -3343,9 +3343,11 @@ function renderSettings() {
     <form class="settings-group ai-settings" id="aiSettingsForm">
       <div><strong>AI chat</strong><p class="muted">Optional owner-only chat. Messages, selected server files and logs used by the assistant are sent to your chosen provider. Sessions and chat history expire after 10 minutes of inactivity.</p></div>
       <label class="switch"><input name="enabled" type="checkbox" ${state.aiConfig?.enabled ? 'checked' : ''}><span></span>Enable AI chat</label>
-      <label>Provider <select name="provider"><option value="openai" ${state.aiConfig?.provider === 'openai' ? 'selected' : ''}>OpenAI</option><option value="nvidia" ${state.aiConfig?.provider === 'nvidia' ? 'selected' : ''}>NVIDIA</option><option value="anthropic" ${state.aiConfig?.provider === 'anthropic' ? 'selected' : ''}>Claude / Anthropic</option></select></label>
-      <label>Model ID <input name="model" value="${escapeHtml(state.aiConfig?.model || '')}" placeholder="Enter a model supported by your provider" required></label>
-      <label>API key <input name="apiKey" type="password" autocomplete="new-password" placeholder="${state.aiConfig?.keyConfigured ? 'Saved — leave blank to keep' : 'Paste provider API key'}"></label>
+      <label>Provider <select name="provider" id="aiProvider"><option value="openai" ${state.aiConfig?.provider === 'openai' ? 'selected' : ''}>OpenAI</option><option value="nvidia" ${state.aiConfig?.provider === 'nvidia' ? 'selected' : ''}>NVIDIA</option><option value="anthropic" ${state.aiConfig?.provider === 'anthropic' ? 'selected' : ''}>Claude / Anthropic</option></select></label>
+      <label>Model <select name="model" id="aiModelSelect" required><option value="${escapeHtml(state.aiConfig?.model || '')}">${escapeHtml(state.aiConfig?.model || 'Load models after entering an API key')}</option></select></label>
+      <label>API key <input name="apiKey" id="aiProviderKey" type="password" autocomplete="new-password" placeholder="${state.aiConfig?.keyConfigured ? 'Saved — leave blank to keep' : 'Paste provider API key'}"></label>
+      <button type="button" class="secondary" data-action="ai-load-models">Load available models</button>
+      <span class="muted" id="aiModelsStatus" aria-live="polite"></span>
       <button type="submit">Save AI settings</button>
     </form>` : ''}
     ${state.user?.role === 'owner' ? `
@@ -3496,6 +3498,39 @@ document.addEventListener('submit', async (event) => {
       const attachButton = form.querySelector('[data-action="ai-attach-image"]'); if (attachButton) attachButton.disabled = false;
     }
   }
+});
+
+document.addEventListener('change', (event) => {
+  if (event.target?.id !== 'aiProvider') return;
+  const select = document.querySelector('#aiModelSelect');
+  if (select) select.innerHTML = '<option value="">Load models for this provider</option>';
+});
+
+document.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-action="ai-load-models"]');
+  if (!button) return;
+  const form = button.closest('#aiSettingsForm');
+  const provider = form?.elements.provider.value;
+  const apiKey = form?.elements.apiKey.value.trim();
+  const status = form?.querySelector('#aiModelsStatus');
+  const select = form?.querySelector('#aiModelSelect');
+  if (!form || !select || !status) return;
+  status.textContent = 'Loading available models…'; button.disabled = true;
+  try {
+    const query = new URLSearchParams({ provider });
+    if (apiKey) query.set('apiKey', apiKey);
+    const data = await api(`/api/ai/models?${query}`, { timeoutMs: 20000 });
+    const selected = select.value || state.aiConfig?.model || '';
+    select.replaceChildren(...data.models.map((model) => {
+      const option = document.createElement('option'); option.value = model.id; option.textContent = model.name; return option;
+    }));
+    if (!data.models.some((model) => model.id === selected) && selected) {
+      const option = document.createElement('option'); option.value = selected; option.textContent = `${selected} (currently configured)`; select.prepend(option);
+    }
+    select.value = selected;
+    status.textContent = data.models.length ? `Loaded ${data.models.length} models.` : 'No models were returned for this API key.';
+  } catch (error) { status.textContent = error.message; }
+  finally { button.disabled = false; }
 });
 
 document.addEventListener('click', async (event) => {

@@ -15,7 +15,12 @@ const { runFullTerminal } = require('../backend/ai_full_terminal');
   db.exec('CREATE TABLE panel_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)');
   let now = Date.now(); const originalNow = Date.now; Date.now = () => now;
   let providerCalls = [], operations = [], round = 0, requestedTool = 'server_info', blankFinal = false;
+  let modelListProvider = '', modelListKey = '';
   const fetchImpl = async (url, options) => {
+    if (url.endsWith('/models')) {
+      modelListProvider = url; modelListKey = options.headers.Authorization || options.headers['x-api-key'];
+      return { ok: true, text: async () => JSON.stringify({ data: [{ id: 'model-b', name: 'Model B' }, { id: 'model-a' }] }) };
+    }
     const body = JSON.parse(options.body); providerCalls.push({ url, body, headers: options.headers });
     const anthropic = url.includes('anthropic');
     let data;
@@ -39,6 +44,9 @@ const { runFullTerminal } = require('../backend/ai_full_terminal');
     assert.equal((await request('/settings', 'PUT', { provider: 'openai', model: 'gpt-test', apiKey: 'secret-key', enabled: true })).status, 200);
     assert.ok(!JSON.stringify(db.prepare('SELECT * FROM panel_settings').all()).includes('secret-key'));
     assert.ok(!JSON.stringify((await request('/settings')).body).includes('secret-key'));
+    const models = await request('/models?provider=openai');
+    assert.deepEqual(models.body.models.map((model) => model.id), ['model-a', 'model-b']);
+    assert.equal(modelListKey, 'Bearer secret-key');
     assert.equal((await request('/unlock', 'POST', { password: 'short' })).status, 400);
     assert.equal((await request('/unlock', 'POST', { password: 'correct-password' })).status, 200);
     assert.equal((await request('/unlock', 'POST', { password: 'wrong-password' }, { 'x-session': 'two' })).status, 401);

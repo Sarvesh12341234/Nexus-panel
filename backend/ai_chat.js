@@ -10,6 +10,11 @@ const PROVIDERS = {
   nvidia: 'https://integrate.api.nvidia.com/v1/chat/completions',
   anthropic: 'https://api.anthropic.com/v1/messages',
 };
+const MODEL_ENDPOINTS = {
+  openai: 'https://api.openai.com/v1/models',
+  nvidia: 'https://integrate.api.nvidia.com/v1/models',
+  anthropic: 'https://api.anthropic.com/v1/models',
+};
 const TOOLS = [
   ['server_info', 'Get a concise summary of the selected server only: name, type, version, status, memory and path. Do not return nested isolation profiles or raw configuration.', {}],
   ['restart_server', 'Gracefully restart the selected game server using the panel restart lifecycle. Use only when the owner asks to restart or apply a change that needs restarting.', {}],
@@ -74,6 +79,26 @@ function createAiChat({ db, dataDir, hashPassword, verifyPassword, executeTool, 
   const timer = setInterval(() => { for (const [id, session] of sessions) if (session.expiresAt <= Date.now()) closeSession(id); for (const [id, fail] of failures) if (fail.until <= Date.now()) failures.delete(id); }, 30000); timer.unref();
   router.use(requireAuth, (req, res, next) => req.user.role === 'owner' ? next() : res.status(403).json({ error: 'AI chat is available to the panel owner.' }));
   router.get('/settings', (req, res) => res.json({ ...config(), expiresAt: active(req)?.expiresAt || 0 }));
+  router.get('/models', async (req, res, next) => {
+    const provider = String(req.query.provider || get('ai_chat_provider') || 'openai');
+    if (!Object.hasOwn(MODEL_ENDPOINTS, provider)) return res.status(400).json({ error: 'Select a supported AI provider.' });
+    const configuredKey = get('ai_chat_key');
+    const apiKey = String(req.query.apiKey || '').trim() || (provider === get('ai_chat_provider') ? (configuredKey ? decrypt(configuredKey) : '') : '');
+    if (!apiKey) return res.status(400).json({ error: 'Save an API key for this provider first.' });
+    try {
+      const anthropic = provider === 'anthropic';
+      const response = await fetchImpl(MODEL_ENDPOINTS[provider], {
+        headers: anthropic ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } : { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(15000),
+      });
+      const raw = await response.text();
+      if (raw.length > 2 * 1024 * 1024) return res.status(502).json({ error: 'Provider model list was too large.' });
+      let data; try { data = JSON.parse(raw); } catch { return res.status(502).json({ error: 'Provider returned an invalid model list.' }); }
+      if (!response.ok) return res.status(response.status === 401 || response.status === 403 ? 400 : 502).json({ error: `Could not load provider models (${response.status}). Check the API key and provider access.` });
+      const models = (Array.isArray(data.data) ? data.data : []).map((model) => ({ id: String(model.id || ''), name: String(model.name || model.display_name || model.id || '') })).filter((model) => /^[A-Za-z0-9._:/-]{1,160}$/.test(model.id)).sort((a, b) => a.id.localeCompare(b.id));
+      res.json({ models });
+    } catch (error) { next(error); }
+  });
   router.put('/full-access', (req, res) => {
     if (req.body.enabled !== true) { set('ai_chat_full_access', '0'); closeSessions(); return res.json(config()); }
     if (!config().enabled || !get('ai_chat_password')) return res.status(400).json({ error: 'Enable AI chat and set its password first.' });
