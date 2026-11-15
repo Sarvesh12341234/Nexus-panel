@@ -71,7 +71,9 @@ function ensureRuntimePermissions() {
   }
   if (user !== 'root') {
     for (const dir of dirs) {
-      spawnSync('chown', ['-R', `${user}:${group}`, dir], { stdio: 'ignore' });
+      const recursive = dir !== path.join(repoRoot, 'servers');
+      const result = spawnSync('chown', [...(recursive ? ['-R'] : []), `${user}:${group}`, dir], { stdio: 'inherit' });
+      if (result.error || result.status !== 0) throw result.error || new Error(`Could not set ownership of ${dir}.`);
     }
   }
 }

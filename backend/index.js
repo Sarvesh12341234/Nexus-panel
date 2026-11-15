@@ -7250,6 +7250,10 @@ app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MA
       const relative = path.posix.join(directory.relative, child.name).replace(/^\.\//, '');
       if (!isUserVisibleServerEntry(relative)) continue;
       const absolute = path.join(directory.absolute, child.name);
+      if (child.isDirectory()) queue.push({ absolute, relative, depth: directory.depth + 1 });
+      // Name searches need metadata only for results, not every visited file.
+      if (mode === 'name' && !relative.toLocaleLowerCase().includes(needle)) continue;
+      if (mode === 'content' && (!child.isFile() || !fileDescriptor(child.name, 0).editable)) continue;
       const stats = await fs.promises.stat(absolute).catch(() => null);
       if (!stats) continue;
       const descriptor = child.isDirectory()
@@ -7271,7 +7275,6 @@ app.get('/api/servers/:id/files/search', requirePermission(capabilities.FILES_MA
         skippedFiles += 1;
         truncated = true;
       }
-      if (child.isDirectory()) queue.push({ absolute, relative, depth: directory.depth + 1 });
       if (results.length >= maxResults) break;
     }
 
@@ -7413,19 +7416,23 @@ app.get('/api/servers/:id/files/upload-status', requirePermission(capabilities.F
   const complete = await fs.promises.stat(target.absolute).catch(() => null);
   const expectedFileHash = String(req.query.sha256 || '').trim().toLowerCase();
   const session = uploadSession(server.id, target.relative);
-  const chunks = mergeChunkRanges(parseChunkRanges(session?.chunks_json));
-  if (complete && totalSize && complete.size === totalSize) {
+  let chunks = mergeChunkRanges(parseChunkRanges(session?.chunks_json));
+  if (partial && session && Number(session.size) !== totalSize) {
+    await fs.promises.rm(partialPath, { force: true });
+    chunks = [];
+  }
+  if (complete && complete.isFile() && expectedFileHash && complete.size === totalSize) {
     if (expectedFileHash) {
       const actual = await fileSha256Hex(target.absolute);
       if (actual !== expectedFileHash) {
-        await fs.promises.rm(target.absolute, { force: true }).catch(() => {});
-        upsertUploadSession(server.id, target.relative, totalSize, 0, 'failed', 'Checksum mismatch; retry upload');
-        return res.status(409).json({ error: 'Existing upload checksum mismatch. Retry the file.' });
+        // The destination may be an unrelated existing file. Keep it until
+        // the replacement has been fully uploaded and verified.
+      } else {
+        db.prepare('DELETE FROM upload_sessions WHERE server_id = ? AND relative_path = ?').run(server.id, target.relative);
+        liveUploadProgress.delete(uploadProgressKey(server.id, target.relative));
+        return res.json({ uploadedBytes: complete.size, uploadedChunks: [{ start: 0, end: complete.size }], complete: true, sha256: expectedFileHash });
       }
     }
-    db.prepare('DELETE FROM upload_sessions WHERE server_id = ? AND relative_path = ?').run(server.id, target.relative);
-    liveUploadProgress.delete(uploadProgressKey(server.id, target.relative));
-    return res.json({ uploadedBytes: complete.size, uploadedChunks: [{ start: 0, end: complete.size }], complete: true, sha256: expectedFileHash || '' });
   }
   const uploadedBytes = partial ? uploadedRangeBytes(chunks) : 0;
   upsertUploadSession(server.id, target.relative, totalSize, uploadedBytes, uploadedBytes ? 'paused' : 'waiting', uploadedBytes ? 'Ready to resume exact chunks' : 'Waiting for upload', chunks);

@@ -123,6 +123,7 @@ let fileSearchScope = 'server';
 let fileSearchTimer = 0;
 let fileSearchController = null;
 let fileSearchRequestId = 0;
+let fileListLocation = '';
 let pendingEditorFind = null;
 let fileContextPath = '';
 let fileContextType = '';
@@ -1854,6 +1855,13 @@ function publishUploadProgress(server, destinationPath, size, uploadedBytes, sta
 }
 
 async function uploadFile(server, file, destinationPath, onProgress) {
+  if (file.size === 0) {
+    await api(`/api/servers/${server.id}/files/upload?path=${encodeURIComponent(destinationPath)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
+    });
+    onProgress(100, 'complete');
+    return;
+  }
   onProgress(0, 'hashing');
   const fileSha256 = file.size <= 512 * 1024 * 1024 ? await digestHexOffThread(file) : '';
   const status = await api(`/api/servers/${server.id}/files/upload-status?path=${encodeURIComponent(destinationPath)}&size=${file.size}&sha256=${fileSha256}`);
@@ -1897,15 +1905,8 @@ async function uploadFile(server, file, destinationPath, onProgress) {
 
   let cursor = 0;
   async function worker() {
-    if (currentUpload.canceled) throw new Error('Upload canceled.');
-    if (currentUpload.paused) {
-      await api(`/api/servers/${server.id}/files/upload-pause`, {
-        method: 'POST',
-        body: JSON.stringify({ path: destinationPath, size: file.size }),
-      });
-      throw new Error('Upload paused. Reselect the same file to resume.');
-    }
     while (cursor < chunks.length) {
+      if (currentUpload.canceled || currentUpload.paused) return;
       const index = cursor;
       cursor += 1;
       const meta = chunks[index];
@@ -1914,6 +1915,7 @@ async function uploadFile(server, file, destinationPath, onProgress) {
       const chunkSha256 = await digestHexOffThread(blob);
       let result;
       for (let attempt = 1; attempt <= 4; attempt += 1) {
+        if (currentUpload.canceled || currentUpload.paused) return;
         try {
           result = await uploadChunk(server, blob, destinationPath, meta.offset, file.size, fileSha256, chunkSha256, (loaded) => {
             meta.loaded = loaded;
@@ -1934,7 +1936,17 @@ async function uploadFile(server, file, destinationPath, onProgress) {
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(UPLOAD_PARALLELISM, chunks.length) }, () => worker()));
+  const results = await Promise.allSettled(Array.from({ length: Math.min(UPLOAD_PARALLELISM, chunks.length) }, () => worker()));
+  if (currentUpload.canceled) {
+    await api(`/api/servers/${server.id}/files/upload-session?path=${encodeURIComponent(destinationPath)}`, { method: 'DELETE' });
+    throw new Error('Upload canceled.');
+  }
+  if (currentUpload.paused) {
+    await api(`/api/servers/${server.id}/files/upload-pause`, { method: 'POST', body: JSON.stringify({ path: destinationPath, size: file.size }) });
+    throw new Error('Upload paused. Reselect the same file to resume.');
+  }
+  const failed = results.find((result) => result.status === 'rejected');
+  if (failed) throw failed.reason;
   updateProgress('verifying');
   const complete = await api(`/api/servers/${server.id}/files/upload-complete`, {
     method: 'POST',
@@ -1953,6 +1965,7 @@ async function uploadFiles(files) {
   if (!queue.length) return;
   if (!elements.uploadPanel || !elements.uploadLabel || !elements.uploadProgress) return;
   elements.uploadPanel.hidden = false;
+  try {
   for (let index = 0; index < queue.length; index += 1) {
     const file = queue[index];
     const destination = childPath(file.name);
@@ -1970,7 +1983,6 @@ async function uploadFiles(files) {
   }
   elements.uploadLabel.textContent = `Uploaded ${queue.length} file(s).`;
   elements.uploadProgress.style.width = '100%';
-  currentUpload = { path: '', size: 0, paused: false, canceled: false };
   showToast('Upload complete.');
   await renderFiles();
   await renderUploadSessions();
@@ -1979,6 +1991,10 @@ async function uploadFiles(files) {
     if (!elements.uploadSessionList.innerHTML.trim()) elements.uploadPanel.hidden = true;
     elements.uploadProgress.style.width = '0%';
   }, 2600);
+  } finally {
+    currentUpload = { path: '', size: 0, paused: false, canceled: false };
+    renderUploadSessions().catch(() => {});
+  }
 }
 
 function renderAccount() {
@@ -2441,6 +2457,7 @@ function openConsoleStream(server) {
   stream.addEventListener('snapshot', (event) => {
     if (state.activeView !== 'console' || state.activeServerId !== server.id) return;
     state.consoleStreamReady = true;
+    state.consolePendingLines = state.consolePendingLines.filter((item) => item.serverId !== Number(server.id));
     const payload = safeJsonParse(event.data);
     const lines = Array.isArray(payload.lines) ? payload.lines : [];
     state.consoleLineCache[server.id] = lines;
@@ -2534,8 +2551,10 @@ async function renderConsole({ force = false, timeoutMs = 1200 } = {}) {
         : server.installStatus !== 'installed'
           ? [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] Install server software before starting.']
           : [`[NexusPanel] ${server.name} is ${data.status || server.status}.`, '[NexusPanel] No panel logs have been recorded yet. Press Start to begin.'];
-    state.consoleLineCache[serverId] = lines;
-    renderConsoleLines(lines, server);
+    if (!state.consoleStreamReady || state.consoleStreamServerId !== serverId) {
+      state.consoleLineCache[serverId] = lines;
+      renderConsoleLines(lines, server);
+    }
     if (needsMetrics) renderConsoleMetricsSoon(server, serverId, renderToken);
     renderPresence(server).catch(() => {});
   } finally {
@@ -2827,6 +2846,9 @@ async function renderFiles() {
   if (data.results) {
     if (elements.fileEditor) elements.fileEditor.hidden = true;
     if (elements.filePreview) elements.filePreview.hidden = true;
+    const location = `${server.id}:search:${searchScopePath}:${query}:${fileSearchMode}`;
+    if (fileListLocation !== location) elements.fileList.scrollTop = 0;
+    fileListLocation = location;
     renderFileEntries(data.results, query ? 'No files match this search.' : 'Folder is empty.');
     if (elements.fileSearchStatus) {
       elements.fileSearchStatus.hidden = !query;
@@ -2897,6 +2919,9 @@ async function renderFiles() {
   }
   if (elements.fileEditor) elements.fileEditor.hidden = true;
   if (elements.filePreview) elements.filePreview.hidden = true;
+  const location = `${server.id}:folder:${data.path || ''}`;
+  if (fileListLocation !== location) elements.fileList.scrollTop = 0;
+  fileListLocation = location;
   renderFileEntries(data.entries);
 }
 
@@ -2960,7 +2985,7 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
       return current && current.dataset.entrySignature === fileEntrySignature(entry);
     });
 
-  if (signatureMatches) {
+  if (entries.length && signatureMatches) {
     for (const entry of entries) {
       const row = existingRows.get(String(entry.path));
       const checkbox = row.querySelector('.file-pick');
@@ -6283,16 +6308,18 @@ document.addEventListener('click', async (event) => {
       const server = activeServer();
       if (!server || !currentUpload.path) return showToast('No active upload in this tab.');
       currentUpload.canceled = true;
-      await api(`/api/servers/${server.id}/files/upload-session?path=${encodeURIComponent(currentUpload.path)}`, { method: 'DELETE' });
-      showToast('Upload canceled.');
-      await renderUploadSessions();
+      showToast('Canceling after current chunks...');
       return;
     }
     if (action === 'upload-cancel') {
       const server = activeServer();
       if (!server) return;
+      if (currentUpload.path === actionTarget.dataset.uploadPath) {
+        currentUpload.canceled = true;
+        showToast('Canceling after current chunks...');
+        return;
+      }
       await api(`/api/servers/${server.id}/files/upload-session?path=${encodeURIComponent(actionTarget.dataset.uploadPath)}`, { method: 'DELETE' });
-      if (currentUpload.path === actionTarget.dataset.uploadPath) currentUpload.canceled = true;
       showToast('Upload removed.');
       await renderUploadSessions();
       return;

@@ -96,17 +96,20 @@ repair_install_permissions() {
     # Do NOT chmod 777 recursively. That would expose credentials and panel data.
     # Directories need traversal; regular files need read/write. Executable bits
     # are restored only for known launchers and native binaries.
-    find "$INSTALL_DIR" -type d -exec chmod u+rwx,g+rx,o-rwx {} + 2>/dev/null || true
-    find "$INSTALL_DIR" -type f -exec chmod u+rw,g+r,o-rwx {} + 2>/dev/null || true
-    find "$INSTALL_DIR" -type f \( -name '*.sh' -o -name '*.bin' \) -exec chmod u+rwx,g+rx,o-rwx {} + 2>/dev/null || true
+    # Server trees contain isolated identities and ACLs; never rewrite them.
+    find "$INSTALL_DIR" -path "$INSTALL_DIR/servers" -prune -o -type d -exec chmod u+rwx,g+rx,o-rwx {} +
+    find "$INSTALL_DIR" -path "$INSTALL_DIR/servers" -prune -o -type f -exec chmod u+rw,g+r,o-rwx {} +
+    find "$INSTALL_DIR" -path "$INSTALL_DIR/servers" -prune -o -type f \( -name '*.sh' -o -name '*.bin' \) -exec chmod u+rwx,g+rx,o-rwx {} +
     for file in "$INSTALL_DIR/backend/cli.js" "$INSTALL_DIR/backend/index.js" "$INSTALL_DIR/backend/launcher.js" "$INSTALL_DIR/backend/service.js" "$INSTALL_DIR/backend/host_agent.js" "$INSTALL_DIR/backend/asf_native.js"; do
         [ -f "$file" ] && chmod 750 "$file" || true
     done
     chmod 600 "$INSTALL_DIR/data/setup_token" "$INSTALL_DIR/data/cookie_secret" 2>/dev/null || true
-    chmod 750 /usr/local/bin/nexuspanel 2>/dev/null || true
+    chmod 755 /usr/local/bin/nexuspanel 2>/dev/null || true
     if [ "$SERVICE_USER" != "root" ]; then
         local group="$(id -gn "$SERVICE_USER")"
-        chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/servers" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel 2>/dev/null || true
+        find "$INSTALL_DIR" -path "$INSTALL_DIR/servers" -prune -o -exec chgrp "$group" {} +
+        chown "$SERVICE_USER:$group" "$INSTALL_DIR/servers"
+        chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel
     fi
     # Verify the service identity can traverse and write its mutable roots.
     if [ "$SERVICE_USER" != "root" ]; then
@@ -518,7 +521,8 @@ prepare_paths() {
     chmod 750 data servers software backups backupfolder update/backups /var/lib/nexuspanel /var/lib/nexuspanel/backups /var/lib/nexuspanel/logs /var/lib/nexuspanel/asf 2>/dev/null || true
     if [ "$SERVICE_USER" != "root" ]; then
         local group="$(id -gn "$SERVICE_USER")"
-        chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/servers" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel 2>/dev/null || true
+        chown "$SERVICE_USER:$group" "$INSTALL_DIR/servers"
+        chown -R "$SERVICE_USER:$group" "$INSTALL_DIR/data" "$INSTALL_DIR/software" "$INSTALL_DIR/backups" "$INSTALL_DIR/backupfolder" "$INSTALL_DIR/update/backups" /var/lib/nexuspanel
     fi
     repair_install_permissions
 }

@@ -2303,6 +2303,7 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
     max-height: min(68dvh, 720px);
     min-height: 180px;
     padding-right: .2rem;
+    overscroll-behavior-y: auto;
   }
 
   .file-row {
