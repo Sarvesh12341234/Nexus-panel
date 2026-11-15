@@ -1,118 +1,72 @@
-# NexusPanel local diagnosis model
+# NexusPanel local Needle models
 
-Needle 2 runs locally per server. It can classify documented issues and
-request one registered repair tool. It does not receive arbitrary endpoint,
-shell, file-path, or command execution tools. The Node backend validates each
-request against the issue registry, exact supplied evidence, deterministic
-diagnostics, server edition, and offline state before dispatching a bounded
-repair routine.
+NexusPanel uses separate local models for documented-issue suggestions and
+for routing confirmed repair diagnostics. Neither model receives arbitrary
+shell, endpoint, or file-path execution tools.
 
-## Training data and limits
+The repair model is deliberately narrow: it routes candidates created from
+the panel's own diagnostic rules. The panel offers a candidate only while the
+server is offline, and validates the returned issue, registered tool, and
+evidence before independently checking the diagnostic, server edition, state,
+and tool-specific conditions. Normal deterministic repairs remain available
+when the model or Python runtime is unavailable. A model request does not
+override these checks.
 
-`scripts/prepare_needle2_dataset.py` extracts issue records from
-`docs/AI-TRAINING-CORPUS.md` and builds a Needle tool-calling JSONL set under
-ignored `data/needle2/`. `known-issues.json` lets the server validate predicted
-issue IDs. `repair-tools.json` defines callable tool names and the issue-to-tool
-allowlist; the generator creates tool-call examples only for issues explicitly
-mapped to an existing backend repair.
+The current repair model was fine-tuned from
+[Cactus Compute Needle 2](https://huggingface.co/Cactus-Compute/needle2) on
+256 generated examples derived from 12 panel diagnostic mappings. These are
+templates built from the panel's own summaries, not private server logs.
+Tests cover 36 positive prompts and four unrelated prompts. Unguarded model
+inference can still request a tool for unrelated text: do not expose the
+model directly as an autonomous repair agent. The repair worker rejects
+missing, malformed, or inconsistent candidate fields before inference.
+These tests do not establish accuracy for unseen incidents.
 
-The corpus is a starting knowledge base, not a complete inventory of bugs.
-Some entries are stale or refer to features that do not exist in the current
-1.0.3 code. An AI result must therefore remain advisory until cross-checked
-against current deterministic diagnostics. Unknown errors should return no
-match and be added to the corpus only after they are reproduced and verified.
-When the model is enabled, an unambiguous exact match against a documented error
-returns a clearly labeled advisory immediately. It does not invoke a repair or
-count as a model prediction; all other input still goes through the worker.
+The older general issue-classification model remains advisory and has not
+passed the same quality threshold. An unambiguous exact match against a
+documented error is labeled separately and does not count as a prediction.
+Unknown or ambiguous issues need independent diagnosis.
 
-Run `python scripts/evaluate_needle2.py /path/to/model.cact --require-quality`
-with the Needle runtime installed before replacing a model. The check exercises
-documented errors embedded in log lines, unrelated text, and mapped repair
-requests. It is a smoke test using the project corpus, not an independent
-measurement of generalization to unseen incidents.
+## Install and configure
 
-## Local training on the RTX GPU (WSL2)
+The bundled repair model is `models/nexuspanel-needle2-repair.cact`, tracked
+with Git LFS. The Linux installer fetches LFS objects and installs the pinned
+`cactus-needle==2.0.15` runtime into `data/needle2/runtime-linux` by default;
+set `NEXUSPANEL_INSTALL_AI=no` to skip runtime installation. If the model is
+an LFS pointer rather than the full file, run `git lfs pull` in the checkout.
 
-Needle 2's training code uses JAX. The native Windows install currently sees
-CPU only; WSL2 exposes the RTX 3050. Run these commands from the repository:
+`NEXUSPANEL_NEEDLE2_PYTHON` overrides the Python executable. Otherwise the
+panel uses `data/needle2/runtime-linux/bin/python` on Linux or
+`data/needle2/runtime-win/Scripts/python.exe` on Windows if present, then
+falls back to `python3` or `python` on PATH. The optional environment variables
+`NEXUSPANEL_NEEDLE2_REPAIR_MODEL` and `NEXUSPANEL_NEEDLE2_MODEL` override the
+repair and advisory models independently. A local repair model at
+`data/needle2/nexuspanel-needle2-repair.cact` also takes precedence over the
+bundled model, so updates do not overwrite local model files. Set service environment variables
+in a systemd drop-in or the service environment file, then restart the panel.
+Worker initialization errors are reported in the repair preview.
 
-```bash
-python3 -m venv ~/.venvs/nexuspanel-needle2
-source ~/.venvs/nexuspanel-needle2/bin/activate
-python -m pip install --upgrade pip
-python -m pip install 'cactus-needle[train,gpu]==2.0.15'
-cd /mnt/c/Users/Sinjita/Pictures/spawn/Nexus-panel-review
-python scripts/prepare_needle2_dataset.py
-python -c 'import jax; print(jax.devices())'
-python scripts/check_needle2_dataset.py data/needle2/repair-train.jsonl --max-len 256
-XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.70 needle finetune data/needle2/repair-train.jsonl --checkpoint data/needle2/checkpoints/needle2.pkl --epochs 3 --batch-size 1 --max-len 256 --lora-rank 4 --lora-alpha 8 --val-split 0.1 --seed 17 --checkpoint-dir data/needle2/checkpoints --out data/needle2/repair-lora-v3.pkl
-JAX_PLATFORMS=cpu needle build data/needle2/checkpoints/needle2.pkl --lora data/needle2/repair-lora-v3.pkl --out data/needle2/nexuspanel-needle2-v3.cact
-```
+Separate workers are used for each server and model role, with a shared limit
+of eight by default. Workers reset their conversation for every request and
+idle out after ten minutes. Only redacted server text or panel-generated
+candidate summaries are sent to the local worker.
 
-Training is local; no hosted API or generated examples are used. Start with a
-small batch because the desktop is already using part of the 4 GB VRAM. If JAX
-selects CPU or reports an out-of-memory error, stop instead of silently claiming
-GPU training succeeded. Keep the `.cact` file local/ignored until it has passed
-the project-specific evaluation set.
+## Rebuild and evaluate the repair model
 
-The dataset generator keeps both function choices in every compact training
-schema and caps the evidence excerpt so each answer fits within the training
-sequence. The checker must report zero examples with truncated answers before fine-tuning.
-Do not train with `--max-len 128`: the full prompt can exceed that length, leaving
-the loss mask empty and producing a misleading `loss 0.0000` throughout.
-The v2 trial used target-only schemas, so it learned issue lookup but selected
-that function instead of repair requests when both choices were available. Do
-not enable v2 for model-selected repairs; v3 trains with both choices present.
-
-## Per-server isolation and registered repair tools
-
-The optional runtime creates a separate worker process for each server ID and
-passes only that server's last 1,400 characters of redacted console logs. Each
-worker can share the immutable model file, but does not share logs, tool results,
-or conversation state. Workers reset the model conversation for each request
-and idle out after ten minutes; no more than eight workers run by default.
-
-Needle can call `lookup_documented_issue` or request one of these repair tools:
-
-- Repair `server.properties` and known support JSON files.
-- Restore the selected server's missing executable.
-- Install a compatible bundled Java runtime inside that server's root.
-- Reconcile Bedrock world pack references or quarantine an incompatible pack.
-- Quarantine a specifically identified failing plugin/mod while offline.
-- Remove old partial transfers only while offline and when no server operation
-  or resumable upload is active.
-
-The model only requests a tool. Repair prompts label the confirmed issue ID and
-evidence explicitly so the model can fill the tool contract. Node checks the
-tool name, mapped issue ID, exact evidence substring, a matching diagnostic (or
-verifies that the selected executable is actually missing), tool-specific
-server conditions, and offline state, then calls the existing bounded repair
-function. The browser's Repair &
-Diagnose action and eligible crash recovery are the only call sites; the preview
-endpoint remains read-only. Unsupported requests are ignored, and deterministic
-repairs continue as fallback if Needle is unavailable.
-
-World recovery, deleting a world lock, killing a process, recursive permission
-rewrites, arbitrary shell or file paths, and plugin testing/restarts are not
-exposed as model tools. Permission repair stays out of the AI tool list because
-the existing recursive mode/ownership repair needs a narrower per-server ACL
-implementation first. Because
-the previous training set taught only issue lookup, rebuild the LoRA adapter
-and `.cact` after regenerating the dataset before enabling model-selected
-tools. An older model keeps deterministic repairs but will not reliably request
-these tools.
-
-To enable inference on a host, install the pinned runtime in a Python
-environment and point NexusPanel at both the environment and the trained model:
+Run from the repository root in an environment with
+`cactus-needle[train,gpu]==2.0.15` installed and a compatible GPU. The base
+checkpoint is available from the upstream Needle 2 project.
 
 ```bash
-python3 -m pip install 'cactus-needle==2.0.15'
-NEXUSPANEL_NEEDLE2_PYTHON=/path/to/venv/bin/python
-NEXUSPANEL_NEEDLE2_MODEL=/path/to/nexuspanel-needle2.cact
+python scripts/prepare_needle2_repair_data.py
+python scripts/check_needle2_dataset.py data/needle2/repair-routing-train.jsonl --max-len 256
+XLA_PYTHON_CLIENT_PREALLOCATE=false needle finetune data/needle2/repair-routing-train.jsonl --checkpoint checkpoints/needle2.pkl --epochs 6 --batch-size 1 --max-len 256 --lora-rank 4 --lora-alpha 8 --val-split 0 --seed 42 --checkpoint-dir checkpoints --out data/needle2/repair-routing-v1.pkl
+JAX_PLATFORMS=cpu needle build checkpoints/needle2.pkl --lora data/needle2/repair-routing-v1.pkl --out data/needle2/repair-routing-candidate.cact
+python scripts/evaluate_needle2_routing.py data/needle2/repair-routing-candidate.cact
+python scripts/evaluate_needle2_protected.py data/needle2/repair-routing-candidate.cact --require-quality
 ```
 
-Set those variables in the NexusPanel service environment to override the
-defaults. When unset, the panel looks for `data/needle2/nexuspanel-needle2.cact`
-and runs `python3` on Linux or `python` on Windows. The Python environment must
-have the runtime installed. The model status reports a worker startup error if
-initialization fails; deterministic repair behavior remains available.
+The raw evaluation reports model calls even when the worker rejects their
+arguments. The protected evaluation exercises the production-format
+candidates and rejects malformed requests before the model is called. Do not
+replace the installed model on the basis of training loss alone.

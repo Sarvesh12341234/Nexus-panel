@@ -46,6 +46,15 @@ from the `main` branch and set `NEXUSPANEL_REF=main` when running it. A
 versioned installer downloaded from the `v1.0.4` tag remains pinned to that
 release and does not receive later fixes automatically.
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/Sarvesh12341234/Nexus-panel/main/installers/nexuspanel-normal-v1.0.4-linux-installer.sh -o nexuspanel-install.sh
+sudo env NEXUSPANEL_REF=main bash nexuspanel-install.sh
+```
+
+This installs the local Needle repair runtime by default; set
+`NEXUSPANEL_INSTALL_AI=no` to skip it. See [the Needle documentation](ai/needle2/README.md)
+for model limits and configuration.
+
 Game-server execution is supported only on Linux hosts where the per-server
 locked identity and ASF systemd isolation preflight succeed. Launch fails closed
 if either isolation prerequisite is unavailable; it never falls back to running

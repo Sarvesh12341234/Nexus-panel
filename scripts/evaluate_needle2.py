@@ -50,7 +50,7 @@ for index, (expected, text) in enumerate(examples, 1):
     invalid += bool(answer and not valid)
     if not valid or answer['id'] != expected:
         failures.append({'expected': expected, 'actual': answer.get('id'), 'valid': valid})
-false_positives = sum(bool(responses.get(len(examples) + i + 1, {}).get('result')) for i in range(len(negative)))
+false_positives = sum(bool(responses.get(len(examples) + i + 1, {}).get('modelCalled')) for i in range(len(negative)))
 repair_correct = 0
 for i, (issue_id, tool, text) in enumerate(repairs):
     answer = responses.get(len(examples) + len(negative) + i + 1, {}).get('result') or {}

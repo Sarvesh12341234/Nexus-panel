@@ -13,7 +13,7 @@ SERVICE_USER="${NEXUSPANEL_SERVICE_USER:-root}"
 SERVICE_NAME="${NEXUSPANEL_SERVICE_NAME:-nexuspanel}"
 EDITION="${NEXUSPANEL_EDITION:-normal}"
 REF="${NEXUSPANEL_REF:-v1.0.4}"
-INSTALL_AI="${NEXUSPANEL_INSTALL_AI:-ask}"
+INSTALL_AI="${NEXUSPANEL_INSTALL_AI:-yes}"
 SKIP_TUNNELS="${NEXUSPANEL_SKIP_TUNNELS:-no}"
 MAX_RETRIES="${NEXUSPANEL_MAX_RETRIES:-3}"
 LOG_DIR="/var/log/nexuspanel-installer"
@@ -150,7 +150,7 @@ install_system_packages() {
             info "Updating APT..."
             retry apt-get update || die "APT update failed."
             info "Installing required packages..."
-            retry apt-get install -y curl ca-certificates git unzip tar xz-utils libarchive-tools build-essential systemd acl passwd util-linux procps iproute2 rsync file jq openssl python3 python3-minimal || die "Ubuntu dependency installation failed."
+            retry apt-get install -y curl ca-certificates git unzip tar xz-utils libarchive-tools build-essential systemd acl passwd util-linux procps iproute2 rsync file jq openssl python3 python3-minimal python3-venv || die "Ubuntu dependency installation failed."
             ;;
         dnf)
             retry dnf makecache || true
@@ -169,6 +169,15 @@ install_system_packages() {
             ;;
         *) die "Unsupported Linux distribution/package manager." ;;
     esac
+    if ! command_exists git-lfs; then
+        case "$pm" in
+            apt) retry apt-get install -y git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+            dnf) retry dnf install -y git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+            yum) retry yum install -y git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+            zypper) retry zypper --non-interactive install git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+            pacman) retry pacman -S --noconfirm --needed git-lfs || warn "Git LFS could not be installed; model downloads may be unavailable." ;;
+        esac
+    fi
 }
 
 node_supported() {
@@ -471,20 +480,18 @@ ask_ai() {
     esac
     echo
     echo "=================================================="
-    echo " NexusPanel Advanced AI"
+    echo " NexusPanel Needle repair model"
     echo "=================================================="
     echo
-    echo "Optional local coding/diagnostic AI."
-    echo "Model: Qwen2.5-Coder-0.5B-Instruct"
-    echo "AI is NOT required for the normal panel."
-    echo "It may require additional disk space and time."
+    echo "Optional local model for routing confirmed repair diagnostics."
+    echo "The panel still checks server state and repair permissions."
     echo
     if [ ! -t 0 ]; then
         warn "Installer input is not interactive. Skipping AI automatically."
         return 1
     fi
     while true; do
-        printf "Install Advanced AI now? [y/N]: "
+        printf "Install the Needle runtime now? [y/N]: "
         if ! read -r answer; then
             warn "Could not read input. Skipping Advanced AI."
             return 1
@@ -498,9 +505,33 @@ ask_ai() {
 }
 
 install_advanced_ai() {
-    # Advanced AI was removed in NexusPanel 1.0.0. Kept as a no-op so the
-    # install step numbering stays stable for existing scripts.
-    info "[5/9] Advanced AI setup skipped (removed in 1.0.0)."
+    info "[5/9] Preparing the local Needle repair runtime..."
+    if ! ask_ai; then
+        info "Needle runtime installation skipped. Deterministic repair remains available."
+        return 0
+    fi
+    local runtime="$INSTALL_DIR/data/needle2/runtime-linux"
+    local model="$INSTALL_DIR/models/nexuspanel-needle2-repair.cact"
+    mkdir -p "$INSTALL_DIR/data/needle2"
+    if ! python3 -m venv "$runtime"; then
+        warn "Could not create the Needle Python environment. Install python3-venv and retry."
+        return 0
+    fi
+    if ! "$runtime/bin/python" -m pip install 'cactus-needle==2.0.15'; then
+        warn "Could not install the Needle runtime. Deterministic repair remains available."
+        return 0
+    fi
+    if [ ! -f "$model" ] || [ "$(wc -c < "$model")" -lt 1024 ]; then
+        warn "The Needle repair model is missing or is a Git LFS pointer. Run git lfs pull and retry."
+        return 0
+    fi
+    local probe
+    probe="$(NEEDLE_TELEMETRY=0 timeout 90 "$runtime/bin/python" "$INSTALL_DIR/backend/needle2_worker.py" "$model" </dev/null 2>/dev/null)" || true
+    if [[ "$probe" != *'"ready": true'* ]]; then
+        warn "Needle could not initialize. Check Python and the model/runtime download."
+        return 0
+    fi
+    info "Needle repair model initialized successfully."
     return 0
 }
 
@@ -785,6 +816,9 @@ main() {
     ensure_node
     install_tunnel_tools
     clone_or_update
+    if command_exists git-lfs; then
+        (cd "$INSTALL_DIR" && git lfs pull) || warn "Git LFS model download failed; the panel will use deterministic repair until it is fixed."
+    fi
     npm_install_with_recovery
     build_components
     install_advanced_ai

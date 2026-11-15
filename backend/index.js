@@ -42,6 +42,7 @@ const {
 } = require('./wake_protocol');
 const { diagnoseRuntime, knowledgeStatus } = require('./repair_knowledge');
 const needle2Agent = require('./needle2_agent');
+const { panelRepairCandidates, REPAIR_TOOL_DIAGNOSTICS } = require('./needle2_repair_candidates');
 const { DDOS_PARAMETER_COUNT, collectDdosEvidence } = require('./ddos_guard');
 const tebex = require('./tebex');
 const hosting = require('./hosting');
@@ -2776,12 +2777,7 @@ function publicAgentAnalysis(analysis) {
   return payload;
 }
 
-/**
- * Deterministic repair analysis. The neural repair agent and web research were
- * removed in 1.0.0; this builds the same analysis shape from the deterministic
- * knowledge engine so every caller (repair, live maintenance, crash recovery)
- * keeps working.
- */
+/** Build deterministic diagnostics with an optional local advisory. */
 async function analyzeServerWithAgent(server, software, diagnostics) {
   const root = findServerRoot({ ...server, server_path: server.server_path || serverPath(server.id, server.name) });
   const knowledge = knowledgeStatus();
@@ -3181,17 +3177,6 @@ async function quarantineIncompatibleBedrockPacks(server, root, logs) {
   return { actions, warnings };
 }
 
-const REPAIR_TOOL_DIAGNOSTICS = {
-  repair_server_properties: ['properties-path', 'properties-syntax', 'properties-value', 'properties-encoding'],
-  repair_missing_executable: ['jar-corrupt'],
-  install_bundled_java_runtime: ['java-missing', 'bad-java-version'],
-  rebuild_support_configs: ['support-config-missing'],
-  repair_bedrock_pack_references: ['bedrock-missing-pack-reference'],
-  quarantine_identified_plugin: ['plugin-exception', 'plugin-archive-corrupt', 'plugin-dependency', 'duplicate-plugin', 'plugin-api-version', 'loader-mismatch', 'mod-resolution', 'mixin', 'datapack'],
-  cleanup_stale_transfers: ['archive-incomplete'],
-  quarantine_incompatible_bedrock_pack: ['bedrock-pack-version'],
-};
-
 async function cleanupStaleTransferFiles(server, root) {
   if (runtimeStatus(server.id) !== 'offline') return 0;
   const activeServerOperation = [...keyedOperations.keys()].some((key) =>
@@ -3326,21 +3311,17 @@ async function runServerRepair(server, software, { applyOptimizations = false, a
     software?.edition === server.type
       && !executableCandidates(server, software).some((candidate) => fs.existsSync(candidate)),
   );
-  if (allowModelTools && (diagnostics.length || missingSelectedExecutable)) {
-    const repairCandidates = diagnostics.map((item) =>
-      `issueId: ${item.id}; evidence: ${item.summary}`);
-    if (missingSelectedExecutable) {
-      repairCandidates.push('issueId: server-not-installed; evidence: Install server software before starting.');
-    }
-    const modelRequest = await needle2Agent.suggestRepairTool(server.id, [
-      'Use request_repair_tool for a confirmed issue if a registered repair matches. Use the exact issueId and evidence labels below. If none matches, make no request.',
-      ...repairCandidates,
-    ].join('\n')).catch(() => null);
-    if (modelRequest) {
-      agentAnalysis.requestedRepairTool = { tool: modelRequest.tool, issueId: modelRequest.issueId, evidence: modelRequest.evidence };
-      const result = await executeRequestedRepairTool(modelRequest, { server, software, root, diagnostics, logs: logs || consoleLogs(server.id), repairContext });
-      actions.push(...result.actions);
-      warnings.push(...result.warnings);
+  if (allowModelTools && runtimeStatus(server.id) === 'offline') {
+    const candidates = panelRepairCandidates(diagnostics, missingSelectedExecutable).slice(0, 3);
+    for (const candidate of candidates) {
+      const modelRequest = await needle2Agent.suggestRepairTool(server.id, candidate).catch(() => null);
+      if (modelRequest) {
+        agentAnalysis.requestedRepairTool = { tool: modelRequest.tool, issueId: modelRequest.issueId, evidence: modelRequest.evidence };
+        const result = await executeRequestedRepairTool(modelRequest, { server, software, root, diagnostics, logs: logs || consoleLogs(server.id), repairContext });
+        actions.push(...result.actions);
+        warnings.push(...result.warnings);
+        break;
+      }
     }
   }
   if (terminalTelemetry.enabled) {

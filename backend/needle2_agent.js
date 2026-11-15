@@ -6,7 +6,10 @@ const path = require('path');
 
 const REGISTRY_PATH = path.join(__dirname, '..', 'ai', 'needle2', 'known-issues.json');
 const REPAIR_TOOLS = require('../ai/needle2/repair-tools.json');
+const { repairCandidatePrompt } = require('./needle2_repair_candidates');
 const DEFAULT_MODEL_PATH = path.join(__dirname, '..', 'data', 'needle2', 'nexuspanel-needle2.cact');
+const LOCAL_REPAIR_MODEL_PATH = path.join(__dirname, '..', 'data', 'needle2', 'nexuspanel-needle2-repair.cact');
+const BUNDLED_REPAIR_MODEL_PATH = path.join(__dirname, '..', 'models', 'nexuspanel-needle2-repair.cact');
 const WORKER_PATH = path.join(__dirname, 'needle2_worker.py');
 const MAX_WORKERS = Math.max(1, Math.min(32, Number(process.env.NEXUSPANEL_NEEDLE2_MAX_WORKERS) || 8));
 const IDLE_MS = 10 * 60 * 1000;
@@ -26,16 +29,36 @@ function readRegistry() {
   }
 }
 
-function modelPath() {
-  return path.resolve(process.env.NEXUSPANEL_NEEDLE2_MODEL || DEFAULT_MODEL_PATH);
+function modelPath(mode = 'classify') {
+  return path.resolve(mode === 'repair'
+    ? (process.env.NEXUSPANEL_NEEDLE2_REPAIR_MODEL || (fs.existsSync(LOCAL_REPAIR_MODEL_PATH) ? LOCAL_REPAIR_MODEL_PATH : BUNDLED_REPAIR_MODEL_PATH))
+    : (process.env.NEXUSPANEL_NEEDLE2_MODEL || DEFAULT_MODEL_PATH));
 }
 
-function enabled() {
-  return Object.keys(registry).length > 0 && fs.existsSync(modelPath()) && fs.existsSync(WORKER_PATH);
+function validModelFile(file) {
+  let handle;
+  try {
+    handle = fs.openSync(file, 'r');
+    const header = Buffer.alloc(4);
+    if (fs.readSync(handle, header, 0, header.length, 0) !== header.length) return false;
+    return [0x05e12a83, 0x05e12a84].includes(header.readUInt32LE(0));
+  } catch {
+    return false;
+  } finally {
+    if (handle !== undefined) fs.closeSync(handle);
+  }
+}
+
+function enabled(mode = 'classify') {
+  return Object.keys(registry).length > 0 && validModelFile(modelPath(mode)) && fs.existsSync(WORKER_PATH);
 }
 
 function pythonCommand() {
-  return String(process.env.NEXUSPANEL_NEEDLE2_PYTHON || (process.platform === 'win32' ? 'python' : 'python3'));
+  if (process.env.NEXUSPANEL_NEEDLE2_PYTHON) return String(process.env.NEXUSPANEL_NEEDLE2_PYTHON);
+  const localPython = process.platform === 'win32'
+    ? path.join(__dirname, '..', 'data', 'needle2', 'runtime-win', 'Scripts', 'python.exe')
+    : path.join(__dirname, '..', 'data', 'needle2', 'runtime-linux', 'bin', 'python');
+  return fs.existsSync(localPython) ? localPython : (process.platform === 'win32' ? 'python' : 'python3');
 }
 
 function safeEnvironment() {
@@ -56,8 +79,8 @@ function redact(text) {
 }
 
 function removeWorker(serverId, worker, kill = true) {
-  if (workers.get(serverId) !== worker) return;
-  workers.delete(serverId);
+  if (workers.get(worker.key) !== worker) return;
+  workers.delete(worker.key);
   if (worker.startTimer) clearTimeout(worker.startTimer);
   if (worker.startTimer) worker.startTimer = null;
   if (worker.pendingTimer) clearTimeout(worker.pendingTimer);
@@ -76,7 +99,7 @@ function reapIdle() {
   }
 }
 
-function createWorker(serverId) {
+function createWorker(serverId, mode = 'classify') {
   reapIdle();
   if (workers.size >= MAX_WORKERS) {
     const oldest = [...workers.entries()]
@@ -86,13 +109,14 @@ function createWorker(serverId) {
   }
   if (workers.size >= MAX_WORKERS) return null;
 
-  const child = spawn(pythonCommand(), [WORKER_PATH, modelPath()], {
+  const child = spawn(pythonCommand(), [WORKER_PATH, modelPath(mode)], {
     cwd: path.dirname(WORKER_PATH),
     env: safeEnvironment(),
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
   const worker = {
+    key: `${mode}:${serverId}`,
     child,
     ready: false,
     busy: false,
@@ -103,7 +127,7 @@ function createWorker(serverId) {
     startTimer: null,
     pendingTimer: null,
   };
-  workers.set(serverId, worker);
+  workers.set(worker.key, worker);
   worker.startTimer = setTimeout(() => {
     lastWorkerError = 'Needle worker did not start before the timeout.';
     removeWorker(serverId, worker);
@@ -154,30 +178,33 @@ function createWorker(serverId) {
   return worker;
 }
 
-async function getReadyWorker(serverId) {
-  let worker = workers.get(serverId);
+async function getReadyWorker(serverId, mode = 'classify') {
+  let worker = workers.get(`${mode}:${serverId}`);
   if (worker && worker.ready) return worker;
-  if (worker) return null;
-  worker = createWorker(serverId);
+  if (!worker) worker = createWorker(serverId, mode);
   if (!worker) return null;
-  return new Promise((resolve) => {
+  if (worker.readyPromise) return worker.readyPromise;
+  worker.readyPromise = new Promise((resolve) => {
     const startedAt = Date.now();
     const poll = () => {
       if (worker.ready) return resolve(worker);
-      if (workers.get(serverId) !== worker || Date.now() - startedAt > START_TIMEOUT_MS) return resolve(null);
+      if (workers.get(worker.key) !== worker || Date.now() - startedAt > START_TIMEOUT_MS) return resolve(null);
       const timer = setTimeout(poll, 100);
       timer.unref?.();
     };
     poll();
   });
+  return worker.readyPromise;
 }
 
-async function requestWorkerResult(serverId, input) {
-  if (!enabled()) return null;
+async function requestWorkerResult(serverId, input, candidate = null) {
+  const mode = candidate ? 'repair' : 'classify';
+  if (!enabled(mode)) return null;
   const id = Number(serverId);
   const text = redact(input);
   if (!Number.isSafeInteger(id) || id <= 0 || text.length < 12) return null;
-  const worker = await getReadyWorker(id);
+  if (candidate && text !== repairCandidatePrompt(candidate)) return null;
+  const worker = await getReadyWorker(id, mode);
   if (!worker) return null;
 
   // Queue requests atomically. Polling `busy` allows multiple callers to see
@@ -193,7 +220,7 @@ async function requestWorkerResult(serverId, input) {
     queueTimeout.unref?.();
   });
   const runRequest = async () => {
-    if (queueExpired || workers.get(id) !== worker || !worker.child.stdin.writable) return null;
+    if (queueExpired || workers.get(worker.key) !== worker || !worker.child.stdin.writable) return null;
     const requestId = nextRequestId++;
     worker.busy = true;
     worker.lastUsedAt = Date.now();
@@ -206,7 +233,7 @@ async function requestWorkerResult(serverId, input) {
         resolve(null);
       }, REQUEST_TIMEOUT_MS);
       worker.pendingTimer.unref?.();
-      worker.child.stdin.write(`${JSON.stringify({ requestId, text })}\n`, (error) => {
+      worker.child.stdin.write(`${JSON.stringify({ requestId, text, mode, ...(candidate ? { candidate } : {}) })}\n`, (error) => {
         if (error) {
           worker.pending.delete(requestId);
           clearTimeout(worker.pendingTimer);
@@ -243,7 +270,7 @@ function matchDocumentedIssue(input) {
 }
 
 async function classify(serverId, input) {
-  if (!enabled() || !Number.isSafeInteger(Number(serverId)) || Number(serverId) <= 0) return null;
+  if (!Number.isSafeInteger(Number(serverId)) || Number(serverId) <= 0) return null;
   const exact = matchDocumentedIssue(input);
   if (exact) {
     const issue = registry[exact.id];
@@ -255,6 +282,7 @@ async function classify(serverId, input) {
       source: 'documented-exact-match', verified: false, executable: false,
     };
   }
+  if (!enabled()) return null;
   const response = await requestWorkerResult(serverId, input);
   if (!response) return null;
   const { result, evidence } = response;
@@ -272,14 +300,19 @@ async function classify(serverId, input) {
   };
 }
 
-async function suggestRepairTool(serverId, input) {
-  const response = await requestWorkerResult(serverId, input);
+async function suggestRepairTool(serverId, candidate) {
+  if (!candidate || typeof candidate.issueId !== 'string' || typeof candidate.tool !== 'string'
+      || typeof candidate.evidence !== 'string' || !candidate.evidence.trim()
+      || REPAIR_TOOLS.issueMap[candidate.issueId] !== candidate.tool) return null;
+  const response = await requestWorkerResult(serverId, repairCandidatePrompt(candidate), candidate);
   if (!response) return null;
   const { result, evidence } = response;
   if (result.kind !== 'repair-tool' || typeof result.tool !== 'string' || typeof result.issueId !== 'string') return null;
   const issue = registry[result.issueId];
   const allowed = REPAIR_TOOLS.issueMap[result.issueId];
-  if (!issue || !allowed || allowed !== result.tool || issue.repairTool !== result.tool) return null;
+  if (!issue || !allowed || allowed !== result.tool || issue.repairTool !== result.tool
+      || result.issueId !== candidate.issueId || result.tool !== candidate.tool
+      || evidence.length < 12 || !candidate.evidence.includes(evidence)) return null;
   return {
     tool: result.tool,
     issueId: result.issueId,
@@ -295,18 +328,22 @@ function status() {
   return {
     enabled: enabled(),
     model: enabled() ? path.basename(modelPath()) : '',
+    repairModelEnabled: enabled('repair'),
+    repairModel: enabled('repair') ? path.basename(modelPath('repair')) : '',
+    repairModelError: fs.existsSync(modelPath('repair')) && !validModelFile(modelPath('repair'))
+      ? 'Repair model is invalid or is an unresolved Git LFS pointer.' : null,
     documentedIssues: Object.keys(registry).length,
     isolatedServerWorkers: workers.size,
     maxWorkers: MAX_WORKERS,
     runtimeError: lastWorkerError || null,
-    mode: 'read-only-advisory',
+    mode: enabled('repair') ? 'advisory-and-confirmed-repair-routing' : 'read-only-advisory',
   };
 }
 
-process.once('exit', () => {
-  for (const worker of workers.values()) {
-    if (worker.child && !worker.child.killed) worker.child.kill();
-  }
-});
+function shutdownWorkers() {
+  for (const [key, worker] of workers) removeWorker(key, worker);
+}
 
-module.exports = { classify, suggestRepairTool, enabled, status, matchDocumentedIssue };
+process.once('exit', shutdownWorkers);
+
+module.exports = { classify, suggestRepairTool, enabled, status, matchDocumentedIssue, shutdownWorkers };

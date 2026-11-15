@@ -60,6 +60,23 @@ def main() -> int:
             # Must match redact() in needle2_agent.js: keep the LAST 1400 chars,
             # otherwise evidence quoted from the tail fails the substring check.
             text = str(request.get("text", ""))[-1400:]
+            mode = request.get("mode", "classify")
+            if mode == "repair":
+                candidate = request.get("candidate")
+                if not isinstance(candidate, dict):
+                    print(json.dumps({"requestId": request_id, "result": None, "modelCalled": False, "blocked": True}), flush=True)
+                    continue
+                issue_id, tool, evidence = (candidate.get(key) for key in ("issueId", "tool", "evidence"))
+                valid = (isinstance(issue_id, str) and isinstance(tool, str) and isinstance(evidence, str)
+                         and ISSUE_TOOL_MAP.get(issue_id) == tool and tool in ALLOWED_TOOLS
+                         and 12 <= len(evidence) <= 350 and evidence == evidence.strip()
+                         and text == f"Confirmed offline repair. issueId: {issue_id}; tool: {tool}; evidence: {evidence}")
+                if not valid:
+                    print(json.dumps({"requestId": request_id, "result": None, "modelCalled": False, "blocked": True}), flush=True)
+                    continue
+            elif mode != "classify":
+                print(json.dumps({"requestId": request_id, "result": None, "modelCalled": False, "blocked": True}), flush=True)
+                continue
             agent.reset()
             response = agent.complete(text)
             calls = response.get("function_calls", []) if isinstance(response, dict) else []
@@ -83,7 +100,9 @@ def main() -> int:
                             "issueId": issue_id,
                             "evidence": args.get("evidence"),
                         }
-            print(json.dumps({"requestId": request_id, "result": result}), flush=True)
+            # Report whether the model attempted any call even if validation
+            # rejected it, so evaluations cannot hide unsafe false positives.
+            print(json.dumps({"requestId": request_id, "result": result, "modelCalled": bool(calls)}), flush=True)
         except Exception as exc:
             print(json.dumps({"requestId": request.get("requestId", 0), "error": type(exc).__name__}), flush=True)
     return 0

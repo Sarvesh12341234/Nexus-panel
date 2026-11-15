@@ -30,7 +30,7 @@
     "test:security": "node tests/security-regression.test.js && node tests/request-security.test.js && node tests/isolation-security.test.js && node tests/node-version.test.js",
     "test:exploit": "node tests/security-exploit.test.js",
     "test:database": "node tests/database-provisioning.test.js",
-    "test:advanced": "node tests/advanced-ops.test.js && node tests/needle2-match.test.js",
+    "test:advanced": "node tests/advanced-ops.test.js && node tests/needle2-match.test.js && node tests/needle2-candidates.test.js && node tests/needle2-worker.test.js && node tests/needle2-concurrency.test.js && node tests/needle2-repair-routing.test.js",
     "test:process": "node tests/process-restart.test.js",
     "test:tebex": "node tests/tebex-history.test.js",
     "test:wake": "node tests/wake-protocol.test.js",

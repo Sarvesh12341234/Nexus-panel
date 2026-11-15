@@ -6024,7 +6024,7 @@ document.addEventListener('click', async (event) => {
       const advisory = suggestion
         ? `${suggestion.source === 'documented-exact-match' ? 'Documented match' : 'Needle suggestion'} (unverified): ${suggestion.issueId}\nCause: ${suggestion.cause || 'Unknown'}\nSuggested check: ${suggestion.fix || 'Inspect the server log.'}`
         : '';
-      const modelError = result.agent?.model?.runtimeError || '';
+      const modelError = result.agent?.model?.runtimeError || result.agent?.model?.repairModelError || '';
       const advancedSuggestions = (result.agent?.advancedSuggestions || []).slice(0, 6)
         .map((item) => {
           const command = item.command ? `${item.command} ${(item.args || []).join(' ')}`.trim() : `${item.tool}${item.path ? ` ${item.path}` : ''}`;
