@@ -4321,6 +4321,54 @@ const aiChat = createAiChat({
       logFixed({ serverId: server.id, category: 'security', title: 'AI full-access command', detail: 'A shell command was executed with panel service privileges.', source: 'ai-chat', actorUserId: user.id });
       return require('./ai_full_terminal').runFullTerminal(args.command, ensureServerDirs(server), context);
     }
+    if (name === 'restart_server') {
+      if (!hasJavaEula(server)) throw new Error('Agree to the Minecraft EULA first.');
+      const software = softwareForServer(server);
+      if (!software) throw new Error('This server has no installed software configured for restart.');
+      await safeTimelinePoint(server, { user, headers: {}, protocol: 'http', get: () => 'localhost' }, 'Before AI requested restart', 'Captured configuration before restarting.');
+      if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
+      const result = restartServer(resolveInstalledExecutable(server, software), software);
+      logFixed({ serverId: server.id, category: 'server', title: 'AI requested server restart', detail: result.message || '', source: 'ai-chat', actorUserId: user.id });
+      return result;
+    }
+    if (name === 'stop_server') {
+      const result = stopServer(server.id);
+      refreshWakeWatchers();
+      logFixed({ serverId: server.id, category: 'server', title: 'AI requested server stop', detail: result.message || '', source: 'ai-chat', actorUserId: user.id });
+      return result;
+    }
+    if (name === 'start_server') {
+      if (!hasJavaEula(server)) throw new Error('Agree to the Minecraft EULA first.');
+      const software = softwareForServer(server);
+      if (!software) throw new Error('This server has no software configured for start.');
+      await safeTimelinePoint(server, { user }, 'Before AI requested start', 'Captured configuration before launching.');
+      if (['java', 'bedrock'].includes(server.type)) await repairPropertiesFile(server);
+      const result = startServer(resolveInstalledExecutable(server, software), software);
+      logFixed({ serverId: server.id, category: 'server', title: 'AI requested server start', detail: result.message || '', source: 'ai-chat', actorUserId: user.id });
+      return result;
+    }
+    if (name === 'create_admin') {
+      const email = String(args.email || '').trim().toLowerCase();
+      const nameValue = String(args.name || '').trim();
+      const password = String(args.password || '');
+      if (!email || !nameValue || password.length < 12) throw new Error('Admin creation requires a valid email, name and password of at least 12 characters.');
+      const result = createUser({ email, name: nameValue, password, role: 'admin', accessLevel: Number(args.accessLevel || 10), permissionKeys: [] });
+      logFixed({ category: 'security', title: 'AI created admin account', detail: email, source: 'ai-chat', actorUserId: user.id });
+      return { ok: true, user: publicUser(result) };
+    }
+    if (name === 'manage_plugin') {
+      const plugin = db.prepare('SELECT * FROM plugins WHERE id = ? AND server_id = ?').get(Number(args.pluginId), server.id);
+      if (!plugin) throw new Error('Plugin not found on the selected server.');
+      if (args.action === 'remove') {
+        const target = safeServerFile(server, plugin.relative_path);
+        if (plugin.relative_path) await fs.promises.rm(target.absolute, { force: true });
+        db.prepare('DELETE FROM plugins WHERE id = ?').run(plugin.id);
+      } else if (args.action === 'enable' || args.action === 'disable') {
+        db.prepare('UPDATE plugins SET enabled = ? WHERE id = ?').run(args.action === 'enable' ? 1 : 0, plugin.id);
+      } else throw new Error('Choose enable, disable or remove.');
+      logFixed({ serverId: server.id, category: 'plugins', title: `AI ${args.action}d plugin`, detail: plugin.name, source: 'ai-chat', actorUserId: user.id });
+      return { ok: true, action: args.action, plugin: plugin.name };
+    }
     if (name === 'server_info') return { server: { id: server.id, name: server.name, type: server.type, status: runtimeStatus(server.id), version: server.software_version || 'unknown', software: server.software_key || '', memoryMb: server.max_memory_mb, path: displayPath(server.server_path || serverPath(server.id, server.name)) }, panelVersion: PANEL_VERSION, edition: panelEdition() };
     if (name === 'plugin_inventory') {
       const plugins = pluginRows(server.id).map(({ name, kind, fileName, enabled, relativePath }) => ({ name, kind, fileName, enabled, relativePath }));
