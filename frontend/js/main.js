@@ -3203,7 +3203,7 @@ async function renderAiChat() {
     const steps = entry.steps?.length ? `<details class="ai-steps"><summary>${entry.steps.length} operation(s)</summary><pre>${escapeHtml(entry.steps.map((step) => `${step.tool}: ${step.result}`).join('\n'))}</pre></details>` : '';
     return `<div class="ai-row ${isUser ? 'is-user' : 'is-assistant'}"><span class="ai-avatar">${isUser ? 'You' : 'AI'}</span><div class="ai-bubble"><div class="ai-bubble-text">${escapeHtml(entry.content)}</div>${steps}</div></div>`;
   }).join('') : '<div class="ai-empty"><p class="empty-state">Ask about this server or request a repair.</p></div>';
-  panel.innerHTML = `<div class="ai-chat-shell"><div class="ai-chat-header"><div><p class="eyebrow">${escapeHtml(config.provider)} · ${escapeHtml(config.model)}</p><h2>AI chat</h2><p class="muted">${escapeHtml(server.name)} · expires ${escapeHtml(new Date(history.expiresAt).toLocaleTimeString())}</p></div><button type="button" class="secondary" data-action="ai-lock">Lock and clear</button></div><p class="ai-notice muted">${config.fullAccess ? "Full access is enabled: the assistant can run shell commands with panel service privileges across the host." : "The assistant can read server files and logs, edit text files while stopped, send server console commands, and run limited diagnostics."} Content used in the chat is sent to your provider.</p><div class="ai-messages" id="aiMessages">${bubbles}</div><form id="aiChatForm" class="ai-composer"><textarea name="message" rows="1" maxlength="12000" required placeholder="Message AI… (Enter to send, Shift+Enter for a new line)"></textarea><button type="submit" aria-label="Send message">Send</button></form></div>`;
+  panel.innerHTML = `<div class="ai-chat-shell"><div class="ai-chat-header"><div><p class="eyebrow">${escapeHtml(config.provider)} · ${escapeHtml(config.model)}</p><h2>AI chat</h2><p class="muted">${escapeHtml(server.name)} · expires ${escapeHtml(new Date(history.expiresAt).toLocaleTimeString())}</p></div><button type="button" class="secondary" data-action="ai-lock">Lock and clear</button></div><p class="ai-notice muted">${config.fullAccess ? "Full access is enabled: the assistant can run shell commands with panel service privileges across the host." : "The assistant can read server files and logs, edit text files while stopped, send server console commands, and run limited diagnostics."} Content used in the chat is sent to your provider.</p><div class="ai-messages" id="aiMessages">${bubbles}</div><form id="aiChatForm" class="ai-composer"><div class="ai-compose-toolbar"><button type="button" class="ai-attach" data-action="ai-attach-image" aria-label="Attach image">📷</button></div><textarea name="message" rows="1" maxlength="12000" required placeholder="Message AI… (Enter to send, Shift+Enter for a new line)"></textarea><button type="submit" aria-label="Send message">Send</button></form></div>`;
   const messages = panel.querySelector('#aiMessages'); if (messages) messages.scrollTop = messages.scrollHeight;
   const composer = panel.querySelector('#aiChatForm textarea');
   if (composer) {
@@ -3432,9 +3432,14 @@ document.addEventListener('submit', async (event) => {
     } else {
       const server = activeServer();
       if (!server) throw new Error('Select a server first.');
-      const message = form.elements.message.value;
+      const textarea = form.elements.message;
+      const message = textarea.value;
+      const attachedImage = textarea.dataset.attachedImage || null;
+      const attachedImageName = textarea.dataset.attachedImageName || null;
       if (button) button.textContent = 'Thinking…';
-      await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message }) });
+      await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
+      delete textarea.dataset.attachedImage;
+      delete textarea.dataset.attachedImageName;
       if (state.activeView === 'ai' && activeServer()?.id === server.id) await renderAiChat();
     }
   } catch (error) {
@@ -3449,6 +3454,68 @@ document.addEventListener('click', async (event) => {
   if (!event.target.closest('[data-action="ai-lock"]')) return;
   try { await api('/api/ai/lock', { method: 'POST', body: '{}' }); await renderAiChat(); }
   catch (error) { showToast(error.message); }
+});
+
+document.addEventListener('click', async (event) => {
+  const btn = event.target.closest('[data-action="ai-attach-image"]');
+  if (!btn) return;
+  const form = btn.closest('#aiChatForm');
+  if (!form) return;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.style.display = 'none';
+  input.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { showToast('Please select an image file.'); return; }
+    if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5 MB.'); return; }
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    const textarea = form.querySelector('textarea[name="message"]');
+    const marker = `\n![attached image](${file.name})\n`;
+    textarea.value += marker;
+    textarea.dataset.attachedImage = base64;
+    textarea.dataset.attachedImageName = file.name;
+    textarea.dispatchEvent(new Event('input'));
+  });
+  document.body.appendChild(input);
+  input.click();
+  document.body.removeChild(input);
+});
+
+document.addEventListener('paste', async (event) => {
+  if (state.activeView !== 'ai') return;
+  const form = document.querySelector('#aiChatForm');
+  if (!form) return;
+  const textarea = form.querySelector('textarea[name="message"]');
+  if (!textarea || document.activeElement !== textarea) return;
+  const items = event.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      event.preventDefault();
+      const file = item.getAsFile();
+      if (!file) return;
+      if (file.size > 5 * 1024 * 1024) { showToast('Pasted image must be under 5 MB.'); return; }
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const marker = `\n![attached image](${file.name || 'pasted-image.png'})\n`;
+      textarea.value += marker;
+      textarea.dataset.attachedImage = base64;
+      textarea.dataset.attachedImageName = file.name || 'pasted-image.png';
+      textarea.dispatchEvent(new Event('input'));
+      break;
+    }
+  }
 });
 function updateSettingsLiveStatus() {
   if (state.activeView !== 'settings') return;
