@@ -1392,6 +1392,7 @@ async function streamAiChat(path, body, handlers = {}) {
   const decoder = new TextDecoder();
   let buffer = '';
   let currentEvent = 'message';
+  let sawAnyEvent = false;
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1408,9 +1409,17 @@ async function streamAiChat(path, body, handlers = {}) {
       if (!payload) continue;
       let data = {};
       try { data = JSON.parse(payload); } catch { data = { raw: payload }; }
+      sawAnyEvent = true;
       const handler = handlers[`on${currentEvent.charAt(0).toUpperCase()}${currentEvent.slice(1)}`];
       if (typeof handler === 'function') handler(data);
     }
+  }
+  // A stream that produced no events at all (proxy buffering, provider hiccup)
+  // must not leave the UI stuck on "Thinking…" forever.
+  if (!sawAnyEvent) {
+    const error = new Error('NO_STREAM_EVENTS');
+    error.code = 'no-stream-events';
+    throw error;
   }
 }
 
@@ -3541,6 +3550,9 @@ document.addEventListener('submit', async (event) => {
       await api('/api/ai/unlock', { method: 'POST', body: JSON.stringify({ password: form.elements.password.value }) });
       await renderAiChat();
     } else {
+      // Block duplicate submissions while a request is in flight. Without this,
+      // pressing Enter repeatedly stacks "Thinking…" rows and the backend 409s.
+      if (form.dataset.aiPending === '1') return;
       const server = activeServer();
       if (!server) throw new Error('Select a server first.');
       const textarea = form.elements.message;
@@ -3658,30 +3670,32 @@ document.addEventListener('submit', async (event) => {
       };
       
       try {
-        await streamAiChat(`/api/ai/chat/stream`, { serverId: server.id, message, attachedImage, attachedImageName }, {
-          onStart: () => { sawAnyEvent = true; setStatus('Thinking…'); },
-          onThinking: appendThinking,
-          onText: appendText,
-          onToolStart: (data) => { sawAnyEvent = true; hideStatus(); upsertToolCall(data, true); },
-          onToolEnd: (data) => { sawAnyEvent = true; upsertToolCall(data, false); },
-          onDone: (data) => {
-            sawAnyEvent = true;
-            hideStatus();
-            if (data.thinking && !streamedThinking) appendThinking(data.thinking);
-            if (data.reply && !streamedText) appendText(data.reply);
-          },
-          onError: (data) => {
-            sawAnyEvent = true;
-            hideStatus();
-            if (liveText && !streamedText) {
-              liveText.style.color = 'var(--red)';
-              liveText.textContent = data.error || 'AI request failed.';
-            }
-          },
-        });
-        
-        if (!sawAnyEvent) {
-          // Provider or proxy did not stream: fall back to the JSON endpoint.
+        try {
+          await streamAiChat(`/api/ai/chat/stream`, { serverId: server.id, message, attachedImage, attachedImageName }, {
+            onStart: () => { sawAnyEvent = true; setStatus('Thinking…'); },
+            onThinking: appendThinking,
+            onText: appendText,
+            onToolStart: (data) => { sawAnyEvent = true; hideStatus(); upsertToolCall(data, true); },
+            onToolEnd: (data) => { sawAnyEvent = true; upsertToolCall(data, false); },
+            onDone: (data) => {
+              sawAnyEvent = true;
+              hideStatus();
+              if (data.thinking && !streamedThinking) appendThinking(data.thinking);
+              if (data.reply && !streamedText) appendText(data.reply);
+            },
+            onError: (data) => {
+              sawAnyEvent = true;
+              hideStatus();
+              if (liveText && !streamedText) {
+                liveText.style.color = 'var(--red)';
+                liveText.textContent = data.error || 'AI request failed.';
+              }
+            },
+          });
+        } catch (streamError) {
+          // Streaming unavailable (proxy buffering, provider hiccup, or a 409
+          // from a stale in-flight request): fall back to the JSON endpoint.
+          if (streamError?.status === 401) throw streamError;
           const response = await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
           hideStatus();
           if (response?.thinking) appendThinking(response.thinking);
