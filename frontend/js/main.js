@@ -3031,9 +3031,10 @@ function fileEntryMarkup(entry, selectedPaths) {
 }
 
 /**
- * Render the file list with virtual scrolling for large folders.
- * Only visible rows (+ buffer) are mounted; others are unmounted to keep DOM small.
- * Row reuse + signature diffing prevents re-renders when data hasn't changed.
+ * Render the file list without destroying the DOM on every refresh.
+ * Rows are reused in place via signature diffing, so scroll position is
+ * preserved automatically. Only rows that actually changed are re-rendered;
+ * rows that disappeared are removed; new rows are appended.
  */
 function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a file or paste config here.') {
   const list = elements.fileList;
@@ -3047,7 +3048,6 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
   const focusedSelectionEnd = typeof active?.selectionEnd === 'number' ? active.selectionEnd : null;
   const focusedScrollTop = active?.scrollTop || 0;
   const existingRows = new Map([...list.querySelectorAll('[data-file-row]')].map((row) => [row.dataset.fileRow, row]));
-  const orderedRows = [];
   const seen = new Set();
   const signatureMatches = entries.length === existingRows.size
     && entries.every((entry) => {
@@ -3075,16 +3075,9 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
     return;
   }
 
-  // Virtual scrolling: only render visible window + buffer
-  const ROW_HEIGHT = 44; // approximate row height in px
-  const VIEWPORT_HEIGHT = list.clientHeight || 400;
-  const VISIBLE_COUNT = Math.ceil(VIEWPORT_HEIGHT / ROW_HEIGHT) + 1;
-  const BUFFER = 8;
-  const scrollIndex = Math.floor(scrollTop / ROW_HEIGHT);
-  const startIdx = Math.max(0, scrollIndex - BUFFER);
-  const endIdx = Math.min(entries.length, scrollIndex + VISIBLE_COUNT + BUFFER);
-
-  // Build row elements for visible range only
+  // Build/update rows in place. Never clear the whole list, which would
+  // reset scrollTop. Only remove rows that are no longer in the data.
+  const fragment = document.createDocumentFragment();
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     const path = String(entry?.path || '');
@@ -3109,10 +3102,8 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
       if (row) row.dataset.entrySignature = signature;
     }
     if (row) {
-      // Mark visibility range
-      row.dataset.virtualIndex = String(i);
-      row.style.display = (i >= startIdx && i < endIdx) ? '' : 'none';
-      orderedRows.push(row);
+      row.style.display = '';
+      fragment.appendChild(row);
     }
   }
 
@@ -3121,16 +3112,9 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
     if (!seen.has(row.dataset.fileRow)) row.remove();
   }
 
-  // Insert/reorder only visible rows; hidden rows stay detached
-  const fragment = document.createDocumentFragment();
-  for (let index = 0; index < orderedRows.length; index++) {
-    const row = orderedRows[index];
-    const virtualIdx = Number(row.dataset.virtualIndex);
-    const shouldShow = virtualIdx >= startIdx && virtualIdx < endIdx;
-    row.style.display = shouldShow ? '' : 'none';
-    if (shouldShow) fragment.appendChild(row);
-  }
-  // Replace list contents with fragment (only visible rows)
+  // Replace list contents in one operation. Rows that already existed and
+  // didn't change are moved (not re-created), so the browser preserves
+  // their state and the scroll position stays put.
   list.innerHTML = '';
   list.appendChild(fragment);
 
@@ -3159,24 +3143,6 @@ function renderFileEntries(entries = [], emptyText = 'Folder is empty. Create a 
     }
   }
 
-  // Scroll listener for virtual window updates (debounced)
-  if (!list.dataset.virtualListener) {
-    list.dataset.virtualListener = '1';
-    let scrollTimer = 0;
-    list.addEventListener('scroll', () => {
-      clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(() => {
-        const newScrollTop = list.scrollTop;
-        const newScrollIndex = Math.floor(newScrollTop / ROW_HEIGHT);
-        const newStart = Math.max(0, newScrollIndex - BUFFER);
-        const newEnd = Math.min(entries.length, newScrollIndex + VISIBLE_COUNT + BUFFER);
-        for (const row of list.querySelectorAll('[data-virtual-index]')) {
-          const idx = Number(row.dataset.virtualIndex);
-          row.style.display = (idx >= newStart && idx < newEnd) ? '' : 'none';
-        }
-      }, 16); // ~1 frame
-    }, { passive: true });
-  }
 }
 
 function fileEntrySignature(entry) {
