@@ -1366,6 +1366,54 @@ function invalidateApiCache(prefix = '') {
   for (const key of apiCache.keys()) if (!prefix || key.includes(prefix)) apiCache.delete(key);
 }
 
+/**
+ * Consume a Server-Sent Events endpoint and dispatch named events to callbacks.
+ * Used by the AI chat so reasoning, tool calls and text stream in live.
+ */
+async function streamAiChat(path, body, handlers = {}) {
+  const response = await fetch(path, {
+    method: 'POST',
+    cache: 'no-store',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', 'X-NexusPanel-Request': '1' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body) {
+    let message = `Request failed (${response.status}).`;
+    try {
+      const data = await response.json();
+      if (typeof data?.error === 'string' && data.error.trim()) message = data.error.trim().slice(0, 300);
+    } catch {}
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let currentEvent = 'message';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex;
+    while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newlineIndex).replace(/\r$/, '');
+      buffer = buffer.slice(newlineIndex + 1);
+      if (!line) continue;
+      if (line.startsWith(':')) continue; // heartbeat comment
+      if (line.startsWith('event:')) { currentEvent = line.slice(6).trim(); continue; }
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload) continue;
+      let data = {};
+      try { data = JSON.parse(payload); } catch { data = { raw: payload }; }
+      const handler = handlers[`on${currentEvent.charAt(0).toUpperCase()}${currentEvent.slice(1)}`];
+      if (typeof handler === 'function') handler(data);
+    }
+  }
+}
+
 async function apiText(path) {
   const response = await fetch(path, { cache: 'no-store', credentials: 'include', headers: { Accept: 'text/html' } });
   const body = await response.text();
@@ -3252,11 +3300,12 @@ async function renderAiChat({ force = false } = {}) {
         pluginSummary = `<p class="ai-plugin-summary">Plugins: <strong>${Number(inventory.count) || 0}</strong>${inventory.pluginFiles?.length ? ` · ${Number(inventory.pluginFiles.length)} plugin files found` : ''}</p>`;
       } catch {}
     }
-    const steps = entry.steps?.length ? `<details class="ai-steps"><summary>Show work (${entry.steps.length} operation${entry.steps.length === 1 ? '' : 's'})</summary><div class="ai-steps-list">${entry.steps.map((step) => {
+    const steps = entry.steps?.length ? `<div class="ai-tool-calls">${entry.steps.map((step) => {
       let result = step.result;
-      try { result = JSON.stringify(JSON.parse(result), null, 2); } catch {}
-      return `<div class="ai-step"><span class="ai-step-tool">${escapeHtml(step.tool.replaceAll('_', ' '))}</span><pre class="ai-step-result">${escapeHtml(result)}</pre></div>`;
-    }).join('')}</div></details>` : '';
+      let isError = false;
+      try { const parsed = JSON.parse(result); result = JSON.stringify(parsed, null, 2); isError = parsed.error !== undefined; } catch {}
+      return `<div class="ai-tool-call"><div class="ai-tool-call-header"><span class="ai-tool-call-icon">${getToolIcon(step.tool)}</span><span class="ai-tool-call-name">${escapeHtml(step.tool.replaceAll('_', ' '))}</span><span class="ai-tool-call-status ${isError ? 'failed' : 'completed'}">${isError ? 'Failed' : 'Completed'}</span></div>${step.args ? `<div class="ai-tool-call-args">${escapeHtml(JSON.stringify(step.args, null, 2))}</div>` : ''}<div class="ai-tool-call-result ${isError ? 'error' : ''}">${escapeHtml(result)}</div></div>`;
+    }).join('')}</div>` : '';
     const images = entry.images?.length ? `<div class="ai-images">${entry.images.filter((img) => /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(img)).map((img) => `<img src="${escapeHtml(img)}" alt="Attached image" loading="lazy">`).join('')}</div>` : '';
     return `<div class="ai-row ${isUser ? 'is-user' : 'is-assistant'}"><span class="ai-avatar">${isUser ? 'You' : 'AI'}</span><div class="ai-bubble">${thinkingHtml}<div class="ai-bubble-text">${escapeHtml(content)}</div>${pluginSummary}${images}${steps}</div></div>`;
   }).join('') : '<div class="ai-empty"><p class="empty-state">Ask about this server or request a repair.</p></div>';
@@ -3518,21 +3567,26 @@ document.addEventListener('submit', async (event) => {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
       }
       
-      // Add thinking indicator
-      const thinkingRow = document.createElement('div');
-      thinkingRow.className = 'ai-row is-assistant ai-thinking-row';
-      thinkingRow.id = 'aiThinkingIndicator';
-      thinkingRow.innerHTML = `
+      // Build the live assistant row: reasoning block + tool call list + streaming text
+      const assistantRow = document.createElement('div');
+      assistantRow.className = 'ai-row is-assistant';
+      assistantRow.id = 'aiLiveRow';
+      assistantRow.innerHTML = `
         <span class="ai-avatar">AI</span>
         <div class="ai-bubble">
-          <div class="ai-thinking-indicator">
-            <div class="ai-thinking-dots"><span></span><span></span><span></span></div>
-            <span class="ai-thinking-text">Thinking…</span>
+          <div class="ai-live-status" id="aiLiveStatus">
+            <div class="ai-thinking-indicator">
+              <div class="ai-thinking-dots"><span></span><span></span><span></span></div>
+              <span class="ai-thinking-text">Thinking…</span>
+            </div>
           </div>
+          <details class="ai-thinking" id="aiLiveThinking" hidden><summary>💭 Reasoning</summary><div class="ai-thinking-content" id="aiLiveThinkingContent"></div></details>
+          <div class="ai-tool-calls" id="aiLiveToolCalls"></div>
+          <div class="ai-bubble-text" id="aiLiveText"></div>
         </div>
       `;
       if (messagesContainer) {
-        messagesContainer.appendChild(thinkingRow);
+        messagesContainer.appendChild(assistantRow);
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
       }
       
@@ -3542,84 +3596,109 @@ document.addEventListener('submit', async (event) => {
       const attachButton = form.querySelector('[data-action="ai-attach-image"]');
       if (attachButton) attachButton.disabled = true;
       
-      try {
-        const response = await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
-        
-        // Remove thinking indicator
-        const thinkingIndicator = document.querySelector('#aiThinkingIndicator');
-        if (thinkingIndicator) thinkingIndicator.remove();
-        
-        // Add AI response with tool calls
-        if (messagesContainer && response) {
-          const assistantRow = document.createElement('div');
-          assistantRow.className = 'ai-row is-assistant';
-          
-          let thinkingHtml = '';
-          if (response.thinking) {
-            thinkingHtml = `<details class="ai-thinking" open><summary>💭 Thinking</summary><div class="ai-thinking-content">${escapeHtml(response.thinking)}</div></details>`;
-          }
-          
-          let toolCallsHtml = '';
-          if (response.steps && response.steps.length > 0) {
-            toolCallsHtml = response.steps.map((step, index) => {
-              let result = step.result;
-              let isError = false;
-              try { 
-                const parsed = JSON.parse(result);
-                result = JSON.stringify(parsed, null, 2);
-                isError = parsed.error !== undefined;
-              } catch {}
-              
-              const toolName = step.tool.replaceAll('_', ' ');
-              const toolIcon = getToolIcon(step.tool);
-              
-              return `
-                <div class="ai-tool-call" data-tool-index="${index}">
-                  <div class="ai-tool-call-header">
-                    <span class="ai-tool-call-icon">${toolIcon}</span>
-                    <span class="ai-tool-call-name">${escapeHtml(toolName)}</span>
-                    <span class="ai-tool-call-status completed">${isError ? 'Failed' : 'Completed'}</span>
-                  </div>
-                  <div class="ai-tool-call-args">${escapeHtml(JSON.stringify(step.args || {}, null, 2))}</div>
-                  <div class="ai-tool-call-result ${isError ? 'error' : ''}">${escapeHtml(result)}</div>
-                </div>
-              `;
-            }).join('');
-          }
-          
-          assistantRow.innerHTML = `
-            <span class="ai-avatar">AI</span>
-            <div class="ai-bubble">
-              ${thinkingHtml}
-              <div class="ai-bubble-text">${escapeHtml(response.reply || '')}</div>
-              ${toolCallsHtml}
+      const liveStatus = assistantRow.querySelector('#aiLiveStatus');
+      const liveThinking = assistantRow.querySelector('#aiLiveThinking');
+      const liveThinkingContent = assistantRow.querySelector('#aiLiveThinkingContent');
+      const liveToolCalls = assistantRow.querySelector('#aiLiveToolCalls');
+      const liveText = assistantRow.querySelector('#aiLiveText');
+      const toolCallNodes = new Map();
+      let streamedText = '';
+      let streamedThinking = '';
+      let sawAnyEvent = false;
+      const scrollToBottom = () => { if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight; };
+      const setStatus = (label) => {
+        if (!liveStatus) return;
+        liveStatus.innerHTML = `<div class="ai-thinking-indicator"><div class="ai-thinking-dots"><span></span><span></span><span></span></div><span class="ai-thinking-text">${escapeHtml(label)}</span></div>`;
+      };
+      const hideStatus = () => { if (liveStatus) liveStatus.hidden = true; };
+      const appendThinking = (chunk) => {
+        streamedThinking += chunk;
+        if (liveThinking) liveThinking.hidden = false;
+        if (liveThinkingContent) liveThinkingContent.textContent = streamedThinking;
+        scrollToBottom();
+      };
+      const appendText = (chunk) => {
+        streamedText += chunk;
+        if (liveText) liveText.textContent = streamedText;
+        scrollToBottom();
+      };
+      const upsertToolCall = (data, running) => {
+        let node = toolCallNodes.get(data.id);
+        if (!node) {
+          node = document.createElement('div');
+          node.className = 'ai-tool-call';
+          node.innerHTML = `
+            <div class="ai-tool-call-header">
+              <span class="ai-tool-call-icon">${getToolIcon(data.tool)}</span>
+              <span class="ai-tool-call-name">${escapeHtml(String(data.tool || '').replaceAll('_', ' '))}</span>
+              <span class="ai-tool-call-status ${running ? 'running' : 'completed'}">${running ? 'Running' : 'Completed'}</span>
             </div>
+            <div class="ai-tool-call-args"></div>
+            <div class="ai-tool-call-result" hidden></div>
           `;
-          messagesContainer.appendChild(assistantRow);
-          messagesContainer.scrollTop = messagesContainer.scrollHeight;
+          toolCallNodes.set(data.id, node);
+          if (liveToolCalls) liveToolCalls.appendChild(node);
+        }
+        const status = node.querySelector('.ai-tool-call-status');
+        if (status) {
+          status.textContent = running ? 'Running' : (data.error ? 'Failed' : 'Completed');
+          status.className = `ai-tool-call-status ${running ? 'running' : (data.error ? 'failed' : 'completed')}`;
+        }
+        const argsNode = node.querySelector('.ai-tool-call-args');
+        if (argsNode && data.args) argsNode.textContent = JSON.stringify(data.args, null, 2);
+        const resultNode = node.querySelector('.ai-tool-call-result');
+        if (resultNode && !running) {
+          let result = data.result;
+          try { result = JSON.stringify(JSON.parse(result), null, 2); } catch {}
+          resultNode.hidden = false;
+          resultNode.textContent = result;
+          resultNode.classList.toggle('error', Boolean(data.error));
+        }
+        scrollToBottom();
+      };
+      
+      try {
+        await streamAiChat(`/api/ai/chat/stream`, { serverId: server.id, message, attachedImage, attachedImageName }, {
+          onStart: () => { sawAnyEvent = true; setStatus('Thinking…'); },
+          onThinking: appendThinking,
+          onText: appendText,
+          onToolStart: (data) => { sawAnyEvent = true; hideStatus(); upsertToolCall(data, true); },
+          onToolEnd: (data) => { sawAnyEvent = true; upsertToolCall(data, false); },
+          onDone: (data) => {
+            sawAnyEvent = true;
+            hideStatus();
+            if (data.thinking && !streamedThinking) appendThinking(data.thinking);
+            if (data.reply && !streamedText) appendText(data.reply);
+          },
+          onError: (data) => {
+            sawAnyEvent = true;
+            hideStatus();
+            if (liveText && !streamedText) {
+              liveText.style.color = 'var(--red)';
+              liveText.textContent = data.error || 'AI request failed.';
+            }
+          },
+        });
+        
+        if (!sawAnyEvent) {
+          // Provider or proxy did not stream: fall back to the JSON endpoint.
+          const response = await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
+          hideStatus();
+          if (response?.thinking) appendThinking(response.thinking);
+          if (response?.reply) appendText(response.reply);
+          for (const step of response?.steps || []) upsertToolCall({ id: `${step.tool}-${Math.random()}`, tool: step.tool, args: step.args, result: step.result, error: (() => { try { return Boolean(JSON.parse(step.result).error); } catch { return false; } })() }, false);
         }
         
         textarea.value = '';
         delete textarea.dataset.attachedImage;
         delete textarea.dataset.attachedImageName;
       } catch (error) {
-        // Remove thinking indicator on error
-        const thinkingIndicator = document.querySelector('#aiThinkingIndicator');
-        if (thinkingIndicator) thinkingIndicator.remove();
-        
-        // Show error in chat
-        if (messagesContainer) {
-          const errorRow = document.createElement('div');
-          errorRow.className = 'ai-row is-assistant ai-error';
-          errorRow.innerHTML = `
-            <span class="ai-avatar">AI</span>
-            <div class="ai-bubble">
-              <div class="ai-bubble-text" style="color: var(--danger);">Error: ${escapeHtml(error.message)}</div>
-            </div>
-          `;
-          messagesContainer.appendChild(errorRow);
-          messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        hideStatus();
+        if (liveText && !streamedText) {
+          liveText.style.color = 'var(--red)';
+          liveText.textContent = error.message || 'AI request failed.';
         }
+        if (error.status === 401) renderAiChat({ force: true }).catch(() => {});
         throw error;
       }
     }

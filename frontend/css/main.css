@@ -1237,6 +1237,16 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 .ai-error .ai-bubble { border-color: var(--red); background: rgba(255,105,120,.1); }
 .ai-error .ai-bubble-text { color: var(--red); }
 
+/* Live streaming row (Copilot/Codex style) */
+.ai-live-status { margin-bottom: .5rem; }
+.ai-tool-calls { display: flex; flex-direction: column; gap: .5rem; margin-bottom: .5rem; }
+.ai-tool-call-status.running { color: var(--yellow); animation: aiStatusPulse 1.2s infinite ease-in-out; }
+@keyframes aiStatusPulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.ai-tool-call-status.running::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: .35rem; border-radius: 50%; background: var(--yellow); vertical-align: middle; }
+.ai-tool-call-status.completed::before { content: '✓'; margin-right: .3rem; color: var(--green); }
+.ai-tool-call-status.failed::before { content: '✕'; margin-right: .3rem; color: var(--red); }
+.ai-bubble-text:empty { display: none; }
+
 @media (max-width: 700px) {
   #view-ai, #aiChatPanel { width: 100%; max-width: 100%; min-width: 0; }
   #aiChatPanel { padding: .7rem; overflow: hidden; }
