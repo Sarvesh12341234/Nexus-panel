@@ -4887,12 +4887,13 @@ function startRefreshLoop() {
     const fileSearchActive = state.activeView === 'files' && Boolean(fileSearchQuery.trim());
     const fileListHovered = document.querySelector('.file-list:hover, .file-row:hover');
     const fileListFocused = document.activeElement?.closest?.('.file-list, .file-row, .file-editor, .file-preview');
+    const isFilesView = state.activeView === 'files';
     if (state.activeView === 'tebex') return;
     const sectionInterval = 5000;
     const suppressSectionRefresh = ['files', 'properties', 'whitelist', 'plugins', 'databases', 'allocations', 'admins', 'settings'].includes(state.activeView);
-    // Don't auto-refresh files view at all - it causes scroll reset and is not needed
-    // Files are refreshed on user action (navigation, search, upload)
-    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !userEditingOrInteracting && !activelyScrolling && !fileSearchActive && !fileListHovered && !fileListFocused && !suppressSectionRefresh) {
+    // NEVER auto-refresh files view - it causes scroll reset and is not needed
+    // Files are refreshed ONLY on user action (navigation, search, upload, delete, etc.)
+    if (!isFilesView && now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !userEditingOrInteracting && !activelyScrolling && !fileSearchActive && !fileListHovered && !fileListFocused && !suppressSectionRefresh) {
       state.sectionRefreshAt = now;
       state.sectionRefreshInFlight = true;
       const view = state.activeView;
