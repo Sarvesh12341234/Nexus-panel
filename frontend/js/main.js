@@ -4725,6 +4725,14 @@ async function refreshServerStatusOnly() {
   if (changed) {
     renderStats();
     updateLiveServerDom();
+    // Never re-render the file manager from the status poller: a full
+    // renderFiles() rebuilds the list and resets the user's scroll position.
+    // The files view is refreshed only on explicit user actions.
+    if (state.activeView === 'files') {
+      const server = activeServer();
+      const liveNotice = document.querySelector('#fileLiveNotice');
+      if (liveNotice && server) liveNotice.hidden = server.status !== 'online';
+    }
   }
   updateSettingsLiveStatus();
 }
@@ -6940,6 +6948,11 @@ document.addEventListener('click', async (event) => {
       openFileSignature = '';
       const search = document.querySelector('#fileSearch');
       if (search) search.value = '';
+      await renderFiles();
+      return;
+    }
+    if (action === 'file-refresh') {
+      // Manual refresh: user explicitly asked, so resetting scroll is expected.
       await renderFiles();
       return;
     }
