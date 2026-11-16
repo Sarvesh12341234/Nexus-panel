@@ -3152,6 +3152,27 @@ function fileTypeLabel(entry) {
     || (entry.extension ? `${entry.extension.toUpperCase()} file` : 'Binary file');
 }
 
+function getToolIcon(toolName) {
+  const icons = {
+    'server_info': '📊',
+    'restart_server': '🔄',
+    'stop_server': '⏹️',
+    'start_server': '▶️',
+    'create_admin': '👤',
+    'manage_plugin': '🔌',
+    'plugin_inventory': '📦',
+    'list_files': '📁',
+    'read_file': '📄',
+    'write_file': '✏️',
+    'console_logs': '📋',
+    'console_command': '⌨️',
+    'terminal': '💻',
+    'panel_events': '📜',
+    'full_terminal': '🖥️',
+  };
+  return icons[toolName] || '🔧';
+}
+
 function renderFilePreview(file, server) {
   if (!elements.filePreview) return;
   const previewUrl = `/api/servers/${server.id}/files/preview?path=${encodeURIComponent(file.path)}`;
@@ -3477,16 +3498,130 @@ document.addEventListener('submit', async (event) => {
       const message = textarea.value;
       const attachedImage = textarea.dataset.attachedImage || null;
       const attachedImageName = textarea.dataset.attachedImageName || null;
+      
+      // Immediately add user message to chat UI
+      const messagesContainer = document.querySelector('#aiMessages');
+      if (messagesContainer) {
+        const emptyState = messagesContainer.querySelector('.ai-empty');
+        if (emptyState) emptyState.remove();
+        
+        const userRow = document.createElement('div');
+        userRow.className = 'ai-row is-user';
+        userRow.innerHTML = `
+          <span class="ai-avatar">You</span>
+          <div class="ai-bubble">
+            <div class="ai-bubble-text">${escapeHtml(message)}</div>
+            ${attachedImage ? `<div class="ai-images"><img src="data:image/png;base64,${attachedImage}" alt="Attached image" loading="lazy"></div>` : ''}
+          </div>
+        `;
+        messagesContainer.appendChild(userRow);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+      }
+      
+      // Add thinking indicator
+      const thinkingRow = document.createElement('div');
+      thinkingRow.className = 'ai-row is-assistant ai-thinking-row';
+      thinkingRow.id = 'aiThinkingIndicator';
+      thinkingRow.innerHTML = `
+        <span class="ai-avatar">AI</span>
+        <div class="ai-bubble">
+          <div class="ai-thinking-indicator">
+            <div class="ai-thinking-dots"><span></span><span></span><span></span></div>
+            <span class="ai-thinking-text">Thinking…</span>
+          </div>
+        </div>
+      `;
+      if (messagesContainer) {
+        messagesContainer.appendChild(thinkingRow);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+      }
+      
       if (button) button.textContent = 'Thinking…';
       form.dataset.aiPending = '1';
       textarea.readOnly = true;
       const attachButton = form.querySelector('[data-action="ai-attach-image"]');
       if (attachButton) attachButton.disabled = true;
-      await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
-      textarea.value = '';
-      delete textarea.dataset.attachedImage;
-      delete textarea.dataset.attachedImageName;
-      if (state.activeView === 'ai' && activeServer()?.id === server.id) await renderAiChat({ force: true });
+      
+      try {
+        const response = await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
+        
+        // Remove thinking indicator
+        const thinkingIndicator = document.querySelector('#aiThinkingIndicator');
+        if (thinkingIndicator) thinkingIndicator.remove();
+        
+        // Add AI response with tool calls
+        if (messagesContainer && response) {
+          const assistantRow = document.createElement('div');
+          assistantRow.className = 'ai-row is-assistant';
+          
+          let thinkingHtml = '';
+          if (response.thinking) {
+            thinkingHtml = `<details class="ai-thinking" open><summary>💭 Thinking</summary><div class="ai-thinking-content">${escapeHtml(response.thinking)}</div></details>`;
+          }
+          
+          let toolCallsHtml = '';
+          if (response.steps && response.steps.length > 0) {
+            toolCallsHtml = response.steps.map((step, index) => {
+              let result = step.result;
+              let isError = false;
+              try { 
+                const parsed = JSON.parse(result);
+                result = JSON.stringify(parsed, null, 2);
+                isError = parsed.error !== undefined;
+              } catch {}
+              
+              const toolName = step.tool.replaceAll('_', ' ');
+              const toolIcon = getToolIcon(step.tool);
+              
+              return `
+                <div class="ai-tool-call" data-tool-index="${index}">
+                  <div class="ai-tool-call-header">
+                    <span class="ai-tool-call-icon">${toolIcon}</span>
+                    <span class="ai-tool-call-name">${escapeHtml(toolName)}</span>
+                    <span class="ai-tool-call-status completed">${isError ? 'Failed' : 'Completed'}</span>
+                  </div>
+                  <div class="ai-tool-call-args">${escapeHtml(JSON.stringify(step.args || {}, null, 2))}</div>
+                  <div class="ai-tool-call-result ${isError ? 'error' : ''}">${escapeHtml(result)}</div>
+                </div>
+              `;
+            }).join('');
+          }
+          
+          assistantRow.innerHTML = `
+            <span class="ai-avatar">AI</span>
+            <div class="ai-bubble">
+              ${thinkingHtml}
+              <div class="ai-bubble-text">${escapeHtml(response.reply || '')}</div>
+              ${toolCallsHtml}
+            </div>
+          `;
+          messagesContainer.appendChild(assistantRow);
+          messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+        
+        textarea.value = '';
+        delete textarea.dataset.attachedImage;
+        delete textarea.dataset.attachedImageName;
+      } catch (error) {
+        // Remove thinking indicator on error
+        const thinkingIndicator = document.querySelector('#aiThinkingIndicator');
+        if (thinkingIndicator) thinkingIndicator.remove();
+        
+        // Show error in chat
+        if (messagesContainer) {
+          const errorRow = document.createElement('div');
+          errorRow.className = 'ai-row is-assistant ai-error';
+          errorRow.innerHTML = `
+            <span class="ai-avatar">AI</span>
+            <div class="ai-bubble">
+              <div class="ai-bubble-text" style="color: var(--danger);">Error: ${escapeHtml(error.message)}</div>
+            </div>
+          `;
+          messagesContainer.appendChild(errorRow);
+          messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+        throw error;
+      }
     }
   } catch (error) {
     showToast(error.message);
@@ -4750,10 +4885,14 @@ function startRefreshLoop() {
     const userEditingOrInteracting = document.activeElement?.matches?.('input, textarea, select, button, summary, [contenteditable="true"]');
     const activelyScrolling = now - state.lastUserScrollAt < 1800;
     const fileSearchActive = state.activeView === 'files' && Boolean(fileSearchQuery.trim());
+    const fileListHovered = document.querySelector('.file-list:hover, .file-row:hover');
+    const fileListFocused = document.activeElement?.closest?.('.file-list, .file-row, .file-editor, .file-preview');
     if (state.activeView === 'tebex') return;
     const sectionInterval = 5000;
     const suppressSectionRefresh = ['files', 'properties', 'whitelist', 'plugins', 'databases', 'allocations', 'admins', 'settings'].includes(state.activeView);
-    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !userEditingOrInteracting && !activelyScrolling && !fileSearchActive && !suppressSectionRefresh) {
+    // Don't auto-refresh files view at all - it causes scroll reset and is not needed
+    // Files are refreshed on user action (navigation, search, upload)
+    if (now - state.sectionRefreshAt >= sectionInterval && !state.sectionRefreshInFlight && !userEditingOrInteracting && !activelyScrolling && !fileSearchActive && !fileListHovered && !fileListFocused && !suppressSectionRefresh) {
       state.sectionRefreshAt = now;
       state.sectionRefreshInFlight = true;
       const view = state.activeView;

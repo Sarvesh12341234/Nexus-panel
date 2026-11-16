@@ -1208,6 +1208,35 @@ body[data-theme-mode="advanced"] button:not(.nav-item):hover {
 .ai-unlock-form label { display: flex; flex-direction: column; gap: .4rem; font-size: .85rem; color: var(--muted); }
 .ai-unlock-form input { width: 100%; min-height: 2.8rem; font-size: 1rem; }
 .ai-unlock-form button { width: 100%; min-height: 2.8rem; }
+
+/* AI Chat - Thinking Indicator & Tool Calling Styles */
+.ai-thinking-row { animation: aiFadeIn .18s ease-out; }
+.ai-thinking-indicator { display: flex; align-items: center; gap: .7rem; padding: .8rem 1rem; color: var(--cyan); }
+.ai-thinking-dots { display: flex; gap: 4px; }
+.ai-thinking-dots span { width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); animation: aiThinkingPulse 1.4s infinite ease-in-out both; }
+.ai-thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
+.ai-thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
+.ai-thinking-dots span:nth-child(3) { animation-delay: 0s; }
+@keyframes aiThinkingPulse { 0%, 80%, 100% { transform: scale(0); opacity: 0.5; } 40% { transform: scale(1); opacity: 1; } }
+.ai-thinking-text { font-weight: 500; font-size: .9rem; }
+
+/* Tool calling visualization - like GitHub Copilot/Codex */
+.ai-tool-call { margin-top: .6rem; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.15); overflow: hidden; animation: aiSlideDown .2s ease-out; }
+@keyframes aiSlideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+.ai-tool-call-header { display: flex; align-items: center; gap: .6rem; padding: .5rem .8rem; background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.ai-tool-call-icon { width: 20px; height: 20px; border-radius: 6px; background: rgba(94,216,255,.15); display: grid; place-items: center; color: var(--cyan); font-size: .85rem; }
+.ai-tool-call-name { font-weight: 600; font-size: .85rem; color: var(--text); }
+.ai-tool-call-status { margin-left: auto; font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.ai-tool-call-status.running { color: var(--yellow); }
+.ai-tool-call-status.completed { color: var(--green); }
+.ai-tool-call-status.failed { color: var(--red); }
+.ai-tool-call-args { padding: .6rem .8rem; font-family: "Cascadia Code", Consolas, monospace; font-size: .75rem; line-height: 1.4; color: var(--muted); max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-tool-call-result { padding: .6rem .8rem; border-top: 1px solid var(--line); font-family: "Cascadia Code", Consolas, monospace; font-size: .75rem; line-height: 1.4; color: var(--text); max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: rgba(0,0,0,.2); }
+.ai-tool-call-result.error { color: var(--red); background: rgba(255,105,120,.1); }
+
+.ai-error .ai-bubble { border-color: var(--red); background: rgba(255,105,120,.1); }
+.ai-error .ai-bubble-text { color: var(--red); }
+
 @media (max-width: 700px) {
   #view-ai, #aiChatPanel { width: 100%; max-width: 100%; min-width: 0; }
   #aiChatPanel { padding: .7rem; overflow: hidden; }
