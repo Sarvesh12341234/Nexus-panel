@@ -1370,59 +1370,6 @@ function invalidateApiCache(prefix = '') {
  * Consume a Server-Sent Events endpoint and dispatch named events to callbacks.
  * Used by the AI chat so reasoning, tool calls and text stream in live.
  */
-async function streamAiChat(path, body, handlers = {}) {
-  const response = await fetch(path, {
-    method: 'POST',
-    cache: 'no-store',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', 'X-NexusPanel-Request': '1' },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok || !response.body) {
-    let message = `Request failed (${response.status}).`;
-    try {
-      const data = await response.json();
-      if (typeof data?.error === 'string' && data.error.trim()) message = data.error.trim().slice(0, 300);
-    } catch {}
-    const error = new Error(message);
-    error.status = response.status;
-    throw error;
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let currentEvent = 'message';
-  let sawAnyEvent = false;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newlineIndex;
-    while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, newlineIndex).replace(/\r$/, '');
-      buffer = buffer.slice(newlineIndex + 1);
-      if (!line) continue;
-      if (line.startsWith(':')) continue; // heartbeat comment
-      if (line.startsWith('event:')) { currentEvent = line.slice(6).trim(); continue; }
-      if (!line.startsWith('data:')) continue;
-      const payload = line.slice(5).trim();
-      if (!payload) continue;
-      let data = {};
-      try { data = JSON.parse(payload); } catch { data = { raw: payload }; }
-      sawAnyEvent = true;
-      const handler = handlers[`on${currentEvent.charAt(0).toUpperCase()}${currentEvent.slice(1)}`];
-      if (typeof handler === 'function') handler(data);
-    }
-  }
-  // A stream that produced no events at all (proxy buffering, provider hiccup)
-  // must not leave the UI stuck on "Thinking…" forever.
-  if (!sawAnyEvent) {
-    const error = new Error('NO_STREAM_EVENTS');
-    error.code = 'no-stream-events';
-    throw error;
-  }
-}
-
 async function apiText(path) {
   const response = await fetch(path, { cache: 'no-store', credentials: 'include', headers: { Accept: 'text/html' } });
   const body = await response.text();
@@ -3580,9 +3527,6 @@ document.addEventListener('submit', async (event) => {
       const liveToolCalls = assistantRow.querySelector('#aiLiveToolCalls');
       const liveText = assistantRow.querySelector('#aiLiveText');
       const toolCallNodes = new Map();
-      let streamedText = '';
-      let streamedThinking = '';
-      let sawAnyEvent = false;
       const scrollToBottom = () => { if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight; };
       const setStatus = (label) => {
         if (!liveStatus) return;
@@ -3636,41 +3580,14 @@ document.addEventListener('submit', async (event) => {
       };
       
       try {
-        try {
-          await streamAiChat(`/api/ai/chat/stream`, { serverId: server.id, message, attachedImage, attachedImageName }, {
-            onStart: () => { sawAnyEvent = true; setStatus('Thinking…'); },
-            onThinking: appendThinking,
-            onText: appendText,
-            onToolStart: (data) => { sawAnyEvent = true; hideStatus(); upsertToolCall(data, true); },
-            onToolEnd: (data) => { sawAnyEvent = true; upsertToolCall(data, false); },
-            onDone: (data) => {
-              sawAnyEvent = true;
-              hideStatus();
-              if (data.thinking && !streamedThinking) appendThinking(data.thinking);
-              if (data.reply && !streamedText) appendText(data.reply);
-            },
-            onError: (data) => {
-              sawAnyEvent = true;
-              hideStatus();
-              if (liveText && !streamedText) {
-                liveText.style.color = 'var(--red)';
-                liveText.textContent = data.error || 'AI request failed.';
-              }
-            },
-          });
-        } catch (streamError) {
-          // Streaming unavailable (proxy buffering, provider hiccup, or a 409
-          // from a stale in-flight request): fall back to the JSON endpoint.
-          // Give the backend a moment to release session.busy (set in the
-          // stream handler's finally block) so the JSON endpoint isn't 409'd.
-          if (streamError?.status === 401) throw streamError;
-          await new Promise((r) => setTimeout(r, 300));
-          const response = await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
-          hideStatus();
-          if (response?.thinking) appendThinking(response.thinking);
-          if (response?.reply) appendText(response.reply);
-          for (const step of response?.steps || []) upsertToolCall({ id: `${step.tool}-${Math.random()}`, tool: step.tool, args: step.args, result: step.result, error: (() => { try { return Boolean(JSON.parse(step.result).error); } catch { return false; } })() }, false);
-        }
+        // Use the JSON endpoint (reliable, worked before streaming was added).
+        // The response includes reply, thinking, and steps — we render them
+        // into the live UI row below (thinking block, tool call cards, text).
+        const response = await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
+        hideStatus();
+        if (response?.thinking) appendThinking(response.thinking);
+        if (response?.reply) appendText(response.reply);
+        for (const step of response?.steps || []) upsertToolCall({ id: `${step.tool}-${Math.random()}`, tool: step.tool, args: step.args, result: step.result, error: (() => { try { return Boolean(JSON.parse(step.result).error); } catch { return false; } })() }, false);
         
         textarea.value = '';
         delete textarea.dataset.attachedImage;
