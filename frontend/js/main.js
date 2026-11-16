@@ -3544,6 +3544,7 @@ document.addEventListener('submit', async (event) => {
         if (liveText) liveText.textContent = streamedText;
         scrollToBottom();
       };
+      let streamedText = '';
       const upsertToolCall = (data, running) => {
         let node = toolCallNodes.get(data.id);
         if (!node) {
