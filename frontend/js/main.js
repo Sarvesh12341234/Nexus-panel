@@ -3661,7 +3661,10 @@ document.addEventListener('submit', async (event) => {
         } catch (streamError) {
           // Streaming unavailable (proxy buffering, provider hiccup, or a 409
           // from a stale in-flight request): fall back to the JSON endpoint.
+          // Give the backend a moment to release session.busy (set in the
+          // stream handler's finally block) so the JSON endpoint isn't 409'd.
           if (streamError?.status === 401) throw streamError;
+          await new Promise((r) => setTimeout(r, 300));
           const response = await api('/api/ai/chat', { method: 'POST', timeoutMs: 300000, body: JSON.stringify({ serverId: server.id, message, attachedImage, attachedImageName }) });
           hideStatus();
           if (response?.thinking) appendThinking(response.thinking);
